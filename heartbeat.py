@@ -562,7 +562,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"把「{lamp['name']}」打开照明",
                     "drive": "comfort",
-                    "thought": "屋里暗下来了，先把灯打开亮堂一点吧。",
+                    "thought": "屋里暗了，先把灯打开。",
                     "emotion": "平静",
                     "target_id": lamp["entity_id"],
                     "actions": [{"tool": "world_act", "entity_id": lamp["entity_id"], "action": "turn_on"}],
@@ -613,7 +613,7 @@ class WorldHeartbeat:
                 return {
                     "goal": "睡饱了，起来四处看看",
                     "drive": "rest",
-                    "thought": "嗯……这一觉睡得好舒服，精神恢复过来啦。",
+                    "thought": "睡了一觉，精神好多了。",
                     "emotion": "开心",
                     "target_id": rid,
                     "actions": [{"tool": "world_act", "entity_id": rid, "action": "leave_rest"}],
@@ -685,7 +685,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"用「{key_ent['name']}」打开「{locked_box['name']}」",
                     "drive": "curiosity",
-                    "thought": f"诶，那把{key_ent['name']}刚好配得上「{locked_box['name']}」，去看看里面装了什么！",
+                    "thought": f"用「{key_ent['name']}」打开「{locked_box['name']}」看看。",
                     "emotion": "好奇",
                     "target_id": locked_box["entity_id"],
                     "actions": seq,
@@ -716,7 +716,7 @@ class WorldHeartbeat:
             return {
                 "goal": f"{verb}「{food_name}」",
                 "drive": "hunger",
-                "thought": f"正好{verb}点「{food_name}」。",
+                "thought": f"{verb}点「{food_name}」。",
                 "emotion": "开心",
                 "target_id": picked_food["entity_id"],
                 "actions": [{"tool": "world_act", "entity_id": picked_food["entity_id"], "action": "consume"}],
@@ -738,7 +738,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"打开「{closed_box['name']}」翻找点心",
                     "drive": "hunger",
-                    "thought": f"肚子有点饿了，去看看「{closed_box['name']}」里有没有吃的。",
+                    "thought": f"看看「{closed_box['name']}」里有没有吃的。",
                     "emotion": "好奇",
                     "target_id": closed_box["entity_id"],
                     "actions": [{"tool": "world_act", "entity_id": closed_box["entity_id"], "action": "open"}],
@@ -817,7 +817,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"玩/用「{best_ent['name']}」",
                     "drive": dom,
-                    "thought": thought_map.get(dom, f"去摆弄一下「{best_ent['name']}」吧。"),
+                    "thought": thought_map.get(dom, f"去看看「{best_ent['name']}」。"),
                     "emotion": emo,
                     "target_id": best_ent["entity_id"],
                     "actions": [{"tool": "world_act", "entity_id": best_ent["entity_id"], "action": "interact"}],
@@ -861,7 +861,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"天亮了，关掉「{day_lamp['name']}」",
                     "drive": "order",
-                    "thought": "白天屋里够亮啦，先把灯关了省点电。",
+                    "thought": "天亮了，先把灯关掉。",
                     "emotion": "平静",
                     "target_id": day_lamp["entity_id"],
                     "actions": [{"tool": "world_act", "entity_id": day_lamp["entity_id"], "action": "turn_off"}],
@@ -902,7 +902,7 @@ class WorldHeartbeat:
             return {
                 "goal": f"推开「{portal['name']}」去那边逛逛",
                 "drive": "explore",
-                "thought": "突然想推开门看看另一个空间是什么样子。",
+                "thought": "推开门看看那边有什么。",
                 "emotion": "好奇",
                 "target_id": portal["entity_id"],
                 "actions": [{"tool": "world_act", "entity_id": portal["entity_id"], "action": "enter"}],
@@ -918,7 +918,7 @@ class WorldHeartbeat:
                 return {
                     "goal": f"走近看看「{near_ent['name']}」",
                     "drive": "curiosity",
-                    "thought": f"去看看那边的「{near_ent['name']}」吧。",
+                    "thought": f"去看看「{near_ent['name']}」。",
                     "emotion": "好奇",
                     "target_id": near_ent["entity_id"],
                     "actions": seq_move,
@@ -927,7 +927,7 @@ class WorldHeartbeat:
             return {
                 "goal": f"去 ({tx}, {ty}) 附近走走散心",
                 "drive": "curiosity",
-                "thought": "稍微站起来活动一下，换个角落发会儿呆也不错。",
+                "thought": "换个地方走走。",
                 "emotion": "平静",
                 "target_id": f"cell:{tx},{ty}",
                 "actions": seq_move,
