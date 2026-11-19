@@ -27,6 +27,7 @@ from . import persona_bridge
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
+    MAP_STYLES,
     MAX_BRIEF_CHARS,
     MAX_DETAIL_CHARS,
     MAX_SPACE_HEIGHT,
@@ -39,7 +40,9 @@ from .schema import (
     clamp_float,
     clamp_int,
     clip_text,
+    infer_consumable_names,
     normalize_actor,
+    normalize_appearance,
     normalize_autonomy,
     normalize_blueprint,
     normalize_combine_rules,
@@ -458,9 +461,18 @@ class WorldEngine:
             active_sid = next(iter(spaces))
 
         actors: dict[str, dict[str, Any]] = {}
+        host_map: dict[str, dict[str, Any]] | None = None
         for aid, act in (raw.get("actors") or {}).items():
             if isinstance(act, Mapping):
                 norm_a = normalize_actor(act)
+                if not isinstance(act.get("appearance"), Mapping):
+                    from . import text_compiler
+                    if host_map is None:
+                        host_map = {str(h.get("name") or ""): h for h in self.list_host_characters()}
+                    h_name = str(norm_a.get("host_character") or norm_a.get("name") or "")
+                    h_info = host_map.get(h_name) or {}
+                    desc = (str(h_info.get("brief") or "") + "。" + str(h_info.get("setting") or "")).strip("。")
+                    norm_a["appearance"] = text_compiler.compile_actor_appearance(h_name, desc, use_llm=False)["appearance"]
                 if norm_a["space_id"] not in spaces:
                     norm_a["space_id"] = active_sid
                 actors[str(aid)] = norm_a
@@ -1858,6 +1870,8 @@ class WorldEngine:
         x: int | None = None,
         y: int | None = None,
         sprite: Mapping[str, Any] | None = None,
+        appearance: Mapping[str, Any] | None = None,
+        map_style: str = "",
     ) -> dict[str, Any]:
         with self._lock:
             clean_name = clip_text(name or host_character, 20, "七海千秋")
@@ -1890,10 +1904,15 @@ class WorldEngine:
                 if existing.get("space_id") != space_id or x is not None or y is not None:
                     self._clear_actor_rest_locked(existing)
                     self._switch_actor_world_state_locked(existing, space_id)
+                    self._record_teleport_locked(existing)
                     existing["x"] = tx
                     existing["y"] = ty
                 if resolved_sprite:
                     existing["sprite"] = normalize_actor({"name": clean_name, "sprite": resolved_sprite})["sprite"]
+                if appearance:
+                    existing["appearance"] = normalize_appearance(appearance, seed=str(existing.get("host_character") or clean_name))
+                if map_style in MAP_STYLES:
+                    existing["map_style"] = map_style
                 actor = existing
             else:
                 actor = normalize_actor({
@@ -1903,6 +1922,8 @@ class WorldEngine:
                     "space_id": space_id,
                     "x": tx,
                     "y": ty,
+                    "appearance": dict(appearance) if appearance else None,
+                    "map_style": map_style or "doll",
                     "sprite": resolved_sprite if resolved_sprite else {
                         "mode": "pixel_grid",
                         "w": 16,
@@ -1957,10 +1978,41 @@ class WorldEngine:
                 raise ValueError(f"坐标 ({x}, {y}) 不可落脚（墙面或被实心家具占用）。")
             self._clear_actor_rest_locked(actor)
             self._switch_actor_world_state_locked(actor, space_id)
+            self._record_teleport_locked(actor)
             actor["x"] = int(x)
             actor["y"] = int(y)
             self._refresh_actor_expression_locked(actor, action_kind="move")
             self._append_event_locked("actor_moved", actor_id=actor_id, space_id=space_id, payload={"x": int(x), "y": int(y), "by": "user"})
+            self._save_world_locked()
+            return copy.deepcopy(actor)
+
+    def set_actor_appearance(
+        self,
+        actor_id: str,
+        *,
+        appearance: Mapping[str, Any] | None = None,
+        map_style: str = "",
+    ) -> dict[str, Any]:
+        """保存角色的 Q 版像素小人外观参数与地图呈现风格（doll / portrait）。"""
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            if not actor:
+                raise ValueError(f"角色不存在：{actor_id}")
+            if appearance is not None:
+                actor["appearance"] = normalize_appearance(
+                    appearance,
+                    seed=str(actor.get("host_character") or actor.get("name") or ""),
+                )
+            if map_style:
+                if map_style not in MAP_STYLES:
+                    raise ValueError("map_style 只能是 doll 或 portrait。")
+                actor["map_style"] = map_style
+            self._append_event_locked(
+                "actor_appearance_changed",
+                actor_id=actor_id,
+                space_id=actor["space_id"],
+                payload={"map_style": actor["map_style"], "hair_style": actor["appearance"]["hair_style"]},
+            )
             self._save_world_locked()
             return copy.deepcopy(actor)
 
@@ -2447,7 +2499,12 @@ class WorldEngine:
                 parts.append("开着" if ct.get("is_open") else "合着")
         if "restable" in traits:
             occ = traits["restable"].get("occupied_by")
-            parts.append("有人休息中" if occ else "空着")
+            if occ:
+                occ_act = (self._world.get("actors") or {}).get(str(occ))
+                occ_name = str(occ_act.get("name") or "").strip() if isinstance(occ_act, Mapping) else ""
+                parts.append(f"{occ_name}在上面睡觉" if occ_name else "有人在上面睡觉")
+            else:
+                parts.append("空着")
         if "activity" in traits:
             ac = traits["activity"]
             if ac.get("battery") is not None:
@@ -2544,6 +2601,55 @@ class WorldEngine:
         actor["resting_on_id"] = None
         actor["posture"] = "standing"
 
+    # ── 小人动画元数据：走位路径 / 朝向 / 最近一次交互动作 ───────────────
+    @staticmethod
+    def _facing_from_delta(dx: int, dy: int, fallback: str = "down") -> str:
+        if dx == 0 and dy == 0:
+            return fallback
+        if abs(dx) >= abs(dy):
+            return "right" if dx > 0 else "left"
+        return "down" if dy > 0 else "up"
+
+    def _record_move_locked(self, actor: dict[str, Any], path: Sequence[tuple[int, int]] | None) -> None:
+        cells = [[int(c[0]), int(c[1])] for c in (path or [])][-96:]
+        actor["last_path"] = cells
+        actor["move_seq"] = int(actor.get("move_seq") or 0) + 1
+        if len(cells) >= 2:
+            actor["facing"] = self._facing_from_delta(
+                cells[-1][0] - cells[-2][0],
+                cells[-1][1] - cells[-2][1],
+                str(actor.get("facing") or "down"),
+            )
+
+    def _record_teleport_locked(self, actor: dict[str, Any]) -> None:
+        actor["last_path"] = []
+        actor["move_seq"] = int(actor.get("move_seq") or 0) + 1
+
+    def _face_entity_locked(self, actor: dict[str, Any], entity: Mapping[str, Any]) -> None:
+        cells = self._entity_cells(entity)
+        if not cells:
+            return
+        ax, ay = int(actor.get("x") or 0), int(actor.get("y") or 0)
+        best = min(cells, key=lambda c: abs(c[0] - ax) + abs(c[1] - ay))
+        if int(best[0]) == ax and int(best[1]) == ay:
+            return
+        actor["facing"] = self._facing_from_delta(
+            int(best[0]) - ax,
+            int(best[1]) - ay,
+            str(actor.get("facing") or "down"),
+        )
+
+    def _record_act_locked(self, actor: dict[str, Any], verb: str, entity: Mapping[str, Any] | None) -> None:
+        prev = actor.get("last_act") if isinstance(actor.get("last_act"), dict) else {}
+        actor["last_act"] = {
+            "seq": int(prev.get("seq") or 0) + 1,
+            "verb": str(verb or ""),
+            "entity_id": str((entity or {}).get("entity_id") or ""),
+            "ts": round(time.time(), 3),
+        }
+        if entity is not None:
+            self._face_entity_locked(actor, entity)
+
     def _apply_effects_locked(self, actor: dict[str, Any], entity: Mapping[str, Any]) -> None:
         eff = entity.get("effects") or {}
         vit = actor["vitals"]
@@ -2634,8 +2740,11 @@ class WorldEngine:
             return False, f"通往「{entity['name']}」的路被挡住了，过不去。"
         self._clear_actor_rest_locked(actor)
         dest_x, dest_y = path[-1]
+        self._record_move_locked(actor, path)
         actor["x"] = dest_x
         actor["y"] = dest_y
+        if not allow_inside_entity:
+            self._face_entity_locked(actor, entity)
         self._append_event_locked("actor_moved", actor_id=aid, space_id=sid, payload={"x": dest_x, "y": dest_y, "reason": f"approach:{entity['entity_id']}"})
         return True, "你走过去，"
 
@@ -2659,6 +2768,7 @@ class WorldEngine:
             if not path:
                 return f"去 ({tx}, {ty}) 的路被家具挡住了，过不去。"
             self._clear_actor_rest_locked(actor)
+            self._record_move_locked(actor, path)
             actor["x"] = tx
             actor["y"] = ty
             self._refresh_actor_expression_locked(actor, action_kind="move")
@@ -2691,6 +2801,7 @@ class WorldEngine:
 
             traits = ent["traits"]
             sid = actor["space_id"]
+            self._record_act_locked(actor, canon, ent)
 
             if canon == "look":
                 ok, prefix = self._walk_to_entity_locked(actor, ent) if self.chebyshev_distance(actor, ent) > 2 else (True, "")
@@ -2849,6 +2960,9 @@ class WorldEngine:
                 if not ok:
                     return prefix
                 cm = traits["consumable"]
+                full_name, empty_name = infer_consumable_names(ent["name"], str(cm.get("empty_name") or ""))
+                if not cm.get("empty_name") and empty_name != full_name:
+                    cm["empty_name"] = empty_name
                 cm["uses_left"] = max(0, int(cm["uses_left"]) - 1)
                 self._apply_effects_locked(actor, ent)
                 verb = cm.get("consume_verb") or "使用"
@@ -2860,14 +2974,18 @@ class WorldEngine:
                     self._refresh_actor_expression_locked(actor, action_kind="consume")
                     self._append_event_locked("entity_consumed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "verb": verb, "uses_left": 0, "vanished": True})
                     self._save_world_locked()
-                    return f"{prefix}把「{ent['name']}」{verb}光了，现在彻底没了。"
+                    return f"{prefix}把「{full_name}」{verb}光了，现在彻底没了。"
                 if left == 0:
-                    ent["brief"] = clip_text(cm.get("empty_brief"), MAX_BRIEF_CHARS, f"空掉的{ent['name']}")
+                    if empty_name:
+                        ent["name"] = empty_name
+                    ent["brief"] = clip_text(cm.get("empty_brief"), MAX_BRIEF_CHARS, f"空掉的{empty_name or ent['name']}")
+                elif full_name and ent["name"] != full_name:
+                    ent["name"] = full_name
                 ent["traces"].append({"ts": time.time(), "text": f"{actor['name']}{verb}了一次"})
                 self._refresh_actor_expression_locked(actor, action_kind="consume")
                 self._append_event_locked("entity_consumed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "verb": verb, "uses_left": left})
                 self._save_world_locked()
-                return f"{prefix}对着「{ent['name']}」{verb}了一次，" + (f"还剩 {left} 次。" if left > 0 else "已经空了。")
+                return f"{prefix}{verb}了「{full_name}」，" + (f"还剩 {left} 次。" if left > 0 else "已经空了。")
 
             if canon in ("turn_on", "turn_off"):
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
@@ -2882,6 +3000,12 @@ class WorldEngine:
                 return f"{prefix}{label}「{ent['name']}」。"
 
             if canon == "rest":
+                occ = traits["restable"].get("occupied_by")
+                if occ and occ != actor_id:
+                    occ_act = (self._world.get("actors") or {}).get(str(occ))
+                    if isinstance(occ_act, Mapping) and occ_act.get("posture") == "resting" and occ_act.get("resting_on_id") == eid:
+                        occ_name = str(occ_act.get("name") or "别人").strip()
+                        return f"「{ent['name']}」上已经有{occ_name}在睡觉了，挤不下啦。"
                 ok, prefix = self._walk_to_entity_locked(actor, ent, allow_inside_entity=True)
                 if not ok:
                     return prefix
@@ -2955,6 +3079,7 @@ class WorldEngine:
                     ignore_actor_id=actor_id,
                 )
                 self._switch_actor_world_state_locked(actor, target_sid)
+                self._record_teleport_locked(actor)
                 actor["x"] = tx
                 actor["y"] = ty
                 self._refresh_actor_expression_locked(actor)
@@ -2993,6 +3118,7 @@ class WorldEngine:
             ok, prefix = self._walk_to_entity_locked(actor, ent)
             if not ok:
                 return prefix
+            self._record_act_locked(actor, "write", ent)
             entries = ins.setdefault("entries", [])
             max_entries = int(ins.get("max_entries") or 12)
             if len(entries) >= max_entries:

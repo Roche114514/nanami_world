@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 PLUGIN_ID = "community.nanami.world"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.1"
 PLUGIN_NAME = "七海千秋 · 文字世界"
 PLUGIN_AUTHOR = "Roche114514"
 PLUGIN_DESCRIPTION = (

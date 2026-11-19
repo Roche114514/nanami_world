@@ -387,6 +387,20 @@ def normalize_slot_colors(raw: Mapping[str, Any] | None, *, fallback: Mapping[st
     return base
 
 
+_CONTAINER_SUFFIXES = ("碗", "杯", "盘", "碟", "壶", "瓶", "罐", "盒", "桶", "盅")
+
+
+def infer_consumable_names(name: str, empty_name: str = "") -> tuple[str, str]:
+    """根据容器后缀区分「没吃完时的食物名」与「吃完后的空容器名」（如 豚骨拉面碗 -> 豚骨拉面 / 拉面碗）。"""
+    clean = str(name or "").strip()
+    explicit_empty = str(empty_name or "").strip()[:MAX_NAME_CHARS]
+    if len(clean) >= 3 and clean.endswith(_CONTAINER_SUFFIXES) and not clean.startswith("空"):
+        full_name = clean[:-1]
+        inferred_empty = explicit_empty or (clean[-3:] if len(clean) >= 4 else clean)
+        return full_name, inferred_empty
+    return clean, (explicit_empty or clean)
+
+
 def normalize_footprint(raw: Any) -> list[int]:
     if isinstance(raw, (list, tuple)) and len(raw) >= 2:
         w = clamp_int(raw[0], 1, 4, 1)
@@ -427,6 +441,7 @@ def normalize_traits(raw: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]
             "uses_left": uses_left,
             "consume_verb": clip_text(cm.get("consume_verb"), 8, "使用"),
             "on_empty": "vanish" if on_empty == "vanish" else "keep_empty",
+            "empty_name": clip_text(cm.get("empty_name"), MAX_NAME_CHARS, ""),
             "empty_brief": clip_text(cm.get("empty_brief"), MAX_BRIEF_CHARS, "已经空了"),
         }
 
@@ -749,6 +764,177 @@ def normalize_world_states(
     return out
 
 
+APPEARANCE_HAIR_STYLES = ("spiky", "long", "bob", "twin", "ponytail", "short")
+APPEARANCE_OUTFITS = ("jacket", "hoodie", "dress", "uniform")
+APPEARANCE_ACCESSORIES = ("none", "bow", "glasses", "ears", "headband")
+APPEARANCE_FACINGS = ("down", "up", "left", "right")
+MAP_STYLES = ("doll", "portrait")
+
+_APPEARANCE_COLOR_KEYS = (
+    "hair_color",
+    "hair_shade",
+    "skin",
+    "eye_color",
+    "outfit_color",
+    "outfit_accent",
+    "outfit_inner",
+    "legs_color",
+    "shoes_color",
+    "accessory_color",
+)
+
+_APPEARANCE_PALETTES: tuple[dict[str, str], ...] = (
+    {"hair_color": "#f2f0f0", "hair_shade": "#f2c6d0", "outfit_color": "#4f6b3c", "outfit_accent": "#d83a34", "outfit_inner": "#f4f4f4", "legs_color": "#3b4a2f", "shoes_color": "#9a9aa0"},
+    {"hair_color": "#f3e2cc", "hair_shade": "#e4c8a8", "outfit_color": "#2f5266", "outfit_accent": "#d94a4a", "outfit_inner": "#f6efe4", "legs_color": "#2a4254", "shoes_color": "#d9503f"},
+    {"hair_color": "#3a3144", "hair_shade": "#58496a", "outfit_color": "#6b3f5e", "outfit_accent": "#f2b8c8", "outfit_inner": "#f4f0f0", "legs_color": "#3a2c3c", "shoes_color": "#2d2733"},
+    {"hair_color": "#d98a4a", "hair_shade": "#f0b878", "outfit_color": "#d6c36a", "outfit_accent": "#8a5a2b", "outfit_inner": "#fff7e2", "legs_color": "#5b4a3a", "shoes_color": "#6d4a32"},
+    {"hair_color": "#5e86c4", "hair_shade": "#9bbcea", "outfit_color": "#e8e6ee", "outfit_accent": "#5e86c4", "outfit_inner": "#ffffff", "legs_color": "#39455f", "shoes_color": "#d0d4e0"},
+    {"hair_color": "#c85a78", "hair_shade": "#f08aa0", "outfit_color": "#f0b6c6", "outfit_accent": "#a63a58", "outfit_inner": "#fff2f5", "legs_color": "#5a3a4a", "shoes_color": "#a63a58"},
+    {"hair_color": "#2f2a2e", "hair_shade": "#4b4348", "outfit_color": "#2c3e5a", "outfit_accent": "#d4b04a", "outfit_inner": "#f2f2f2", "legs_color": "#23304a", "shoes_color": "#1c1c20"},
+)
+
+
+def _hex_color(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return text.lower()
+    return fallback
+
+
+def default_appearance(seed: str = "") -> dict[str, Any]:
+    """按名字确定性生成一套 Q 版像素小人外观参数（同名永远同形象）。"""
+    digest = 0
+    for ch in str(seed or "角色"):
+        digest = (digest * 131 + ord(ch)) & 0xFFFFFFFF
+    pal = _APPEARANCE_PALETTES[digest % len(_APPEARANCE_PALETTES)]
+    hair_style = APPEARANCE_HAIR_STYLES[(digest >> 3) % len(APPEARANCE_HAIR_STYLES)]
+    outfit = APPEARANCE_OUTFITS[(digest >> 7) % len(APPEARANCE_OUTFITS)]
+    skin = ("#fde8d8", "#f6d9c4", "#f3cfb3")[(digest >> 11) % 3]
+    return {
+        "hair_style": hair_style,
+        "hair_color": pal["hair_color"],
+        "hair_shade": pal["hair_shade"],
+        "skin": skin,
+        "eye_color": "#2a2630",
+        "outfit_style": outfit,
+        "outfit_color": pal["outfit_color"],
+        "outfit_accent": pal["outfit_accent"],
+        "outfit_inner": pal["outfit_inner"],
+        "legs_color": pal["legs_color"],
+        "shoes_color": pal["shoes_color"],
+        "accessory": "none",
+        "accessory_color": pal["outfit_accent"],
+        "custom_frames": {},
+    }
+
+
+def _normalize_custom_frame(raw_rows: Any, width: int = 23, height: int = 32) -> list[str]:
+    if not isinstance(raw_rows, Sequence) or isinstance(raw_rows, (str, bytes)):
+        return []
+    rows_in = [str(r or "") for r in raw_rows][:height]
+    out: list[str] = []
+    non_empty = 0
+    for y in range(height):
+        src = rows_in[y] if y < len(rows_in) else ""
+        chars: list[str] = []
+        for x in range(width):
+            ch = src[x] if x < len(src) else "."
+            if ch in (".", " ", "_"):
+                chars.append(".")
+            elif ch.isalnum() and ch.isascii():
+                chars.append(ch)
+                non_empty += 1
+            else:
+                chars.append(".")
+        out.append("".join(chars))
+    return out if non_empty >= 12 else []
+
+
+def normalize_custom_frames(raw: Any) -> dict[str, Any]:
+    """规范化自定义像素小人帧（支持任意 12x16 ~ 64x64 尺寸，包含 down / up / right + palette）。"""
+    if not isinstance(raw, Mapping):
+        return {}
+    raw_down = raw.get("down")
+    if not isinstance(raw_down, Sequence) or isinstance(raw_down, (str, bytes)) or not raw_down:
+        return {}
+    in_h = len(raw_down)
+    in_w = max((len(str(r or "")) for r in raw_down), default=16)
+    w = clamp_int(raw.get("w") or in_w, 12, 64, 23)
+    h = clamp_int(raw.get("h") or in_h, 16, 64, 32)
+    down = _normalize_custom_frame(raw_down, w, h)
+    if not down:
+        return {}
+    out: dict[str, Any] = {"w": w, "h": h, "down": down}
+    for key in ("up", "right"):
+        frame = _normalize_custom_frame(raw.get(key), w, h)
+        if frame:
+            out[key] = frame
+    raw_pal = raw.get("palette") if isinstance(raw.get("palette"), Mapping) else {}
+    pal: dict[str, str] = {}
+    for k, v in raw_pal.items():
+        ks = str(k or "").strip()
+        if len(ks) == 1 and ks.isalnum() and ks.isascii():
+            hx = _hex_color(v, "")
+            if hx:
+                pal[ks] = hx
+    out["palette"] = pal
+    return out
+
+
+def normalize_appearance(raw: Any, seed: str = "") -> dict[str, Any]:
+    """规范化 Q 版小人外观参数：枚举越界回退，颜色必须是 #rrggbb。"""
+    base = default_appearance(seed)
+    if not isinstance(raw, Mapping):
+        return base
+    out = dict(base)
+    hs = str(raw.get("hair_style") or "").strip().lower()
+    if hs in APPEARANCE_HAIR_STYLES:
+        out["hair_style"] = hs
+    os_ = str(raw.get("outfit_style") or "").strip().lower()
+    if os_ in APPEARANCE_OUTFITS:
+        out["outfit_style"] = os_
+    acc = str(raw.get("accessory") or "").strip().lower()
+    if acc in APPEARANCE_ACCESSORIES:
+        out["accessory"] = acc
+    for key in _APPEARANCE_COLOR_KEYS:
+        out[key] = _hex_color(raw.get(key), base[key])
+    out["custom_frames"] = normalize_custom_frames(raw.get("custom_frames"))
+    return out
+
+
+def normalize_last_path(raw: Any, limit: int = 96) -> list[list[int]]:
+    cells: list[list[int]] = []
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for item in raw:
+            if isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) >= 2:
+                try:
+                    cells.append([int(item[0]), int(item[1])])
+                except (TypeError, ValueError):
+                    continue
+            if len(cells) >= limit:
+                break
+    return cells
+
+
+def normalize_last_act(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {"seq": 0, "verb": "", "entity_id": "", "ts": 0.0}
+    try:
+        seq = int(raw.get("seq") or 0)
+    except (TypeError, ValueError):
+        seq = 0
+    try:
+        ts = float(raw.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    return {
+        "seq": max(0, seq),
+        "verb": clip_text(raw.get("verb"), 24, ""),
+        "entity_id": clip_text(raw.get("entity_id"), 80, ""),
+        "ts": ts,
+    }
+
+
 def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     name = clip_text(raw.get("name"), 20, "七海千秋")
     aid = str(raw.get("actor_id") or "").strip() or slugify(name, prefix="actor")
@@ -788,7 +974,12 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         "space_id": cur_sid,
         "x": clamp_int(raw.get("x"), 0, MAX_SPACE_WIDTH - 1, 5),
         "y": clamp_int(raw.get("y"), 0, MAX_SPACE_HEIGHT - 1, 4),
-        "facing": str(raw.get("facing") or "down").strip(),
+        "facing": (lambda f: f if f in APPEARANCE_FACINGS else "down")(str(raw.get("facing") or "down").strip().lower()),
+        "appearance": normalize_appearance(raw.get("appearance"), seed=str(raw.get("host_character") or name)),
+        "map_style": (lambda m: m if m in MAP_STYLES else "doll")(str(raw.get("map_style") or "doll").strip().lower()),
+        "last_path": normalize_last_path(raw.get("last_path")),
+        "move_seq": clamp_int(raw.get("move_seq"), 0, 2_000_000_000, 0),
+        "last_act": normalize_last_act(raw.get("last_act")),
         "posture": posture,
         "holding_id": str(raw.get("holding_id")).strip() if raw.get("holding_id") else None,
         "resting_on_id": str(raw.get("resting_on_id")).strip() if raw.get("resting_on_id") else None,

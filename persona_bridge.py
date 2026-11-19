@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Mapping, Sequence
@@ -41,18 +42,18 @@ def _find_base_persona_dir(project_root: Path | None, custom_persona_dir: str = 
     return next((p for p in candidates if p.is_dir()), None)
 
 
-def _resolve_persona_state_root(base_nanami_dir: Path, host_character: str, *, strict: bool = False) -> Path | None:
-    """从 pointers.yaml 找到角色对应的 state_root（含默认隔离目录 profiles/<id>/runtime）。"""
+def _resolve_persona_pointer(base_nanami_dir: Path, host_character: str, *, strict: bool = False) -> tuple[Path | None, str]:
+    """从 pointers.yaml 找到角色对应的 (state_root, chat_key_prefix)，优先匹配已启用且存在状态文件的指针。"""
     target = str(host_character or "").strip()
     pointers_file = base_nanami_dir / "pointers.yaml"
     if not pointers_file.is_file():
         if not target or target == "七海千秋":
-            return base_nanami_dir
-        return None if strict else base_nanami_dir
+            return base_nanami_dir, "shinsekai"
+        return (None if strict else base_nanami_dir), ""
     try:
         text = pointers_file.read_text(encoding="utf-8")
     except OSError:
-        return base_nanami_dir
+        return base_nanami_dir, ""
 
     parsed: Any = None
     try:
@@ -62,38 +63,42 @@ def _resolve_persona_state_root(base_nanami_dir: Path, host_character: str, *, s
     except Exception:
         parsed = None
 
-    entries: list[dict[str, str]] = []
+    entries: list[dict[str, Any]] = []
     if isinstance(parsed, Mapping) and isinstance(parsed.get("pointers"), list):
         for item in parsed["pointers"]:
             if isinstance(item, Mapping):
                 entries.append({
                     "id": str(item.get("id") or "").strip(),
+                    "enabled": bool(item.get("enabled", True)),
                     "character_name": str(item.get("character_name") or "").strip(),
                     "state_root": str(item.get("state_root") or "").strip(),
+                    "chat_key_prefix": str(item.get("chat_key_prefix") or "").strip(),
                 })
     else:
-        cur: dict[str, str] | None = None
+        cur: dict[str, Any] | None = None
         for line in text.splitlines():
             s = line.strip()
             if s.startswith("- "):
                 if cur:
                     entries.append(cur)
-                cur = {"id": "", "character_name": "", "state_root": ""}
+                cur = {"id": "", "enabled": True, "character_name": "", "state_root": "", "chat_key_prefix": ""}
                 s = s[2:].strip()
             if cur is None:
                 continue
             if s.startswith("id:"):
                 cur["id"] = s.split(":", 1)[1].strip().strip("'\"")
+            elif s.startswith("enabled:"):
+                cur["enabled"] = s.split(":", 1)[1].strip().lower() not in ("false", "0", "no")
             elif s.startswith("character_name:"):
                 cur["character_name"] = s.split(":", 1)[1].strip().strip("'\"")
             elif s.startswith("state_root:"):
                 cur["state_root"] = s.split(":", 1)[1].strip().strip("'\"")
+            elif s.startswith("chat_key_prefix:"):
+                cur["chat_key_prefix"] = s.split(":", 1)[1].strip().strip("'\"")
         if cur:
             entries.append(cur)
 
-    for row in entries:
-        if row.get("character_name") != target:
-            continue
+    def _entry_root(row: Mapping[str, Any]) -> Path:
         raw_sr = str(row.get("state_root") or "").strip()
         if raw_sr:
             cand = Path(raw_sr).expanduser()
@@ -105,9 +110,31 @@ def _resolve_persona_state_root(base_nanami_dir: Path, host_character: str, *, s
             return base_nanami_dir
         return (base_nanami_dir / "profiles" / pid / "runtime").resolve()
 
+    matches = [row for row in entries if row.get("character_name") == target or row.get("id") == target]
+    if not matches and target:
+        matches = [
+            row for row in entries
+            if row.get("character_name") and (target in row["character_name"] or row["character_name"] in target)
+        ]
+    if matches:
+        def _rank(row: Mapping[str, Any]) -> tuple[int, int, int]:
+            sr = _entry_root(row)
+            has_rel = 1 if (sr / "state" / "relations.json").is_file() else 0
+            has_mind = 1 if (sr / "state" / "mind.json").is_file() else 0
+            return (1 if row.get("enabled", True) else 0, has_rel, has_mind)
+
+        best = max(matches, key=_rank)
+        return _entry_root(best), str(best.get("chat_key_prefix") or "")
+
     if not target or target == "七海千秋":
-        return base_nanami_dir
-    return None if strict else base_nanami_dir
+        return base_nanami_dir, "shinsekai"
+    return (None if strict else base_nanami_dir), ""
+
+
+def _resolve_persona_state_root(base_nanami_dir: Path, host_character: str, *, strict: bool = False) -> Path | None:
+    """从 pointers.yaml 找到角色对应的 state_root（含默认隔离目录 profiles/<id>/runtime）。"""
+    sr, _prefix = _resolve_persona_pointer(base_nanami_dir, host_character, strict=strict)
+    return sr
 
 
 def read_persona_state(
@@ -123,12 +150,10 @@ def read_persona_state(
     if base_dir is None:
         return None
 
-    state_root = _resolve_persona_state_root(base_dir, str(host_character or "").strip(), strict=True)
+    state_root, chat_prefix = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
     if state_root is None or not state_root.is_dir():
         return None
-    mind_raw = _read_json(state_root / "state" / "mind.json")
-    if not mind_raw:
-        return None
+    mind_raw = _read_json(state_root / "state" / "mind.json") or {}
 
     eff_sid = str(space_id or "").strip()
     matched_entries: list[dict[str, Any]] = []
@@ -144,18 +169,24 @@ def read_persona_state(
 
     if matched_entries:
         entries = matched_entries
-    elif eff_sid in ("", "room_default"):
-        entries = [v for v in mind_raw.values() if isinstance(v, dict)]
     else:
-        # 非默认世界且尚无该世界专属 mind.json 记录时，不继承主世界状态，维持该世界独立心情
-        return None
+        # 回退到该角色在人格模型中的主状态记录（排除其他世界的 world: 桶，并按 chat_key_prefix 过滤）
+        entries = [
+            v for k, v in mind_raw.items()
+            if isinstance(v, dict)
+            and "world:" not in str(k)
+            and (not chat_prefix or str(k).startswith(chat_prefix))
+        ] or [
+            v for k, v in mind_raw.items()
+            if isinstance(v, dict) and "world:" not in str(k)
+        ]
 
-    if not entries:
-        return None
-    latest = max(entries, key=lambda e: float(e.get("updatedAt") or 0))
+    latest = max(entries, key=lambda e: float(e.get("updatedAt") or 0)) if entries else {}
     att = latest.get("attitude") if isinstance(latest.get("attitude"), dict) else {}
 
     traits_raw = _read_json(state_root / "state" / "traits.json") or {}
+    if not latest and not traits_raw:
+        return None
     traits_inner = traits_raw.get("traits") if isinstance(traits_raw.get("traits"), dict) else traits_raw
     dom_eff = traits_inner.get("domainEfficacy") if isinstance(traits_inner.get("domainEfficacy"), dict) else {}
     preferred_domains = [str(k) for k, v in dom_eff.items() if isinstance(v, (int, float)) and float(v) >= 0.65]
@@ -312,10 +343,13 @@ def _read_persona_relations_targets(state_root: Path) -> dict[str, dict[str, Any
     return out
 
 
-def _read_user_fallback_from_mind(state_root: Path) -> dict[str, Any]:
+def _read_user_fallback_from_mind(state_root: Path, *, chat_key_prefix: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {}
     person_raw = _read_json(Path(state_root) / "state" / "person.json") or {}
-    p_entries = [v for v in person_raw.values() if isinstance(v, Mapping)]
+    p_entries = [
+        v for k, v in person_raw.items()
+        if isinstance(v, Mapping) and (not chat_key_prefix or str(k).startswith(chat_key_prefix))
+    ] or [v for v in person_raw.values() if isinstance(v, Mapping)]
     if p_entries:
         latest_p = max(p_entries, key=lambda e: float(e.get("at") or 0.0))
         uname = str(latest_p.get("name") or "").strip()
@@ -324,7 +358,10 @@ def _read_user_fallback_from_mind(state_root: Path) -> dict[str, Any]:
             out["call_name"] = uname
             out["relation_tag"] = "相熟的用户"
     mind_raw = _read_json(Path(state_root) / "state" / "mind.json") or {}
-    m_entries = [v for v in mind_raw.values() if isinstance(v, Mapping)]
+    m_entries = [
+        v for k, v in mind_raw.items()
+        if isinstance(v, Mapping) and (not chat_key_prefix or str(k).startswith(chat_key_prefix))
+    ] or [v for v in mind_raw.values() if isinstance(v, Mapping)]
     if m_entries:
         latest_m = max(m_entries, key=lambda e: float(e.get("updatedAt") or 0.0))
         att = latest_m.get("attitude") if isinstance(latest_m.get("attitude"), Mapping) else {}
@@ -471,13 +508,13 @@ def read_actor_relations(
     persona_targets: dict[str, dict[str, Any]] = {}
     user_live: dict[str, Any] = {}
 
-    if eff_sid == "room_default":
-        base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-        if base_dir is not None:
-            sr = _resolve_persona_state_root(base_dir, subj, strict=True)
-            if sr is not None and sr.is_dir():
-                persona_targets = _read_persona_relations_targets(sr)
-                user_live = _read_user_fallback_from_mind(sr)
+    # 所有世界均可继承人格模型中的基础关系指针作为初值，各世界内的后续互动仍写入各自 space_id 桶独立演化
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+    if base_dir is not None:
+        sr, chat_prefix = _resolve_persona_pointer(base_dir, subj, strict=True)
+        if sr is not None and sr.is_dir():
+            persona_targets = _read_persona_relations_targets(sr)
+            user_live = _read_user_fallback_from_mind(sr, chat_key_prefix=chat_prefix)
 
     world_targets: dict[str, dict[str, Any]] = {}
     if world_data_root is not None:
@@ -639,4 +676,183 @@ def record_world_social_interaction(
     _save_world_edges(world_data_root, eff_sid, edges)
 
     return {"a_to_b": next_ab, "b_to_a": next_ba}
+
+
+# ── L0 环境感知与适应层桥接（Itti-Koch / Groves-Thompson / Tolman-ACT-R / Borbély）──
+_DEFAULT_L0_CFG: dict[str, Any] = {
+    "enabled": True,
+    "sensory_radius": 5.0,
+    "attentional_breadth": 4,
+    "novelty_weight": 0.55,
+    "ior_decay": 0.60,
+    "initial_caution": 0.65,
+    "habituation_rate": 0.25,
+    "social_buffering": 0.60,
+    "memory_decay": 0.45,
+    "chronotype_offset": 0.0,
+    "circadian_strength": 0.75,
+}
+
+
+def read_world_perception_config(
+    project_root: Path,
+    host_character: str,
+    *,
+    custom_persona_dir: str = "",
+) -> dict[str, Any]:
+    """只读读取 nanami_persona 的 state/world_perception.json。"""
+    out = dict(_DEFAULT_L0_CFG)
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+    if base_dir is None:
+        return out
+    sr, _pfx = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
+    if sr is None or not sr.is_dir():
+        return out
+    raw = _read_json(sr / "state" / "world_perception.json")
+    if not isinstance(raw, Mapping):
+        return out
+    if "enabled" in raw:
+        out["enabled"] = bool(raw["enabled"])
+    for k, dv in _DEFAULT_L0_CFG.items():
+        if k != "enabled" and k in raw:
+            try:
+                out[k] = int(round(float(raw[k]))) if k == "attentional_breadth" else float(raw[k])
+            except (TypeError, ValueError):
+                out[k] = dv
+    return out
+
+
+def update_and_project_world_perception(
+    world_data_root: Path,
+    space_id: str,
+    actor: Mapping[str, Any],
+    entities: Sequence[Mapping[str, Any]],
+    cfg: Mapping[str, Any],
+    *,
+    peer_known: bool = False,
+    look_eid: str = "",
+    touched_eid: str = "",
+    advance_exposure: float = 0.0,
+) -> dict[str, Any]:
+    """计算 L0 主观注意力焦点 Top-K、更新 Groves-Thompson 熟悉度与 Tolman/ACT-R 认知地图。"""
+    if not bool(cfg.get("enabled", True)):
+        return {
+            "enabled": False,
+            "familiarity": 1.0,
+            "stage": "settled",
+            "focused_entities": list(entities),
+            "mental_map_count": len(entities),
+            "chronotype_offset": 0.0,
+            "circadian_strength": 0.0,
+            "initial_caution": 0.0,
+        }
+
+    sid = str(space_id or "room_default").strip() or "room_default"
+    aid = str(actor.get("actor_id") or "").strip() or "actor"
+    p_path = Path(world_data_root) / "perception_state.json"
+    doc = _read_json(p_path) or {}
+    worlds = doc.get("worlds") if isinstance(doc.get("worlds"), dict) else {}
+    sp_bucket = worlds.get(sid) if isinstance(worlds.get(sid), dict) else {}
+    cur = dict(sp_bucket.get(aid) or {})
+
+    caution = float(cfg.get("initial_caution", 0.65))
+    hab_rate = max(0.05, float(cfg.get("habituation_rate", 0.25)))
+    soc_buf = float(cfg.get("social_buffering", 0.60))
+    if "familiarity" not in cur:
+        fam = 0.35 if sid == "room_default" else max(0.05, round(0.32 - 0.27 * caution, 3))
+    else:
+        fam = max(0.0, min(1.0, float(cur.get("familiarity") or 0.0)))
+
+    delta_exp = max(0.0, float(advance_exposure))
+    if look_eid:
+        delta_exp += 0.35
+    if touched_eid:
+        delta_exp += 0.25
+    if peer_known and delta_exp > 0:
+        delta_exp *= 1.0 + 0.8 * soc_buf
+    if delta_exp > 0:
+        fam = 1.0 - (1.0 - fam) * math.exp(-hab_rate * delta_exp)
+    fam = round(max(0.0, min(1.0, fam)), 3)
+
+    stage = (
+        "unfamiliar" if fam < 0.25
+        else ("exploring" if fam < 0.55 else ("familiar" if fam < 0.85 else "settled"))
+    )
+
+    mmap = dict(cur.get("mental_map") or {}) if isinstance(cur.get("mental_map"), dict) else {}
+    now_ts = round(time.time(), 2)
+    vit = actor.get("vitals") or {}
+    aut = actor.get("autonomy") or {}
+    sleep_p = float(vit.get("sleep_pressure", 0.30))
+    hunger = float(aut.get("hunger", 0.25))
+    preferred = set(vit.get("preferred_domains") or ["game"])
+    recent = list(aut.get("recent_targets") or [])
+
+    base_r = max(1.5, float(cfg.get("sensory_radius", 5.0)))
+    eff_r = base_r * (0.72 if sleep_p > 0.70 else 1.0)
+    nov_w = float(cfg.get("novelty_weight", 0.55))
+    ior_w = float(cfg.get("ior_decay", 0.60))
+    top_k = max(2, min(8, int(cfg.get("attentional_breadth", 4))))
+
+    ax, ay = int(actor.get("x") or 0), int(actor.get("y") or 0)
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for ent in entities:
+        eid = str(ent.get("entity_id") or "")
+        ex, ey = int(ent.get("x") or 0), int(ent.get("y") or 0)
+        dist = max(abs(ax - ex), abs(ay - ey))
+        traits = ent.get("traits") or {}
+
+        # Itti-Koch + Easterbrook 显著度评分
+        s_dist = math.exp(-dist / max(1.5, eff_r))
+        s_topdown = 0.0
+        if "consumable" in traits and int(traits["consumable"].get("uses_left") or 0) > 0:
+            s_topdown += 0.45 * hunger
+        if "restable" in traits and sleep_p >= 0.55:
+            s_topdown += 0.45 * sleep_p
+        if "activity" in traits and str(traits["activity"].get("domain") or "") in preferred:
+            s_topdown += 0.40
+        is_new = eid not in mmap
+        s_nov = nov_w * (0.6 if is_new else 0.0)
+        s_ior = ior_w * (0.75 if eid in recent[:2] else 0.0)
+        total = s_dist + s_topdown + s_nov - s_ior
+        scored.append((total, dict(ent)))
+
+        if dist <= eff_r or eid in (look_eid, touched_eid):
+            prev_m = mmap.get(eid) if isinstance(mmap.get(eid), dict) else {}
+            mmap[eid] = {
+                "name": str(ent.get("name") or eid),
+                "exposures": int(prev_m.get("exposures") or 0) + (1 if (advance_exposure > 0 or eid in (look_eid, touched_eid) or is_new) else 0),
+                "last_seen": now_ts,
+            }
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    focused = [e for _s, e in scored[:top_k]]
+
+    if advance_exposure > 0 or look_eid or touched_eid or "familiarity" not in cur:
+        sp_bucket[aid] = {
+            "host_character": str(actor.get("host_character") or actor.get("name") or ""),
+            "actor_name": str(actor.get("name") or ""),
+            "familiarity": fam,
+            "stage": stage,
+            "mental_map": mmap,
+            "updated_at": now_ts,
+        }
+        worlds[sid] = sp_bucket
+        doc["worlds"] = worlds
+        doc["updatedAt"] = now_ts
+        try:
+            _atomic_write_json(p_path, doc)
+        except OSError:
+            pass
+
+    return {
+        "enabled": True,
+        "familiarity": fam,
+        "stage": stage,
+        "focused_entities": focused,
+        "mental_map_count": len(mmap),
+        "chronotype_offset": float(cfg.get("chronotype_offset", 0.0)),
+        "circadian_strength": float(cfg.get("circadian_strength", 0.75)),
+        "initial_caution": caution,
+    }
 

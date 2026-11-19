@@ -5,11 +5,20 @@
 
 from __future__ import annotations
 
+import base64
+import html
 import json
 import logging
+import os
 import re
+import subprocess
+import tempfile
 import threading
+import time
+import urllib.parse
+import urllib.request
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Callable
 
 from .schema import (
@@ -23,6 +32,8 @@ from .schema import (
     TILE_CATALOG,
     clamp_int,
     clip_text,
+    default_appearance,
+    normalize_appearance,
     normalize_blueprint,
     normalize_pixel_grid,
     normalize_slot_colors,
@@ -50,7 +61,7 @@ _ITEM_SYSTEM_PROMPT = """你是像素风文字世界的造物编译器。用户�
 - portable: {"weight": "light"|"heavy"}
 - surface: {"capacity": 4}  （桌/架/柜顶等承载面）
 - container: {"capacity": 6, "key_tag": "", "is_open": false, "is_locked": false}
-- consumable: {"max_uses": 2, "uses_left": 2, "consume_verb": "喝"|"吃"|"用", "on_empty": "keep_empty"|"vanish", "empty_brief": "空了的白描"}
+- consumable: {"max_uses": 2, "uses_left": 2, "consume_verb": "喝"|"吃"|"用", "on_empty": "keep_empty"|"vanish", "empty_name": "空容器名", "empty_brief": "空了的白描"}
 - thermal: {"cool_minutes": 45, "temp": "hot"|"warm"|"cold"}
 - switchable: {"provides_light": true|false, "is_on": false, "on_brief": "开启时白描", "off_brief": "关闭时白描"}
 - restable: {"energy_regen_per_min": 0.015, "comfort": 0.8, "occupied_by": null}
@@ -172,6 +183,24 @@ def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
+def _load_vision_image_block(image_path: str | Path | None) -> dict[str, Any] | None:
+    if not image_path:
+        return None
+    try:
+        p = Path(image_path)
+        if not p.is_file() or p.stat().st_size > 4 * 1024 * 1024:
+            return None
+        ext = p.suffix.lower()
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+        mime = mime_map.get(ext)
+        if not mime:
+            return None
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+    except Exception:
+        return None
+
+
 def _ask_llm_json(
     system_prompt: str,
     user_prompt: str,
@@ -179,6 +208,8 @@ def _ask_llm_json(
     adapter_provider: Callable[[], Any] | None = None,
     timeout_sec: float = 12.0,
     max_tokens: int = 900,
+    image_path: str | Path | None = None,
+    meta_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     adapter = (adapter_provider or _default_adapter)()
     if adapter is None:
@@ -186,20 +217,42 @@ def _ask_llm_json(
     box: dict[str, Any] = {}
     done = threading.Event()
 
+    supports_vision = False
+    try:
+        fn = getattr(adapter, "supports_native_vision", None)
+        supports_vision = bool(fn() if callable(fn) else fn)
+    except Exception:
+        supports_vision = False
+
+    img_block = _load_vision_image_block(image_path) if supports_vision else None
+
+    def _call(content: Any) -> dict[str, Any] | None:
+        resp = adapter.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            stream=False,
+            temperature=0.35,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+        raw_content = str(getattr(adapter.decode_response(resp), "content", "") or "")
+        return _extract_json_object(raw_content)
+
     def _work() -> None:
         try:
-            resp = adapter.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                stream=False,
-                temperature=0.35,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"},
-            )
-            content = str(getattr(adapter.decode_response(resp), "content", "") or "")
-            box["parsed"] = _extract_json_object(content)
+            if img_block is not None:
+                try:
+                    parsed = _call([{"type": "text", "text": user_prompt}, img_block])
+                    if parsed is not None:
+                        box["parsed"] = parsed
+                        box["used_vision"] = True
+                        return
+                except Exception as exc:
+                    logger.debug("nanami_world: 附带参考图调用失败，回退纯文本模式: %s", exc)
+            box["parsed"] = _call(user_prompt)
+            box["used_vision"] = False
         except Exception as exc:
             box["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -213,6 +266,8 @@ def _ask_llm_json(
     if box.get("error"):
         logger.info("nanami_world: 文字造物 LLM 调用失败（%s），切换规则兜底", box["error"])
         return None
+    if meta_out is not None:
+        meta_out["used_vision"] = bool(box.get("used_vision"))
     parsed = box.get("parsed")
     return parsed if isinstance(parsed, dict) else None
 
@@ -447,6 +502,470 @@ def compile_item_from_text(
         "blueprint": bp,
         "used_llm": False,
         "note": "未调用大模型（已离线/未配置或超时），已按描述关键词生成规范蓝图与基础像素框，可直接在弹层微调。",
+    }
+
+
+_APPEARANCE_SYSTEM_PROMPT = """你是弹丸论破风格 8-bit 像素 Q 版小人的顶级像素画师。请结合角色设定、网络资料与（若有）官方原作立绘附图，还原角色最具辨识度的发型、头饰、服装与配色，只输出一个合法 JSON 对象（不要 markdown 围栏）：
+
+{
+  "hair_style": "spiky|long|bob|twin|ponytail|short 之一",
+  "hair_color": "#rrggbb",
+  "hair_shade": "#rrggbb",
+  "skin": "#rrggbb",
+  "eye_color": "#rrggbb",
+  "outfit_style": "jacket|hoodie|dress|uniform 之一",
+  "outfit_color": "#rrggbb",
+  "outfit_accent": "#rrggbb",
+  "outfit_inner": "#rrggbb",
+  "legs_color": "#rrggbb",
+  "shoes_color": "#rrggbb",
+  "accessory": "none|bow|glasses|ears|headband 之一",
+  "accessory_color": "#rrggbb",
+  "custom_frames": {
+    "palette": {"h":"#主发色","H":"#发尾阴影","s":"#肤色","e":"#瞳色","m":"#嘴色","j":"#外套主色","J":"#点缀色/领结/发饰","i":"#内衬/白衣","l":"#下装/袜","f":"#鞋","a":"#头饰/帽子/包主色","b":"#帽子/道具副色"},
+    "down": ["16字符共24行（正面站立）"],
+    "right": ["16字符共24行（可选，朝右站立）"]
+  }
+}
+
+16×24 弹丸论破 8-bit 像素比例规范（`.` 为透明，不需要画外描边，渲染器会自动加 1px 深黑描边；只用 palette 中的单字符）：
+- y=0..2：头顶发冠 / 呆毛 / 大帽子 / 发饰（底部第 23 行留空给描边）
+- y=2..12：2 头身大头！y=7..8 刘海与鬓角，y=9..10 双眼（正面左眼 x=5..6、右眼 x=9..10），y=11 小嘴（x=7..8）
+- y=13..18：上衣/连帽衫/水手裙/领结/背带/外套开襟
+- y=19..21：双腿或长袜（左右分离，如 x=5..6 与 x=9..10，方便渲染器自动切走路步态）
+- y=22：鞋子
+
+七海千秋 16×24 正面 `down` 范例（可参考这种清晰比例来画任意角色）：
+[
+  "................",
+  ".....hhhhhh.....",
+  "....hhhhhhhh....",
+  "...hhhhhhhhhh...",
+  "...hhhhhJJhhh...",
+  "...hhhhhhhhhh...",
+  "...hhhhhhHHHH...",
+  "...hssssssssH...",
+  "...hsHHssHHsH...",
+  "...hseesssees...",
+  "...hssssssssH...",
+  "....sssmmsss....",
+  "....jjJiiJjj....",
+  "...sjjjJJjjjs...",
+  "...sjjiiiiJjs...",
+  "...sjjjjjjjjs...",
+  "....jjjjjjjj....",
+  "....llllllll....",
+  ".....ll..ll.....",
+  ".....ss..ss.....",
+  ".....ss..ss.....",
+  ".....ff..ff.....",
+  "................",
+  "................"
+]"""
+
+
+def _http_get_text(url: str, *, timeout_sec: float = 2.8) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; Shinsekai-NanamiWorld/0.2)"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        raw = resp.read(200_000)
+        return raw.decode("utf-8", errors="ignore")
+
+
+def _query_mediawiki_extract(api_base: str, name: str, *, timeout_sec: float = 2.8) -> str:
+    q = urllib.parse.urlencode({
+        "action": "query",
+        "prop": "extracts",
+        "exintro": "1",
+        "explaintext": "1",
+        "redirects": "1",
+        "titles": name,
+        "format": "json",
+        "utf8": "1",
+    })
+    data = json.loads(_http_get_text(f"{api_base}?{q}", timeout_sec=timeout_sec))
+    pages = ((data.get("query") or {}).get("pages") or {})
+    for page in pages.values():
+        ext = str(page.get("extract") or "").strip()
+        if len(ext) >= 30:
+            return re.sub(r"\s+", " ", ext)[:500]
+    return ""
+
+
+def search_character_reference(name: str, *, timeout_sec: float = 3.0) -> dict[str, Any]:
+    """零依赖联网检索角色外貌与服装资料（萌娘百科 / 维基百科 / DuckDuckGo 摘要），失败自动降级。"""
+    clean = clip_text(name, 30, "")
+    if not clean:
+        return {"summary": "", "sources": [], "used_web": False}
+
+    snippets: list[str] = []
+    sources: list[str] = []
+
+    for label, api_base in (
+        ("萌娘百科", "https://zh.moegirl.org.cn/api.php"),
+        ("维基百科", "https://zh.wikipedia.org/w/api.php"),
+    ):
+        try:
+            ext = _query_mediawiki_extract(api_base, clean, timeout_sec=timeout_sec)
+            if ext:
+                snippets.append(f"[{label}] {ext}")
+                sources.append(label)
+                break
+        except Exception:
+            continue
+
+    if not snippets:
+        try:
+            q = urllib.parse.urlencode({"q": f"{clean} 外貌 服装 发型 立绘"})
+            page = _http_get_text(f"https://html.duckduckgo.com/html/?{q}", timeout_sec=timeout_sec)
+            found = re.findall(r'class="result__snippet"[^>]*>([\s\S]*?)</a>', page, flags=re.IGNORECASE)
+            cleaned = [re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s))).strip() for s in found[:3]]
+            cleaned = [c for c in cleaned if len(c) >= 15]
+            if cleaned:
+                snippets.append("[网络检索] " + "；".join(cleaned)[:500])
+                sources.append("DuckDuckGo")
+        except Exception:
+            pass
+
+    summary = "\n".join(snippets)[:800]
+    return {"summary": summary, "sources": sources, "used_web": bool(summary)}
+
+_HAIR_COLOR_WORDS: tuple[tuple[tuple[str, ...], tuple[str, str]], ...] = (
+    (("白发", "银发", "灰白", "雪白", "白色短发", "白色长发", "银色短发", "银色长发", "白毛"), ("#f2f0f0", "#d9dce6")),
+    (("金发", "金色", "黄发", "淡金", "金色短发", "金色长发", "金毛"), ("#e8c864", "#f6e2a0")),
+    (("粉发", "粉色头发", "粉色短发", "粉色长发", "粉红色", "粉红", "樱色", "粉毛"), ("#f0a0b8", "#f8cad6")),
+    (("红发", "赤发", "红色头发", "红色短发", "红色长发", "红毛"), ("#c43a36", "#e8786a")),
+    (("橙发", "橘发", "橙色", "橘色", "橙色短发", "橘色短发"), ("#e08a3c", "#f2b878")),
+    (("蓝发", "蓝色头发", "蓝色短发", "蓝色长发", "水蓝", "青发"), ("#5e86c4", "#9bbcea")),
+    (("绿发", "绿色头发", "绿色短发", "绿色长发"), ("#5aa070", "#98d0a8")),
+    (("紫发", "紫色头发", "紫色短发", "紫色长发", "淡紫"), ("#8a62b8", "#bca0dc")),
+    (("棕发", "栗色", "茶色", "褐发", "棕色短发", "棕色长发", "咖啡色"), ("#7a5238", "#a67c5a")),
+    (("黑发", "黑色头发", "黑色短发", "黑色长发", "黑长直", "乌黑", "深色头发"), ("#2f2a2e", "#4b4348")),
+)
+
+_OUTFIT_COLOR_WORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("黑衣", "黑色", "黑西装"), "#2f2f38"),
+    (("白衣", "白色", "白大褂"), "#eceaf2"),
+    (("红色", "红衣", "红裙"), "#c8403c"),
+    (("粉色", "粉衣", "粉裙"), "#f0a8bc"),
+    (("蓝色", "蓝衣", "蓝裙", "藏青", "海军"), "#3c5c8c"),
+    (("绿色", "绿衣", "军绿", "墨绿"), "#4f6b3c"),
+    (("黄色", "黄衣"), "#e0c050"),
+    (("紫色", "紫衣"), "#7a58a8"),
+    (("灰色", "灰衣"), "#8a8d98"),
+)
+
+
+def _fallback_appearance_from_text(name: str, text: str) -> dict[str, Any]:
+    base = default_appearance(name)
+    t = str(text or "")
+    raw = dict(base)
+    for words, (main, shade) in _HAIR_COLOR_WORDS:
+        if any(w in t for w in words):
+            raw["hair_color"], raw["hair_shade"] = main, shade
+            break
+    for words, color in _OUTFIT_COLOR_WORDS:
+        if any(w in t for w in words):
+            raw["outfit_color"] = color
+            break
+    if any(k in t for k in ("双马尾", "两条辫", "双辫")):
+        raw["hair_style"] = "twin"
+    elif any(k in t for k in ("马尾", "辫子", "侧马尾")):
+        raw["hair_style"] = "ponytail"
+    elif any(k in t for k in ("长发", "及腰", "披肩", "黑长直")):
+        raw["hair_style"] = "long"
+    elif any(k in t for k in ("短发", "寸头", "利落")):
+        raw["hair_style"] = "short"
+    elif any(k in t for k in ("波波", "齐肩", "bob", "蘑菇头")):
+        raw["hair_style"] = "bob"
+    elif any(k in t for k in ("乱发", "翘发", "乱翘", "翘起", "炸毛", "刺猬", "蓬松", "卷毛", "天然卷", "凌乱")):
+        raw["hair_style"] = "spiky"
+    if any(k in t for k in ("裙", "水手服", "连衣", "女仆", "少女", "女生")):
+        raw["outfit_style"] = "dress"
+    elif any(k in t for k in ("西装", "制服", "校服", "西服")):
+        raw["outfit_style"] = "uniform"
+    elif any(k in t for k in ("卫衣", "连帽", "帽衫")):
+        raw["outfit_style"] = "hoodie"
+    elif any(k in t for k in ("外套", "夹克", "风衣")):
+        raw["outfit_style"] = "jacket"
+    if any(k in t for k in ("眼镜",)):
+        raw["accessory"] = "glasses"
+    elif any(k in t for k in ("蝴蝶结", "发饰", "发夹", "缎带", "丝带")):
+        raw["accessory"] = "bow"
+    elif any(k in t for k in ("猫耳", "兽耳", "耳朵")):
+        raw["accessory"] = "ears"
+    elif any(k in t for k in ("发带", "头带", "发箍")):
+        raw["accessory"] = "headband"
+    return normalize_appearance(raw, seed=name)
+
+
+def compile_actor_appearance(
+    name: str,
+    description: str = "",
+    *,
+    use_llm: bool = True,
+    use_web: bool = False,
+    reference_image_path: str | Path | None = None,
+    adapter_provider: Callable[[], Any] | None = None,
+    timeout_sec: float = 20.0,
+) -> dict[str, Any]:
+    """由角色名、设定、联网参考资料与原作立绘（若支持多模态）编译 Q 版像素小人外观。"""
+    clean_name = clip_text(name, 20, "角色")
+    clean_desc = clip_text(description, 450, "")
+    web_info = search_character_reference(clean_name) if (use_llm and use_web) else {"summary": "", "sources": [], "used_web": False}
+    web_txt = str(web_info.get("summary") or "").strip()
+
+    if use_llm and (clean_desc or web_txt or reference_image_path):
+        parts = [f"角色名：{clean_name}"]
+        if clean_desc:
+            parts.append(f"【角色设定】\n{clean_desc}")
+        if web_txt:
+            parts.append(f"【网络参考资料】\n{web_txt}")
+        if reference_image_path:
+            parts.append("【原作立绘参考】见附图，请严格对照附图与资料还原标志性发色、头饰、帽子/发卡与服装轮廓。")
+        parts.append("请输出 JSON（务必给出 custom_frames.palette 与 custom_frames.down 16x24 像素矩阵，同时填写基础字段）。")
+
+        meta: dict[str, Any] = {}
+        parsed = _ask_llm_json(
+            _APPEARANCE_SYSTEM_PROMPT,
+            "\n\n".join(parts),
+            adapter_provider=adapter_provider,
+            timeout_sec=timeout_sec,
+            max_tokens=1600,
+            image_path=reference_image_path,
+            meta_out=meta,
+        )
+        if isinstance(parsed, dict) and (parsed.get("hair_style") or parsed.get("custom_frames")):
+            norm = normalize_appearance(parsed, seed=clean_name)
+            return {
+                "appearance": norm,
+                "used_llm": True,
+                "used_web": bool(web_info.get("used_web")),
+                "web_sources": list(web_info.get("sources") or []),
+                "used_vision": bool(meta.get("used_vision")),
+                "has_custom_frames": bool(norm.get("custom_frames")),
+            }
+
+    fallback = _fallback_appearance_from_text(clean_name, f"{clean_desc}\n{web_txt}".strip())
+    return {
+        "appearance": fallback,
+        "used_llm": False,
+        "used_web": bool(web_info.get("used_web")),
+        "web_sources": list(web_info.get("sources") or []),
+        "used_vision": False,
+        "has_custom_frames": False,
+    }
+
+
+def resolve_character_search_info(
+    name: str,
+    description: str = "",
+    *,
+    use_llm: bool = True,
+    use_web: bool = True,
+    adapter_provider: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    """用联网资料 + LLM 提取角色英文搜索名与全身服装英文关键词，用于检索全身照与驱动生图。"""
+    clean_name = clip_text(name, 20, "character")
+    clean_desc = clip_text(description, 450, "")
+    web_info = search_character_reference(clean_name) if use_web else {"summary": "", "sources": [], "used_web": False}
+    web_txt = str(web_info.get("summary") or "").strip()
+
+    english_name = ""
+    outfit_prompt = ""
+    used_llm = False
+    if use_llm:
+        sys_p = (
+            "你是动漫游戏角色资料整理助手。根据角色名、本地设定和网络资料，只输出一个合法 JSON 对象：\n"
+            '{"english_name":"官方英文名/罗马音，如 Chiaki Nanami 或 Habetrot（用于 Wiki 搜全身立绘）",'
+            '"outfit_prompt":"简明英文全身服装外观描述（<=35词，必须准确写出偏暗/偏浅的真实色调，如 dark charcoal-teal jacket、dusty mauve-pink bob hair，勿写成鲜亮荧光色；包含发型、头饰、上衣、下装裙/裤、袜子与鞋子）"}'
+        )
+        usr_p = f"角色名：{clean_name}\n设定：{clean_desc or '无'}\n网络资料：{web_txt or '无'}"
+        parsed = _ask_llm_json(sys_p, usr_p, adapter_provider=adapter_provider, timeout_sec=10.0, max_tokens=220)
+        if isinstance(parsed, dict):
+            english_name = clip_text(parsed.get("english_name"), 60, "")
+            outfit_prompt = clip_text(parsed.get("outfit_prompt"), 240, "")
+            used_llm = bool(english_name or outfit_prompt)
+
+    if not english_name:
+        known_en = {"七海千秋": "Chiaki Nanami", "日向创": "Hajime Hinata", "狛枝凪斗": "Nagito Komaeda", "哈贝特洛特": "Habetrot"}
+        english_name = known_en.get(clean_name, clean_name)
+
+    return {
+        "english_name": english_name,
+        "outfit_prompt": outfit_prompt,
+        "used_llm": used_llm,
+        "used_web": bool(web_info.get("used_web")),
+        "web_sources": list(web_info.get("sources") or []),
+    }
+
+
+def search_official_pixel_sprite(
+    name: str,
+    english_name: str = "",
+    *,
+    timeout_sec: float = 5.0,
+) -> dict[str, Any] | None:
+    """检索弹丸论破 Wiki 原版 8-bit 像素小人图（如 75x84 @ 3x），返回原生 data URL。"""
+    q_name = str(english_name or "").strip()
+    if not q_name:
+        known_en = {"七海千秋": "Chiaki Nanami", "日向创": "Hajime Hinata", "狛枝凪斗": "Nagito Komaeda", "索妮娅": "Sonia Nevermind", "雾切响子": "Kyoko Kirigiri", "苗木诚": "Makoto Naegi"}
+        q_name = known_en.get(str(name or "").strip(), "")
+    if not q_name:
+        return None
+
+    api = "https://danganronpa.fandom.com/api.php"
+    for term in (f"{q_name} Pixel Sprites", f"{q_name} Pixel"):
+        try:
+            q = urllib.parse.urlencode({
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": term,
+                "gsrnamespace": "6",
+                "gsrlimit": "6",
+                "prop": "imageinfo",
+                "iiprop": "url|size",
+                "format": "json",
+            })
+            data = json.loads(_http_get_text(f"{api}?{q}", timeout_sec=timeout_sec))
+            pages = sorted((data.get("query") or {}).get("pages", {}).values(), key=lambda p: str(p.get("title") or ""))
+            for page in pages:
+                title = str(page.get("title") or "")
+                if "pixel" not in title.lower():
+                    continue
+                ii = (page.get("imageinfo") or [{}])[0]
+                w, h = int(ii.get("width") or 0), int(ii.get("height") or 0)
+                img_url = str(ii.get("url") or "")
+                if not img_url or not (20 <= w <= 160 and 20 <= h <= 160):
+                    continue
+                req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+                    raw = r.read(300_000)
+                if raw[:6] in (b"GIF87a", b"GIF89a"):
+                    mime = "image/gif"
+                elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                    mime = "image/webp"
+                else:
+                    mime = "image/png"
+                return {
+                    "image_data_url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}",
+                    "title": title,
+                    "width": w,
+                    "height": h,
+                    "english_name": q_name,
+                }
+        except Exception:
+            continue
+    return None
+
+
+def generate_pixellab_4dir_sprites(
+    name: str,
+    description: str = "",
+    *,
+    api_key: str,
+    use_web: bool = True,
+    use_llm: bool = True,
+    adapter_provider: Callable[[], Any] | None = None,
+    timeout_sec: float = 90.0,
+) -> dict[str, Any]:
+    """调用 PixelLab v2 生成原生低像素透明底四向 Q 版角色精灵（不经缩放）。"""
+    tok = str(api_key or "").strip()
+    if not tok:
+        raise ValueError("尚未配置 PixelLab API Key。")
+
+    info = resolve_character_search_info(
+        name,
+        description,
+        use_llm=use_llm,
+        use_web=use_web,
+        adapter_provider=adapter_provider,
+    )
+    en_name = info["english_name"]
+    outfit = info["outfit_prompt"]
+    desc_text = f"{en_name}" + (f", {outfit}" if outfit else "") + ", cute 8-bit anime chibi character"
+
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
+    body = {
+        "description": desc_text[:480],
+        "image_size": {"width": 32, "height": 32},
+        "proportions": {"type": "preset", "name": "chibi"},
+        "outline": "single color black outline",
+        "shading": "basic shading",
+        "detail": "medium detail",
+        "view": "low top-down",
+        "async_mode": True,
+    }
+    req = urllib.request.Request(
+        "https://api.pixellab.ai/v2/create-character-with-4-directions",
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        sub = json.loads(resp.read().decode("utf-8"))
+
+    jid = str(sub.get("background_job_id") or "")
+    cid = str(sub.get("character_id") or "")
+    if not jid:
+        raise RuntimeError(f"PixelLab 提交失败：{sub}")
+
+    deadline = time.time() + timeout_sec
+    last_job: dict[str, Any] = {}
+    while time.time() < deadline:
+        time.sleep(2.5)
+        jreq = urllib.request.Request(
+            f"https://api.pixellab.ai/v2/background-jobs/{jid}",
+            headers={"Authorization": f"Bearer {tok}", "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(jreq, timeout=15) as jr:
+            last_job = json.loads(jr.read().decode("utf-8"))
+        st = str(last_job.get("status") or "")
+        if st == "completed":
+            break
+        if st == "failed":
+            raise RuntimeError(f"PixelLab 生成失败：{last_job.get('error') or last_job}")
+    else:
+        raise RuntimeError("PixelLab 生成超时，请稍后重试。")
+
+    raw_imgs = ((last_job.get("last_response") or {}).get("images") or {})
+    dir_map = {"south": "down", "east": "right", "north": "up", "west": "left"}
+    images: dict[str, str] = {}
+    for pl_dir, our_dir in dir_map.items():
+        item = raw_imgs.get(pl_dir)
+        if isinstance(item, dict) and item.get("base64"):
+            b64 = str(item["base64"])
+            images[our_dir] = b64 if b64.startswith("data:") else f"data:image/png;base64,{b64}"
+
+    if len(images) < 4 and cid:
+        creq = urllib.request.Request(
+            f"https://api.pixellab.ai/v2/characters/{cid}",
+            headers={"Authorization": f"Bearer {tok}", "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(creq, timeout=15) as cr:
+            cinfo = json.loads(cr.read().decode("utf-8"))
+        rurls = cinfo.get("rotation_urls") or {}
+        for pl_dir, our_dir in dir_map.items():
+            if our_dir not in images and rurls.get(pl_dir):
+                raw_png = urllib.request.urlopen(urllib.request.Request(rurls[pl_dir], headers={"User-Agent": "Mozilla/5.0"}), timeout=10).read()
+                images[our_dir] = f"data:image/png;base64,{base64.b64encode(raw_png).decode('ascii')}"
+
+    if "down" not in images:
+        raise RuntimeError("PixelLab 未返回正面像素图。")
+
+    return {
+        "used_pixellab": True,
+        "images": images,
+        "used_llm": info["used_llm"],
+        "used_web": info["used_web"],
+        "web_sources": info["web_sources"],
+        "english_name": en_name,
     }
 
 

@@ -25,15 +25,16 @@
   html, body { height: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 13px/1.45 var(--ui-font); overflow: hidden; }
   canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
 
-  .app { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+  .app { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
 
   /* 顶部像素风工具栏 */
   header.topbar {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 8px 12px;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    flex: 0 0 auto; position: relative; z-index: 20;
+    padding: 6px 10px;
     background: var(--panel);
     border-bottom: 2px solid var(--border);
-    min-height: 46px;
+    min-height: 44px;
   }
   .brand { font-family: var(--px-font); font-weight: 700; font-size: 14px; color: var(--accent); letter-spacing: 0.5px; margin-right: 4px; white-space: nowrap; }
   .space-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
@@ -69,7 +70,7 @@
   input.px-inp:focus, textarea.px-txt:focus, select.px-sel:focus { border-color: var(--accent); }
 
   /* 主体双栏区 */
-  .main { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .main { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; position: relative; z-index: 1; }
   .stage-col {
     flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
     padding: 10px 12px; gap: 8px; overflow: hidden; position: relative;
@@ -141,14 +142,36 @@
   /* 角色实时心情立绘 + 世界对话框 */
   .dialogue-dock {
     border: 2px solid var(--border); background: var(--panel);
-    display: flex; gap: 10px; padding: 8px;
-    height: clamp(148px, 23vh, 196px); flex: 0 0 auto; min-height: 144px;
+    display: flex; gap: 0; padding: 8px;
+    height: 176px; flex: 0 0 auto; min-height: 76px; max-height: 70vh;
   }
   .portrait-card {
-    width: 118px; flex: 0 0 118px; display: flex; flex-direction: column;
+    width: 118px; flex: 0 0 auto; min-width: 64px; max-width: 280px; display: flex; flex-direction: column;
     border: 2px solid var(--border-hi); background: #14121b;
     cursor: pointer; position: relative; overflow: hidden;
   }
+  .splitter-h {
+    height: 7px; flex: 0 0 7px; cursor: row-resize; position: relative;
+    background: var(--panel-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; user-select: none; touch-action: none;
+  }
+  .splitter-h::after { content: ""; width: 42px; height: 2px; background: var(--border-hi); border-radius: 2px; }
+  .splitter-h:hover, .splitter-h.dragging { border-color: var(--accent); background: #2d243b; }
+  .splitter-h:hover::after, .splitter-h.dragging::after { background: var(--accent); }
+  .splitter-v {
+    width: 7px; flex: 0 0 7px; cursor: col-resize; position: relative;
+    background: var(--panel-2); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; user-select: none; touch-action: none;
+  }
+  .splitter-v::after { content: ""; width: 2px; height: 42px; background: var(--border-hi); border-radius: 2px; }
+  .splitter-v:hover, .splitter-v.dragging { border-color: var(--accent); background: #2d243b; }
+  .splitter-v:hover::after, .splitter-v.dragging::after { background: var(--accent); }
+  #split-portrait-v { margin: 0 6px; border-radius: 2px; }
+  #world-window.stage-fullscreen .dialogue-dock,
+  #world-window.stage-fullscreen #split-dock-h,
+  #world-window.stage-fullscreen #inspector,
+  #world-window.stage-fullscreen #side-col,
+  #world-window.stage-fullscreen #split-side-v { display: none !important; }
   .portrait-card:hover { border-color: var(--accent); }
   .portrait-frame {
     flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden;
@@ -207,7 +230,7 @@
 
   /* 右侧工作台 */
   .side-col {
-    width: 340px; flex: 0 0 340px; border-left: 2px solid var(--border);
+    width: 340px; flex: 0 0 auto; min-width: 210px; max-width: 65vw; border-left: 2px solid var(--border);
     background: var(--panel); display: flex; flex-direction: column; min-height: 0;
   }
   .side-tabs { display: flex; border-bottom: 2px solid var(--border); }
@@ -399,6 +422,7 @@
     <button class="px-btn" id="btn-hub-import-actor">👤 导入角色</button>
     <button class="px-btn" id="btn-hub-gen-world">🗺️ LLM 生成新世界</button>
     <button class="px-btn primary" id="btn-hub-new-world">➕ 新建空白世界</button>
+    <button class="px-btn" id="btn-hub-popout" title="在独立浏览器窗口中打开世界大厅">↗ 独立窗口</button>
     <button class="px-btn" id="btn-hub-refresh">🔄 刷新</button>
   </header>
   <div class="hub-body">
@@ -417,6 +441,7 @@
     <span class="brand" id="cur-world-title">◈ NANAMI_WORLD</span>
     <span class="pill" id="pill-light"><span class="dot" id="light-dot"></span><span id="light-text">12:00 白天</span></span>
     <button class="px-btn" id="btn-popout-world" title="在独立窗口中打开当前世界">↗ 独立窗口</button>
+    <button class="px-btn" id="btn-stage-fullscreen" title="全屏查看世界画布（Esc 退出）">⛶ 全屏</button>
 
     <div class="mode-switch" id="ui-mode-switch">
       <button class="mode-pill active" data-uimode="play">💬 陪伴互动</button>
@@ -476,6 +501,7 @@
         <button class="px-btn" id="btn-unselect" style="padding:3px 7px;font-size:11px;" title="关闭选中栏">✕</button>
       </div>
 
+      <div class="splitter-h" id="split-dock-h" title="上下拖动调整底部对话栏高度（双击重置）"></div>
       <div class="dialogue-dock" id="dialogue-dock">
         <div class="portrait-card" id="dock-portrait-card" title="点击查看/切换角色包全部心情立绘">
           <div class="portrait-frame" id="dock-portrait-frame">
@@ -485,6 +511,7 @@
           </div>
           <div class="portrait-tag" id="dock-portrait-tag">未导入角色</div>
         </div>
+        <div class="splitter-v" id="split-portrait-v" title="左右拖动调整立绘宽度（双击重置）"></div>
         <div class="chat-box">
           <div class="chat-head">
             <span>💬 与 <b id="chat-actor-name">她</b> 对话</span>
@@ -503,6 +530,7 @@
       </div>
     </section>
 
+    <div class="splitter-v hidden" id="split-side-v" title="左右拖动调整右侧栏宽度（双击重置）"></div>
     <aside class="side-col hidden" id="side-col">
       <div class="side-body" id="tab-assets">
         <div class="sec-box">
@@ -564,7 +592,7 @@
 
       <div class="side-body hidden" id="tab-status">
         <div class="sec-box">
-          <div class="sec-title"><span>角色状态监控（本世界独立）</span><div style="display:flex;align-items:center;gap:6px;"><span id="vital-source">builtin</span><button class="px-btn" id="btn-edit-world-mood" style="padding:1px 6px;font-size:10px;">🎛 心情参数</button></div></div>
+          <div class="sec-title"><span>角色状态监控（本世界独立）</span><div style="display:flex;align-items:center;gap:6px;"><span id="vital-source">builtin</span><button class="px-btn" id="btn-edit-appearance" style="padding:1px 6px;font-size:10px;">🎨 外观</button><button class="px-btn" id="btn-edit-world-mood" style="padding:1px 6px;font-size:10px;">🎛 心情参数</button></div></div>
           <div id="actor-status-name" style="font-weight:700;">未导入角色</div>
           <div id="actor-status-pos" style="font-size:11px;color:var(--muted);font-family:var(--px-font);">坐标：—</div>
           <div class="vitals-row">
@@ -677,7 +705,9 @@ async function runAction(actionId, values) {
   if (!resp.ok) throw new Error((data && (data.message || data.error)) || ("HTTP " + resp.status));
   const res = (data && data.result) || {};
   if (res.ok === false) throw new Error(res.error || "操作失败");
-  if (res.snapshot) applySnapshot(res.snapshot, res.terminal, res.chat_history);
+  if (res.snapshot) {
+    applySnapshot(res.snapshot, res.terminal, res.chat_history);
+  }
   return res;
 }
 
@@ -696,6 +726,7 @@ function renderViewShell() {
   el("build-bar").classList.toggle("hidden", !isBuild);
   el("status-view-bar").classList.toggle("hidden", !isStatus);
   el("side-col").classList.toggle("hidden", !(isBuild || isStatus));
+  if (el("split-side-v")) el("split-side-v").classList.toggle("hidden", !(isBuild || isStatus));
   el("tab-assets").classList.toggle("hidden", !isBuild);
   el("tab-status").classList.toggle("hidden", !isStatus);
   el("stage-shell").classList.toggle("compact", !isBuild);
@@ -738,15 +769,47 @@ function setBuilderSub(sub) {
   renderViewShell();
 }
 
-function openStandaloneWorld(spaceId) {
-  const url = withToken(window.location.pathname + "?space_id=" + encodeURIComponent(spaceId) + "&view=world");
-  const win = window.open(url, "nanami_world_" + String(spaceId || "main"), "width=1240,height=820,resizable=yes,scrollbars=yes");
+function _openPopupOrShareUrl(url, targetName, fallbackSpaceId) {
+  let win = null;
+  try {
+    win = window.open(url, targetName, "width=1240,height=820,resizable=yes,scrollbars=yes");
+  } catch {}
   if (!win) {
-    toast("浏览器拦截了独立窗口弹出，已切换为当前窗口进入", true);
-    enterWorld(spaceId);
+    try { win = window.open(url, "_blank"); } catch {}
+  }
+  if (win) {
+    try { win.focus(); } catch {}
     return;
   }
-  win.focus();
+  const fullUrl = new URL(url, window.location.origin).href;
+  showModal("↗ 在独立浏览器窗口中打开",
+    '<div style="font-size:12px;color:var(--text);line-height:1.6;margin-bottom:8px;">当前桌面端 / 内嵌容器禁用了脚本弹窗，你可以直接点击下方链接或复制地址到系统浏览器中打开独立窗口：</div>'
+    + '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">'
+    + '<input class="px-inp" id="popout-url-inp" readonly value="' + esc(fullUrl) + '" style="flex:1 1 auto;font-family:var(--px-font);font-size:11px;">'
+    + '<a class="px-btn primary" href="' + esc(fullUrl) + '" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">↗ 尝试新标签打开</a>'
+    + '</div>',
+    [
+      { label: "关闭", onClick: closeModal },
+      {
+        label: "📋 复制独立窗口链接",
+        cls: "primary",
+        onClick: () => {
+          const inp = el("popout-url-inp");
+          if (inp) { inp.select(); inp.setSelectionRange(0, inp.value.length); }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(fullUrl).then(() => toast("已复制链接，可粘贴到系统浏览器打开")).catch(() => toast("请手动 Ctrl+C 复制链接"));
+          } else {
+            try { document.execCommand("copy"); toast("已复制链接，可粘贴到系统浏览器打开"); } catch { toast("请手动 Ctrl+C 复制链接"); }
+          }
+        },
+      },
+    ], false);
+  if (fallbackSpaceId && state.view !== "world") enterWorld(fallbackSpaceId);
+}
+
+function openStandaloneWorld(spaceId) {
+  const url = withToken(window.location.pathname + "?space_id=" + encodeURIComponent(spaceId) + "&view=world");
+  _openPopupOrShareUrl(url, "nanami_world_" + String(spaceId || "main"), spaceId);
 }
 
 function enterWorld(spaceId) {
@@ -1024,6 +1087,1006 @@ function drawSprite(ctx, sprite, frameRows, palette, dx, dy, dw, dh, fallbackLab
 }
 
 /* ── 主视区渲染：Canvas 像素小屋 vs 她的视角终端 ── */
+// PAPERDOLL-BEGIN  弹丸论破风 8-bit Q 版小人：分层模板 + 外观参数（16×24，自动描边，无需任何图片）
+const PD_W = 16;
+const PD_H = 24;
+const PD_HAIR_STYLES = [["spiky", "乱翘短发"], ["long", "长直发"], ["bob", "波波头"], ["twin", "双马尾"], ["ponytail", "单马尾"], ["short", "清爽短发"]];
+const PD_OUTFITS = [["jacket", "开襟外套"], ["hoodie", "连帽卫衣"], ["dress", "水手裙装"], ["uniform", "西装制服"]];
+const PD_ACCESSORIES = [["none", "无"], ["bow", "蝴蝶结"], ["glasses", "眼镜"], ["ears", "猫耳"], ["headband", "发带"]];
+
+function pdBlank(w, h) { return Array.from({ length: h }, () => new Array(w).fill("")); }
+function pdPut(g, x, y, k) { if (y >= 0 && y < g.length && x >= 0 && x < g[0].length) g[y][x] = k; }
+function pdRect(g, x0, y0, x1, y1, k) { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) pdPut(g, x, y, k); }
+function pdPuts(g, list, k) { for (const [x, y] of list) pdPut(g, x, y, k); }
+function pdMirror(g) { return g.map((r) => r.slice().reverse()); }
+function pdOutline(g) {
+  const h = g.length, w = g[0].length;
+  const out = g.map((r) => r.slice());
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (g[y][x] !== "") continue;
+    if ((y > 0 && g[y - 1][x]) || (y < h - 1 && g[y + 1][x]) || (x > 0 && g[y][x - 1]) || (x < w - 1 && g[y][x + 1])) out[y][x] = "O";
+  }
+  return out;
+}
+
+function pdLegsFront(g, a, frame) {
+  const skirt = a.outfit_style === "dress";
+  const top = skirt ? 20 : 19;
+  const defs = [[5, 4, "L"], [9, 9, "R"]];
+  for (const [lx, sx, side] of defs) {
+    const raised = (frame === 1 && side === "L") || (frame === 2 && side === "R");
+    const bottom = raised ? 20 : 21;
+    pdRect(g, lx, top, lx + 1, bottom, "l");
+    pdRect(g, sx, bottom + 1, sx + 2, bottom + 1, "f");
+  }
+}
+
+function pdTorsoFront(g, a, back) {
+  const st = a.outfit_style;
+  if (st === "dress") {
+    pdRect(g, 5, 13, 10, 15, "j");
+    pdRect(g, 5, 16, 10, 16, "j");
+    pdRect(g, 4, 17, 11, 19, "j");
+    pdRect(g, 4, 19, 11, 19, "J");
+    if (!back) {
+      pdPuts(g, [[5, 13], [6, 13], [9, 13], [10, 13]], "J");
+      pdPuts(g, [[7, 14], [8, 14]], "J");
+      pdPuts(g, [[6, 15], [9, 15]], "J");
+    }
+    return;
+  }
+  pdRect(g, 5, 13, 10, 18, "j");
+  if (back) return;
+  if (st === "jacket") {
+    pdRect(g, 7, 13, 8, 18, "i");
+    pdPuts(g, [[5, 13], [6, 14], [6, 15], [7, 16], [5, 14]], "J");
+    pdRect(g, 5, 18, 10, 18, "l");
+  } else if (st === "hoodie") {
+    pdPuts(g, [[7, 14], [8, 14], [7, 15], [8, 15]], "i");
+    pdRect(g, 6, 17, 9, 17, "k");
+  } else {
+    pdRect(g, 6, 13, 9, 13, "i");
+    pdRect(g, 7, 14, 8, 17, "J");
+    pdPuts(g, [[5, 18], [10, 18]], "J");
+  }
+}
+
+function pdArmsFront(g, a, pose, back) {
+  const dress = a.outfit_style === "dress";
+  const sleeveEnd = dress ? 15 : 16;
+  const drawArm = (x) => {
+    pdRect(g, x, 14, x, sleeveEnd, back ? "j" : "j");
+    pdRect(g, x, sleeveEnd + 1, x, 17, "s");
+  };
+  drawArm(3);
+  if (pose === "raise" || pose === "reach" || pose === "hold") {
+    // 右臂（画面右侧）换成动作姿势
+    pdRect(g, 12, 14, 12, 17, "");
+    if (pose === "raise") {
+      pdPuts(g, [[12, 14], [12, 13]], "j");
+    } else if (pose === "reach") {
+      pdPuts(g, [[12, 14], [12, 15]], "j");
+      pdRect(g, 12, 16, 13, 17, "s");
+    } else {
+      pdPuts(g, [[12, 14], [12, 15]], "j");
+      pdPuts(g, [[11, 16], [12, 16]], "s");
+    }
+    if (pose === "hold") {
+      pdRect(g, 5, 16, 10, 17, "a");
+      pdPuts(g, [[5, 16], [10, 16]], "s");
+      pdPuts(g, [[3, 16], [3, 17]], "");
+      pdPuts(g, [[4, 15], [4, 16]], "j");
+    }
+  } else {
+    drawArm(12);
+  }
+}
+
+function pdHeadFront(g, a, back) {
+  const st = a.hair_style;
+  // 头顶发冠
+  pdRect(g, 5, 2, 10, 2, "h");
+  pdRect(g, 4, 3, 11, 3, "h");
+  pdRect(g, 3, 4, 12, 6, "h");
+  if (back) {
+    pdRect(g, 3, 7, 12, 9, "h");
+    pdRect(g, 4, 10, 11, 11, "h");
+    pdRect(g, 5, 12, 10, 12, "H");
+  } else {
+    if (st === "short") pdRect(g, 3, 7, 12, 11, "s");
+    else pdRect(g, 4, 7, 11, 11, "s");
+    pdRect(g, 5, 12, 10, 12, "s");
+    // 眼 / 口
+    pdRect(g, 5, 9, 6, 10, "e");
+    pdRect(g, 9, 9, 10, 10, "e");
+    pdPuts(g, [[7, 11], [8, 11]], "m");
+    // 刘海
+    if (st === "spiky") {
+      pdPuts(g, [[4, 7], [5, 7], [7, 7], [10, 7], [11, 7], [4, 8], [11, 8], [3, 7], [12, 7]], "h");
+    } else if (st === "short") {
+      pdPuts(g, [[3, 7], [4, 7], [5, 7], [6, 7], [9, 7], [10, 7], [11, 7], [12, 7], [3, 8], [12, 8]], "h");
+    } else {
+      pdRect(g, 4, 7, 11, 7, "h");
+      pdPuts(g, [[4, 8], [11, 8], [5, 8], [10, 8]], "h");
+    }
+    // 鬓角
+    if (st !== "short") pdRect(g, 3, 7, 3, 10, "H"), pdRect(g, 12, 7, 12, 10, "H");
+    if (st === "bob") pdRect(g, 3, 7, 3, 12, "H"), pdRect(g, 12, 7, 12, 12, "H");
+  }
+}
+
+function pdHairExtrasFront(g, a, back) {
+  const st = a.hair_style;
+  if (st === "spiky") {
+    pdPuts(g, [[7, 1], [8, 1], [5, 1], [10, 1], [4, 2], [11, 2], [2, 4], [2, 5], [1, 5], [2, 6], [1, 7], [2, 7], [13, 4], [13, 5], [14, 5], [13, 6], [14, 7], [13, 7]], "h");
+    if (!back) pdPuts(g, [[2, 8], [13, 8], [2, 9], [13, 9]], "H");
+    else pdPuts(g, [[2, 8], [13, 8], [3, 10], [12, 10]], "h");
+  } else if (st === "long") {
+    pdRect(g, 2, 7, 2, 17, "H");
+    pdRect(g, 13, 7, 13, 17, "H");
+    pdRect(g, 3, 10, 3, 13, "H");
+    pdRect(g, 12, 10, 12, 13, "H");
+    if (back) pdRect(g, 4, 13, 11, 17, "H");
+  } else if (st === "twin") {
+    pdRect(g, 1, 7, 2, 12, "H");
+    pdRect(g, 13, 7, 14, 12, "H");
+    pdPuts(g, [[1, 13], [14, 13], [1, 14], [14, 14]], "H");
+    pdRect(g, 1, 6, 2, 6, "a");
+    pdRect(g, 13, 6, 14, 6, "a");
+    if (back) pdRect(g, 5, 13, 10, 14, "H");
+  } else if (st === "ponytail") {
+    pdRect(g, 13, 6, 14, 13, "H");
+    pdPuts(g, [[14, 14], [13, 14]], "H");
+    pdRect(g, 13, 5, 14, 5, "a");
+    if (back) pdRect(g, 6, 13, 9, 15, "H");
+  }
+}
+
+function pdAccessoryFront(g, a, back) {
+  const acc = a.accessory;
+  if (acc === "bow") {
+    pdRect(g, 10, 1, 11, 3, "a");
+    pdRect(g, 13, 1, 14, 3, "a");
+    pdRect(g, 12, 2, 12, 2, "J");
+  } else if (acc === "ears") {
+    pdPuts(g, [[4, 1], [5, 1], [4, 2]], "h");
+    pdPuts(g, [[10, 1], [11, 1], [11, 2]], "h");
+    pdPuts(g, [[4, 2], [11, 2]], "a");
+  } else if (acc === "headband") {
+    pdRect(g, 3, 6, 12, 6, "a");
+  } else if (acc === "glasses" && !back) {
+    pdPuts(g, [[4, 8], [5, 8], [6, 8], [9, 8], [10, 8], [11, 8], [7, 9], [8, 9], [3, 9], [12, 9]], "a");
+  }
+}
+
+function pdBuildFront(a, frame, pose, back, sit) {
+  const g = pdBlank(PD_W, PD_H);
+  if (!sit) pdLegsFront(g, a, frame);
+  pdTorsoFront(g, a, back);
+  pdArmsFront(g, a, pose, back);
+  pdHairExtrasFront(g, a, true && back);
+  pdHeadFront(g, a, back);
+  if (!back) pdHairExtrasFront(g, a, false);
+  if (pose === "raise" && !back) pdRect(g, 12, 11, 13, 12, "s");
+  pdAccessoryFront(g, a, back);
+  return g;
+}
+
+function pdBuildSide(a, frame, pose, sit) {
+  const g = pdBlank(PD_W, PD_H);
+  const st = a.hair_style;
+  const skirt = a.outfit_style === "dress";
+  const top = skirt ? 20 : 19;
+  // 腿
+  if (!sit) {
+    const legs = frame === 0 ? [[6, 7, 0], [9, 10, 0]] : frame === 1 ? [[5, 6, 0], [10, 11, 1]] : [[7, 8, 1], [8, 9, 0]];
+    for (const [x0, x1, raised] of legs) {
+      const bottom = raised ? 20 : 21;
+      pdRect(g, x0, top, x1, bottom, "l");
+      pdRect(g, x0, bottom + 1, x1 + (x1 >= 9 ? 1 : 0), bottom + 1, "f");
+    }
+  }
+  // 后发（在身体后面）
+  if (st === "long") pdRect(g, 2, 7, 5, 17, "H");
+  if (st === "ponytail") { pdRect(g, 1, 6, 2, 14, "H"); pdRect(g, 1, 5, 2, 5, "a"); }
+  if (st === "twin") { pdRect(g, 1, 7, 2, 13, "H"); pdRect(g, 1, 6, 2, 6, "a"); }
+  // 躯干
+  if (skirt) {
+    pdRect(g, 6, 13, 10, 16, "j");
+    pdRect(g, 5, 17, 11, 19, "j");
+    pdRect(g, 5, 19, 11, 19, "J");
+    pdPuts(g, [[10, 13], [10, 14]], "J");
+  } else {
+    pdRect(g, 6, 13, 10, 18, "j");
+    if (a.outfit_style === "jacket") { pdRect(g, 10, 13, 10, 18, "i"); pdRect(g, 6, 18, 10, 18, "l"); }
+    else if (a.outfit_style === "uniform") { pdRect(g, 10, 14, 10, 17, "J"); }
+    else { pdRect(g, 7, 17, 9, 17, "k"); }
+  }
+  // 手臂（前臂在身体前侧）
+  const armShift = frame === 1 ? 1 : frame === 2 ? -1 : 0;
+  if (pose === "reach") {
+    pdRect(g, 8, 15, 11, 15, "k");
+    pdRect(g, 12, 15, 13, 16, "s");
+  } else if (pose === "raise") {
+    pdRect(g, 9, 13, 9, 14, "k");
+    pdRect(g, 9, 12, 10, 12, "k");
+    pdPuts(g, [[10, 11], [11, 11]], "s");
+  } else if (pose === "hold") {
+    pdRect(g, 8, 15, 10, 15, "k");
+    pdRect(g, 11, 15, 11, 16, "s");
+    pdRect(g, 12, 15, 13, 17, "a");
+  } else {
+    const ax = 7 + armShift;
+    const dressSleeve = skirt ? 15 : 16;
+    pdRect(g, ax, 14, ax + 1, dressSleeve, "k");
+    pdRect(g, ax, dressSleeve + 1, ax + 1, 17, "s");
+  }
+  // 头
+  pdRect(g, 5, 2, 10, 2, "h");
+  pdRect(g, 4, 3, 11, 3, "h");
+  pdRect(g, 3, 4, 12, 6, "h");
+  pdRect(g, 3, 7, 6, 11, "H");
+  pdPuts(g, [[4, 12], [5, 12], [6, 12]], "H");
+  pdRect(g, 7, 7, 12, 11, "s");
+  pdRect(g, 8, 12, 11, 12, "s");
+  pdRect(g, 10, 9, 10, 10, "e");
+  pdPut(g, 11, 11, "m");
+  if (st === "short") { pdRect(g, 3, 9, 6, 11, "s"); pdRect(g, 3, 7, 6, 8, "h"); }
+  if (st === "bob") pdRect(g, 3, 7, 6, 12, "H");
+  // 刘海
+  if (st === "spiky") pdPuts(g, [[7, 7], [8, 7], [10, 7], [12, 7], [12, 8], [3, 7], [4, 7], [5, 7], [6, 7]], "h");
+  else pdRect(g, 7, 7, 12, 7, "h"), pdPut(g, 12, 8, "h");
+  if (st === "spiky") pdPuts(g, [[7, 1], [8, 1], [2, 5], [2, 6], [13, 5], [13, 6], [4, 2], [2, 4]], "h");
+  // 配饰
+  const acc = a.accessory;
+  if (acc === "bow") { pdRect(g, 5, 1, 6, 3, "a"); pdRect(g, 8, 1, 9, 3, "a"); pdPut(g, 7, 2, "J"); }
+  else if (acc === "ears") { pdPuts(g, [[5, 1], [6, 1], [5, 2]], "h"); pdPuts(g, [[9, 1], [10, 1], [10, 2]], "h"); pdPuts(g, [[5, 2], [10, 2]], "a"); }
+  else if (acc === "headband") pdRect(g, 3, 6, 12, 6, "a");
+  else if (acc === "glasses") { pdPuts(g, [[9, 9], [9, 10], [11, 9], [11, 10], [10, 8], [10, 11]], "a"); }
+  return g;
+}
+
+function pdBuildLying(a, breathe) {
+  const W = 22, H = 14;
+  const g = pdBlank(W, H);
+  const st = a.hair_style;
+  // 枕头
+  pdRect(g, 0, 9, 11, 12, "i");
+  // 长发散在枕边
+  if (st === "long" || st === "twin" || st === "ponytail") pdRect(g, 0, 6, 2, 11, "H");
+  // 头
+  pdRect(g, 3, 2, 9, 3, "h");
+  pdRect(g, 2, 4, 10, 5, "h");
+  pdRect(g, 3, 6, 9, 10, "s");
+  pdRect(g, 4, 11, 8, 11, "s");
+  pdRect(g, 3, 6, 9, 6, "h");
+  if (st === "spiky") pdPuts(g, [[4, 1], [6, 1], [8, 1], [3, 6], [5, 6], [8, 6]], "h");
+  pdPuts(g, [[2, 6], [2, 7], [10, 6], [10, 7]], "H");
+  // 闭眼与小嘴
+  pdRect(g, 4, 8, 5, 8, "e");
+  pdRect(g, 7, 8, 8, 8, "e");
+  pdPuts(g, [[6, 10]], "m");
+  if (a.accessory === "bow") pdPuts(g, [[9, 3], [10, 3], [9, 4], [10, 4]], "a");
+  else if (a.accessory === "headband") pdRect(g, 2, 5, 10, 5, "a");
+  else if (a.accessory === "ears") pdPuts(g, [[3, 1], [4, 1], [3, 2]], "h"), pdPuts(g, [[8, 1], [9, 1], [9, 2]], "h");
+  else if (a.accessory === "glasses") pdRect(g, 4, 7, 8, 7, "a");
+  // 被子
+  const lift = breathe ? 1 : 0;
+  pdRect(g, 10, 7 - lift, 20, 12, "j");
+  pdRect(g, 12, 6 - lift, 19, 6 - lift, "j");
+  pdRect(g, 10, 7 - lift, 20, 7 - lift, "k");
+  pdRect(g, 10, 12, 20, 12, "J");
+  pdRect(g, 10, 8, 10, 11, "J");
+  pdPuts(g, [[21, 10], [21, 11]], "j");
+  return g;
+}
+
+function pdShade(hex, amt) {
+  const m = /^#([0-9a-f]{6})$/i.exec(String(hex || ""));
+  if (!m) return "#555555";
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => Math.max(0, Math.min(255, Math.round(amt < 0 ? c * (1 + amt) : c + (255 - c) * amt))));
+  return "#" + ch.map((c) => c.toString(16).padStart(2, "0")).join("");
+}
+
+function pdPalette(a) {
+  const base = {
+    O: "#1d1722", o: "#1d1722", h: a.hair_color, H: a.hair_shade, s: a.skin, e: a.eye_color, m: "#4a3038",
+    j: a.outfit_color, J: a.outfit_accent, i: a.outfit_inner, l: a.legs_color, f: a.shoes_color,
+    a: a.accessory_color, k: pdShade(a.outfit_color, -0.2),
+  };
+  const cp = a && a.custom_frames && a.custom_frames.palette;
+  if (cp && typeof cp === "object") {
+    for (const [k, v] of Object.entries(cp)) {
+      if (k && typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v)) base[k] = v;
+    }
+  }
+  return base;
+}
+
+function pdFromRows(rows, gw, gh) {
+  const w = gw || ((rows && rows[0] && rows[0].length) || PD_W);
+  const h = gh || ((rows && rows.length) || PD_H);
+  const g = pdBlank(w, h);
+  for (let y = 0; y < h; y++) {
+    const r = String((rows && rows[y]) || "");
+    for (let x = 0; x < w; x++) {
+      const ch = r[x] || ".";
+      g[y][x] = (ch === "." || ch === " ") ? "" : ch;
+    }
+  }
+  return g;
+}
+
+function pdDeriveBackFromFront(g, pal) {
+  const h = g.length, w = g[0].length;
+  const b = g.map((r) => r.slice());
+  // 找出头顶最常见的发色 key（非 O/o）
+  const hairCounts = new Map();
+  const topEnd = Math.floor(h * 0.28);
+  for (let y = 1; y <= topEnd; y++) for (let x = 2; x < w - 2; x++) {
+    const k = b[y][x];
+    if (!k || k === "O" || k === "o") continue;
+    hairCounts.set(k, (hairCounts.get(k) || 0) + 1);
+  }
+  let hairKey = "h";
+  let bestCnt = -1;
+  for (const [k, cnt] of hairCounts.entries()) {
+    if (cnt > bestCnt) { bestCnt = cnt; hairKey = k; }
+  }
+  const isSkinOrEye = (k, x, y) => {
+    if (!k) return false;
+    if (k === "s" || k === "e" || k === "m") return true;
+    // 仅当暗色/描边像素处于脸部内部（非外轮廓）时视为眼睛/嘴巴
+    const isInterior = x > 2 && x < w - 3 && b[y][x - 1] && b[y][x + 1] && b[y - 1] && b[y - 1][x] && b[y + 1] && b[y + 1][x];
+    if (k === "O" || k === "o") return Boolean(isInterior);
+    const hex = pal && pal[k];
+    if (!hex || hex[0] !== "#") return false;
+    const n = parseInt(hex.slice(1), 16);
+    const r = (n >> 16) & 255, gg = (n >> 8) & 255, bl = n & 255;
+    // 浅肤色（含偏白/冷白二次元肤色）或深瞳孔/嘴线
+    if (r > 198 && gg > 175 && bl > 165) return true;
+    if (r + gg + bl < 240 && isInterior) return true;
+    return false;
+  };
+  const faceStart = Math.floor(h * 0.20);
+  const faceEnd = Math.floor(h * 0.54);
+  const xL = Math.max(3, Math.floor(w * 0.24));
+  const xR = Math.min(w - 4, Math.ceil(w * 0.76));
+  for (let y = faceStart; y <= faceEnd; y++) for (let x = xL; x <= xR; x++) {
+    if (isSkinOrEye(b[y][x], x, y)) b[y][x] = hairKey;
+  }
+  return b;
+}
+
+function pdDeriveSideFromFront(g) {
+  // 对仅提供正面图的高精像素小人（如弹丸原版 25×28），保持原画完整像素轮廓，
+  // 避免硬裁切导致头部/发型畸变；朝左时由 pdMirror 自动水平翻转。
+  return g.map((r) => r.slice());
+}
+
+function pdAnimateCustomLegs(g, frame) {
+  if (frame !== 1 && frame !== 2) return;
+  const h = g.length, w = g[0].length;
+  const mid = Math.floor(w / 2);
+  const x0 = frame === 1 ? 0 : mid;
+  const x1 = frame === 1 ? (mid - 1) : (w - 1);
+  const shift = h >= 48 ? 3 : (h >= 26 ? 2 : 1);
+  const yStart = h - Math.round(h * 0.24);
+  for (let y = yStart; y <= h - 1 - shift; y++) {
+    for (let x = x0; x <= x1; x++) g[y][x] = g[y + shift][x];
+  }
+  for (let y = h - shift; y < h; y++) {
+    for (let x = x0; x <= x1; x++) g[y][x] = "";
+  }
+}
+
+function pdApplyCustomPose(g, dir, pose) {
+  if (!pose) return;
+  const w = g[0].length, h = g.length;
+  const sx = w >= 20 ? 3 : 0;
+  const sy = h >= 28 ? 4 : 0;
+  if (dir === "left" || dir === "right") {
+    if (pose === "raise") pdPuts(g, [[10 + sx, 11 + sy], [11 + sx, 11 + sy]], "s");
+    else if (pose === "reach") pdRect(g, 12 + sx, 15 + sy, 14 + sx, 16 + sy, "s");
+    else if (pose === "hold") pdRect(g, 12 + sx, 15 + sy, 13 + sx, 17 + sy, "a");
+  } else if (dir === "down") {
+    if (pose === "raise") pdRect(g, 12 + sx, 11 + sy, 13 + sx, 12 + sy, "s");
+    else if (pose === "reach") pdRect(g, 12 + sx, 16 + sy, 13 + sx, 17 + sy, "s");
+    else if (pose === "hold") pdRect(g, 5 + sx, 16 + sy, 10 + sx, 17 + sy, "a");
+  }
+}
+
+function pdBuildCustomLying(a, gDown, breathe, pal) {
+  const gw = gDown[0].length, gh = gDown.length;
+  if (gw >= 36 && gh >= 48) {
+    const W = 52, H = 32;
+    const g = pdBlank(W, H);
+    pdRect(g, 1, 18, 25, 29, "i");
+    const headBottom = Math.floor(gh * 0.36);
+    for (let y = 0; y <= headBottom; y++) {
+      for (let x = 4; x <= gw - 5; x++) {
+        const ch = gDown[y][x];
+        if (!ch || ch === "o" || ch === "O") continue;
+        g[y + 1][x - 3] = ch;
+      }
+    }
+    const lift = breathe ? 2 : 0;
+    pdRect(g, 25, 14 - lift, 49, 29, "j");
+    pdRect(g, 28, 12 - lift, 47, 13 - lift, "j");
+    pdRect(g, 25, 14 - lift, 49, 15 - lift, "k");
+    pdRect(g, 25, 28, 49, 29, "J");
+    pdRect(g, 25, 16, 26, 27, "J");
+    return g;
+  }
+  if (gw >= 20 && gh >= 26) {
+    const W = 32, H = 22;
+    const g = pdBlank(W, H);
+    const headBottom = Math.min(H - 5, Math.floor(gh * 0.55));
+    pdRect(g, 1, Math.max(4, headBottom - 5), 16, headBottom + 3, "i");
+    for (let y = 0; y <= headBottom; y++) {
+      for (let x = 1; x <= Math.min(gw - 2, 22); x++) {
+        const ch = gDown[y][x];
+        if (!ch) continue;
+        if (ch === "O" || ch === "o") {
+          const inner = x > 1 && x < gw - 2 && gDown[y][x - 1] && gDown[y][x + 1];
+          if (!inner) continue;
+        }
+        g[y + 1][x] = ch;
+      }
+    }
+    const lift = breathe ? 1 : 0;
+    pdRect(g, 16, 11 - lift, 30, 19, "j");
+    pdRect(g, 18, 10 - lift, 29, 10 - lift, "j");
+    pdRect(g, 16, 11 - lift, 30, 11 - lift, "k");
+    pdRect(g, 16, 19, 30, 19, "J");
+    pdRect(g, 16, 12, 16, 18, "J");
+    return g;
+  }
+  const g = pdBuildLying(a, breathe);
+  for (let y = 0; y <= 11; y++) {
+    for (let x = 0; x < 13; x++) {
+      const ch = gDown[y][x + 1];
+      if (!ch || ch === "o" || ch === "O") continue;
+      if (y === 9 && ch === "e") g[y][x] = "s";
+      else if (y === 10 && ch === "e") g[y][x] = "e";
+      else g[y][x] = ch;
+    }
+  }
+  return g;
+}
+
+function pdScaleGrid(g, tw, th) {
+  const sh = g.length, sw = g[0].length;
+  if (sw === tw && sh === th) return g;
+  const out = pdBlank(tw, th);
+  for (let y = 0; y < th; y++) {
+    const sy = Math.min(sh - 1, Math.floor(y * sh / th));
+    for (let x = 0; x < tw; x++) {
+      const sx = Math.min(sw - 1, Math.floor(x * sw / tw));
+      out[y][x] = g[sy][sx];
+    }
+  }
+  return out;
+}
+
+function pdPixelizeDataUrlTo23x32(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const W = img.naturalWidth || img.width;
+        const H = img.naturalHeight || img.height;
+        const cv = document.createElement("canvas");
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const imData = ctx.getImageData(0, 0, W, H);
+        const d = imData.data;
+
+        // 1. 采样四角背景色，执行边缘泛洪透明抠图（保护被黑描边围住的白色衬衫/白袜）
+        const bgR = d[0], bgG = d[1], bgB = d[2], bgA = d[3];
+        const mask = new Uint8Array(W * H);
+        if (bgA > 200) {
+          const isBg = (idx) => {
+            const p = idx * 4;
+            if (d[p + 3] < 96) return true;
+            const dr = d[p] - bgR, dg = d[p + 1] - bgG, db = d[p + 2] - bgB;
+            return (dr * dr + dg * dg + db * db) < 42 * 42;
+          };
+          const q = [];
+          for (let x = 0; x < W; x++) {
+            if (isBg(x)) { mask[x] = 1; q.push(x); }
+            const bi = (H - 1) * W + x;
+            if (isBg(bi) && !mask[bi]) { mask[bi] = 1; q.push(bi); }
+          }
+          for (let y = 1; y < H - 1; y++) {
+            const li = y * W;
+            if (isBg(li) && !mask[li]) { mask[li] = 1; q.push(li); }
+            const ri = y * W + (W - 1);
+            if (isBg(ri) && !mask[ri]) { mask[ri] = 1; q.push(ri); }
+          }
+          let head = 0;
+          while (head < q.length) {
+            const cur = q[head++];
+            const cx = cur % W, cy = (cur / W) | 0;
+            if (cx > 0 && !mask[cur - 1] && isBg(cur - 1)) { mask[cur - 1] = 1; q.push(cur - 1); }
+            if (cx < W - 1 && !mask[cur + 1] && isBg(cur + 1)) { mask[cur + 1] = 1; q.push(cur + 1); }
+            if (cy > 0 && !mask[cur - W] && isBg(cur - W)) { mask[cur - W] = 1; q.push(cur - W); }
+            if (cy < H - 1 && !mask[cur + W] && isBg(cur + W)) { mask[cur + W] = 1; q.push(cur + W); }
+          }
+        } else {
+          for (let i = 0; i < W * H; i++) if (d[i * 4 + 3] < 96) mask[i] = 1;
+        }
+
+        // 2. 计算紧致包围盒
+        let minX = W, maxX = -1, minY = H, maxY = -1;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          if (mask[y * W + x]) continue;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+        if (maxX < minX || maxY < minY) return reject(new Error("未检测到前景角色像素"));
+
+        // 3. 缩放到 46x64 清晰像素网格（保留五官与发饰细节，预留 1px 描边空位：内部 44x62 落底居中）
+        const TW = 46, TH = 64, IW = 44, IH = 62;
+        const bw = maxX - minX + 1, bh = maxY - minY + 1;
+        const scale = Math.min(IW / bw, IH / bh);
+        const dw = Math.max(1, Math.round(bw * scale));
+        const dh = Math.max(1, Math.round(bh * scale));
+        const ox = Math.floor((TW - dw) / 2);
+        const oy = (TH - 1) - dh;
+
+        const palette = { O: "#1d1722" };
+        const palColors = [];
+        // 避开基础模板保留字（h H s e m j J i l f a k o O），防止调色板冲突
+        const keys = "0123456789BCDFGKNPQRTUVWXYZbcdgnpqrtuvwxyz";
+        let ki = 0;
+        const toHex = (r, g, b) => "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+        const pickKey = (r, g, b) => {
+          if (r + g + b < 135 && Math.max(r, g, b) < 70) return "O";
+          for (const item of palColors) {
+            const dr = item.r - r, dg = item.g - g, db = item.b - b;
+            if (dr * dr + dg * dg + db * db < 24 * 24) return item.k;
+          }
+          if (ki < keys.length) {
+            const ch = keys[ki++];
+            palette[ch] = toHex(r, g, b);
+            palColors.push({ k: ch, r, g, b });
+            return ch;
+          }
+          let best = palColors[0], bestD = 1e9;
+          for (const item of palColors) {
+            const dist = (item.r - r) ** 2 + (item.g - g) ** 2 + (item.b - b) ** 2;
+            if (dist < bestD) { bestD = dist; best = item; }
+          }
+          return best.k;
+        };
+
+        const rows = [];
+        for (let gy = 0; gy < TH; gy++) {
+          let line = "";
+          for (let gx = 0; gx < TW; gx++) {
+            const rx = gx - ox, ry = gy - oy;
+            if (rx < 0 || rx >= dw || ry < 0 || ry >= dh) { line += "."; continue; }
+            const sx0 = minX + Math.floor(rx * bw / dw);
+            const sx1 = Math.max(sx0 + 1, minX + Math.floor((rx + 1) * bw / dw));
+            const sy0 = minY + Math.floor(ry * bh / dh);
+            const sy1 = Math.max(sy0 + 1, minY + Math.floor((ry + 1) * bh / dh));
+            // 取中心点为主、结合前景占比，保留锐利边缘与五官
+            const cx = Math.floor((sx0 + sx1) / 2);
+            const cy = Math.floor((sy0 + sy1) / 2);
+            let fgCount = 0, total = 0;
+            for (let sy = sy0; sy < sy1; sy++) for (let sx = sx0; sx < sx1; sx++) {
+              total++;
+              if (!mask[sy * W + sx]) fgCount++;
+            }
+            if (fgCount < total * 0.32) { line += "."; continue; }
+            let sampleIdx = cy * W + cx;
+            if (mask[sampleIdx]) {
+              // 中心刚好透明时，找格内第一个前景像素
+              for (let sy = sy0; sy < sy1 && mask[sampleIdx]; sy++) {
+                for (let sx = sx0; sx < sx1; sx++) {
+                  if (!mask[sy * W + sx]) { sampleIdx = sy * W + sx; break; }
+                }
+              }
+            }
+            const p = sampleIdx * 4;
+            line += pickKey(d[p], d[p + 1], d[p + 2]);
+          }
+          rows.push(line);
+        }
+        resolve({ w: TW, h: TH, palette, down: rows });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = dataUrl;
+  });
+}
+
+function pdDecodeToPixels(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const W = img.naturalWidth || img.width;
+        const H = img.naturalHeight || img.height;
+        const cv = document.createElement("canvas");
+        cv.width = W;
+        cv.height = H;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, W, H).data;
+        const bgR = d[0], bgG = d[1], bgB = d[2], bgA = d[3];
+        const mask = new Uint8Array(W * H);
+        if (bgA > 200) {
+          const isBg = (idx) => {
+            const p = idx * 4;
+            if (d[p + 3] < 96) return true;
+            const dr = d[p] - bgR, dg = d[p + 1] - bgG, db = d[p + 2] - bgB;
+            return (dr * dr + dg * dg + db * db) < 38 * 38;
+          };
+          const q = [];
+          for (let x = 0; x < W; x++) {
+            if (isBg(x)) { mask[x] = 1; q.push(x); }
+            const bi = (H - 1) * W + x;
+            if (isBg(bi) && !mask[bi]) { mask[bi] = 1; q.push(bi); }
+          }
+          for (let y = 1; y < H - 1; y++) {
+            const li = y * W;
+            if (isBg(li) && !mask[li]) { mask[li] = 1; q.push(li); }
+            const ri = y * W + (W - 1);
+            if (isBg(ri) && !mask[ri]) { mask[ri] = 1; q.push(ri); }
+          }
+          let head = 0;
+          while (head < q.length) {
+            const cur = q[head++];
+            const cx = cur % W, cy = (cur / W) | 0;
+            if (cx > 0 && !mask[cur - 1] && isBg(cur - 1)) { mask[cur - 1] = 1; q.push(cur - 1); }
+            if (cx < W - 1 && !mask[cur + 1] && isBg(cur + 1)) { mask[cur + 1] = 1; q.push(cur + 1); }
+            if (cy > 0 && !mask[cur - W] && isBg(cur - W)) { mask[cur - W] = 1; q.push(cur - W); }
+            if (cy < H - 1 && !mask[cur + W] && isBg(cur + W)) { mask[cur + W] = 1; q.push(cur + W); }
+          }
+        } else {
+          for (let i = 0; i < W * H; i++) if (d[i * 4 + 3] < 96) mask[i] = 1;
+        }
+        let minX = W, maxX = -1, minY = H, maxY = -1;
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          if (mask[y * W + x]) continue;
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
+        }
+        if (maxX < minX || maxY < minY) return reject(new Error("未检测到前景角色像素"));
+        resolve({ W, H, d, mask, minX, maxX, minY, maxY });
+      } catch (err) { reject(err); }
+    };
+    img.onerror = () => reject(new Error("图片解码失败"));
+    img.src = dataUrl;
+  });
+}
+
+function pdDetectIntScale(W, d, mask, minX, maxX, minY, maxY) {
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  if (bw > 140 || bh > 140) return 1;
+  for (const s of [4, 3, 2]) {
+    if (bw < s * 10 || bh < s * 12) continue;
+    let total = 0, same = 0;
+    for (let y = minY; y + s - 1 <= maxY; y += s) {
+      for (let x = minX; x + s - 1 <= maxX; x += s) {
+        total++;
+        const i0 = y * W + x;
+        const m0 = mask[i0];
+        const p0 = i0 * 4;
+        let ok = true;
+        for (let dy = 0; dy < s && ok; dy++) for (let dx = 0; dx < s; dx++) {
+          const ii = (y + dy) * W + (x + dx);
+          if (mask[ii] !== m0) { ok = false; break; }
+          if (!m0) {
+            const p = ii * 4;
+            if (Math.abs(d[p] - d[p0]) + Math.abs(d[p + 1] - d[p0 + 1]) + Math.abs(d[p + 2] - d[p0 + 2]) > 18) { ok = false; break; }
+          }
+        }
+        if (ok) same++;
+      }
+    }
+    if (total > 0 && same / total >= 0.9) return s;
+  }
+  return 1;
+}
+
+function pdMakePaletteHelper() {
+  const palette = { O: "#1d1722" };
+  const palColors = [];
+  const keys = "0123456789BCDFGKNPQRTUVWXYZbcdgnpqrtuvwxyz";
+  let ki = 0;
+  const toHex = (r, g, b) => "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+  const pickKey = (r, g, b, exact) => {
+    if (r + g + b < 110 && Math.max(r, g, b) < 55) return "O";
+    const tol = exact ? 8 : 22;
+    for (const item of palColors) {
+      const dr = item.r - r, dg = item.g - g, db = item.b - b;
+      if (dr * dr + dg * dg + db * db < tol * tol) return item.k;
+    }
+    if (ki < keys.length) {
+      const ch = keys[ki++];
+      palette[ch] = toHex(r, g, b);
+      palColors.push({ k: ch, r, g, b });
+      return ch;
+    }
+    let best = palColors[0], bestD = 1e9;
+    for (const item of palColors) {
+      const dist = (item.r - r) ** 2 + (item.g - g) ** 2 + (item.b - b) ** 2;
+      if (dist < bestD) { bestD = dist; best = item; }
+    }
+    return best.k;
+  };
+  return { palette, pickKey };
+}
+
+async function pdExtractNativePixelSprite(dataUrl) {
+  const { W, d, mask, minX, maxX, minY, maxY } = await pdDecodeToPixels(dataUrl);
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  const { palette, pickKey } = pdMakePaletteHelper();
+  const s = pdDetectIntScale(W, d, mask, minX, maxX, minY, maxY);
+  const natW = Math.round(bw / s), natH = Math.round(bh / s);
+  if (natW <= 60 && natH <= 60) {
+    const rows = [];
+    for (let gy = 0; gy < natH; gy++) {
+      let line = "";
+      const sy = Math.min(maxY, minY + gy * s + Math.floor(s / 2));
+      for (let gx = 0; gx < natW; gx++) {
+        const sx = Math.min(maxX, minX + gx * s + Math.floor(s / 2));
+        const idx = sy * W + sx;
+        if (mask[idx]) { line += "."; continue; }
+        const p = idx * 4;
+        line += pickKey(d[p], d[p + 1], d[p + 2], true);
+      }
+      rows.push(line);
+    }
+    return { w: Math.max(12, natW), h: Math.max(16, natH), palette, down: rows };
+  }
+  return pdPixelizeDataUrlTo23x32(dataUrl);
+}
+
+async function pdExtract4DirPixelLabFrames(imagesMap) {
+  const { palette, pickKey } = pdMakePaletteHelper();
+  const decoded = {};
+  let maxW = 16, maxH = 24;
+  for (const dir of ["down", "right", "up"]) {
+    if (!imagesMap[dir]) continue;
+    const dec = await pdDecodeToPixels(imagesMap[dir]);
+    decoded[dir] = dec;
+    maxW = Math.max(maxW, dec.maxX - dec.minX + 1);
+    maxH = Math.max(maxH, dec.maxY - dec.minY + 1);
+  }
+  const TW = Math.min(64, Math.max(16, maxW));
+  const TH = Math.min(64, Math.max(24, maxH));
+  const out = { w: TW, h: TH, palette };
+  for (const [dir, dec] of Object.entries(decoded)) {
+    const bw = dec.maxX - dec.minX + 1, bh = dec.maxY - dec.minY + 1;
+    const ox = Math.floor((TW - bw) / 2);
+    const oy = TH - bh;
+    const rows = [];
+    for (let gy = 0; gy < TH; gy++) {
+      let line = "";
+      const ry = gy - oy;
+      for (let gx = 0; gx < TW; gx++) {
+        const rx = gx - ox;
+        if (rx < 0 || rx >= bw || ry < 0 || ry >= bh) { line += "."; continue; }
+        const idx = (dec.minY + ry) * dec.W + (dec.minX + rx);
+        if (dec.mask[idx]) { line += "."; continue; }
+        const p = idx * 4;
+        line += pickKey(dec.d[p], dec.d[p + 1], dec.d[p + 2], true);
+      }
+      rows.push(line);
+    }
+    out[dir] = rows;
+  }
+  return out;
+}
+
+// dir: down/up/left/right；variant: ""(站立/行走) | "sit"(坐起) | "lying"(睡姿，frame 0/1 为呼吸)
+function pdBuildGrid(a, dir, frame, pose, variant) {
+  const cf = a && a.custom_frames;
+  const hasCustom = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16);
+  if (hasCustom) {
+    const ch = cf.down.length;
+    const cw = (cf.down[0] && cf.down[0].length) || (cf.w || 23);
+    const pal = pdPalette(a);
+    const gDown = pdFromRows(cf.down, cw, ch);
+    if (variant === "lying") return pdOutline(pdBuildCustomLying(a, gDown, frame === 1, pal));
+    let g;
+    if (dir === "up") {
+      // 若无显式背面帧（如弹丸原版单面像素小人），不强行伪造背面，保持正面并保留抬腿动画
+      g = (Array.isArray(cf.up) && cf.up.length === ch) ? pdFromRows(cf.up, cw, ch) : gDown.map((r) => r.slice());
+    } else if (dir === "right" || dir === "left") {
+      const hasExplicitRight = Array.isArray(cf.right) && cf.right.length === ch;
+      const baseR = hasExplicitRight ? pdFromRows(cf.right, cw, ch) : pdDeriveSideFromFront(gDown);
+      g = baseR.map((r) => r.slice());
+      if (hasExplicitRight && cw <= 18) pdApplyCustomPose(g, "right", pose);
+      if (dir === "left") g = pdMirror(g);
+    } else {
+      g = gDown.map((r) => r.slice());
+      if (cw <= 18) pdApplyCustomPose(g, "down", pose);
+    }
+    if (variant === "sit") {
+      const sitY = Math.floor(ch * 0.68);
+      for (let y = sitY; y < ch; y++) for (let x = 0; x < cw; x++) g[y][x] = "";
+      pdRect(g, 2, sitY, cw - 3, sitY + 3, "j");
+      pdRect(g, 2, sitY, cw - 3, sitY, "k");
+      pdRect(g, 2, sitY + 3, cw - 3, sitY + 3, "J");
+    } else {
+      pdAnimateCustomLegs(g, frame);
+    }
+    return pdOutline(g);
+  }
+
+  let g;
+  if (variant === "lying") return pdOutline(pdBuildLying(a, frame === 1));
+  const sit = variant === "sit";
+  if (dir === "left") g = pdMirror(pdBuildSide(a, frame, pose, sit));
+  else if (dir === "right") g = pdBuildSide(a, frame, pose, sit);
+  else g = pdBuildFront(a, frame, pose, dir === "up", sit);
+  if (sit) {
+    for (let y = 17; y < PD_H; y++) for (let x = 0; x < PD_W; x++) g[y][x] = "";
+    pdRect(g, 2, 17, 13, 20, "j");
+    pdRect(g, 2, 17, 13, 17, "k");
+    pdRect(g, 2, 20, 13, 20, "J");
+  }
+  return pdOutline(g);
+}
+
+const PD_CACHE = new Map();
+function pdSprite(a, dir, frame, pose, variant) {
+  const key = [JSON.stringify(a), dir, frame, pose || "", variant || ""].join("|");
+  let cv = PD_CACHE.get(key);
+  if (cv) return cv;
+  const g = pdBuildGrid(a, dir, frame, pose || "", variant || "");
+  const pal = pdPalette(a);
+  cv = document.createElement("canvas");
+  cv.width = g[0].length;
+  cv.height = g.length;
+  const c = cv.getContext("2d");
+  for (let y = 0; y < g.length; y++) for (let x = 0; x < g[0].length; x++) {
+    const k = g[y][x];
+    if (!k) continue;
+    c.fillStyle = pal[k] || "#ff00ff";
+    c.fillRect(x, y, 1, 1);
+  }
+  if (PD_CACHE.size > 400) PD_CACHE.clear();
+  PD_CACHE.set(key, cv);
+  return cv;
+}
+// PAPERDOLL-END
+
+// ── 小人动画状态机：走位补间 / 交互姿势 / 入睡与起身 / 呼吸 ──────────────
+const PD_ANIM = new Map();
+const PD_SPEED = 5.5;
+let PD_LOOP = { moving: false, resting: false };
+
+function pdPoseForVerb(verb) {
+  const v = String(verb || "");
+  if (!v || v === "look" || v === "rest" || v === "leave_rest") return "";
+  if (v === "consume") return "raise";
+  if (v === "interact" || v === "read" || v === "write") return "hold";
+  return "reach";
+}
+function pdIconForVerb(verb) {
+  const map = { consume: "🍴", interact: "🎮", read: "📖", write: "✎", turn_on: "💡", turn_off: "💡", open: "🗝", close: "🗝", take: "✋", put: "✋", enter: "🚪" };
+  return map[String(verb || "")] || "";
+}
+function pdDirFromDelta(dx, dy, fb) {
+  if (!dx && !dy) return fb;
+  if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? "right" : "left";
+  return dy > 0 ? "down" : "up";
+}
+
+function pdStep(act, now) {
+  const la = act.last_act || {};
+  let st = PD_ANIM.get(act.actor_id);
+  if (!st || st.sid !== act.space_id) {
+    st = {
+      sid: act.space_id, cx: act.x, cy: act.y, path: null, pi: 0, seq: act.move_seq | 0, actSeq: la.seq | 0,
+      t: now, dir: act.facing || "down", frame: 0, moving: false, pendingPose: "", pendingVerb: "", pose: "", poseVerb: "",
+      poseUntil: 0, wasResting: act.posture === "resting", restT0: now - 5000, wakeT0: 0, sleep: "",
+    };
+    PD_ANIM.set(act.actor_id, st);
+  }
+  const dt = Math.min(0.25, Math.max(0, (now - st.t) / 1000));
+  st.t = now;
+
+  if ((act.move_seq | 0) !== st.seq) {
+    st.seq = act.move_seq | 0;
+    const lp = act.last_path || [];
+    if (lp.length >= 2) {
+      st.path = lp; st.pi = 0; st.moving = true; st.cx = lp[0][0]; st.cy = lp[0][1];
+    } else {
+      st.moving = false; st.path = null; st.cx = act.x; st.cy = act.y;
+    }
+  }
+  if (st.moving && st.path) {
+    st.pi += dt * PD_SPEED;
+    const last = st.path.length - 1;
+    if (st.pi >= last) {
+      st.moving = false; st.cx = st.path[last][0]; st.cy = st.path[last][1]; st.path = null; st.frame = 0;
+    } else {
+      const i = Math.floor(st.pi), f = st.pi - i;
+      const p0 = st.path[i], p1 = st.path[i + 1];
+      st.cx = p0[0] + (p1[0] - p0[0]) * f;
+      st.cy = p0[1] + (p1[1] - p0[1]) * f;
+      st.dir = pdDirFromDelta(p1[0] - p0[0], p1[1] - p0[1], st.dir);
+      st.frame = [1, 0, 2, 0][Math.floor(st.pi * 2) % 4];
+    }
+  }
+  if (!st.moving) {
+    st.frame = 0;
+    st.cx = act.x; st.cy = act.y;
+    st.dir = act.facing || st.dir;
+  }
+
+  if ((la.seq | 0) !== st.actSeq) {
+    st.actSeq = la.seq | 0;
+    const fresh = (Date.now() / 1000 - Number(la.ts || 0)) < 8;
+    const p = fresh ? pdPoseForVerb(la.verb) : "";
+    if (p) { st.pendingPose = p; st.pendingVerb = la.verb; }
+  }
+  if (!st.moving && st.pendingPose) {
+    st.pose = st.pendingPose; st.poseVerb = st.pendingVerb; st.poseUntil = now + 1800;
+    st.pendingPose = ""; st.pendingVerb = "";
+  }
+  if (now > st.poseUntil) { st.pose = ""; st.poseVerb = ""; }
+
+  const resting = act.posture === "resting";
+  if (resting && !st.wasResting) { st.restT0 = now; st.wakeT0 = 0; }
+  if (!resting && st.wasResting) st.wakeT0 = now;
+  st.wasResting = resting;
+  if (resting && st.moving) st.restT0 = now;
+  st.sleep = "";
+  if (resting) st.sleep = (now - st.restT0 < 700) ? "sit" : "lying";
+  else if (st.wakeT0 && now - st.wakeT0 < 700) st.sleep = "sit";
+  return st;
+}
+
+function pdDrawZzz(ctx, cx, topY, now) {
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < 3; i++) {
+    const ph = ((now / 1100) + i / 3) % 1;
+    ctx.globalAlpha = Math.max(0, 1 - ph);
+    ctx.font = "bold " + (9 + i * 2) + "px monospace";
+    ctx.fillStyle = "#cfe8ff";
+    ctx.strokeStyle = "#233a66";
+    ctx.lineWidth = 3;
+    const tx = cx + 10 + i * 6 + Math.sin(ph * 6.28) * 2;
+    const ty = topY - ph * 22 - i * 3;
+    ctx.strokeText(i === 2 ? "Z" : "z", tx, ty);
+    ctx.fillText(i === 2 ? "Z" : "z", tx, ty);
+  }
+  ctx.restore();
+}
+
+function pdDrawIcon(ctx, cx, topY, icon) {
+  if (!icon) return;
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.strokeStyle = "#1d1722";
+  ctx.lineWidth = 2;
+  ctx.fillRect(cx - 9, topY - 20, 18, 16);
+  ctx.strokeRect(cx - 9, topY - 20, 18, 16);
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#1d1722";
+  ctx.fillText(icon, cx, topY - 11);
+  ctx.restore();
+}
+
 function renderViewport() {
   const snap = state.snap;
   if (!snap) return;
@@ -1101,10 +2164,29 @@ function renderViewport() {
     const yBottom = ent.y + fh + (Number(ent.z) === 1 ? 0.25 : 0);
     drawList.push({ kind: "entity", yBottom, ent, fw, fh });
   }
+  const nowMs = performance.now();
+  const entById = new Map(snap.entities.map((e) => [e.entity_id, e]));
+  let loopMoving = false;
+  let loopResting = false;
   for (const act of snap.actors) {
     if (act.space_id !== space.space_id) continue;
-    drawList.push({ kind: "actor", yBottom: act.y + 1 + 0.12, act });
+    const useDoll = act.map_style !== "portrait" && !!act.appearance;
+    let st = null;
+    let yBottom = act.y + 1 + 0.12;
+    if (useDoll) {
+      st = pdStep(act, nowMs);
+      yBottom = st.cy + 1 + 0.12;
+      if (st.moving || st.pose || st.pendingPose) loopMoving = true;
+      if (act.posture === "resting" || st.sleep) loopResting = true;
+      const bed = (act.posture === "resting" && act.resting_on_id) ? entById.get(act.resting_on_id) : null;
+      if (bed && !st.moving) {
+        const bfh = (bed.footprint && bed.footprint[1]) || 1;
+        yBottom = bed.y + bfh + 0.06;
+      }
+    }
+    drawList.push({ kind: "actor", yBottom, act, st, useDoll });
   }
+  PD_LOOP = { moving: loopMoving, resting: loopResting };
   drawList.sort((a, b) => a.yBottom - b.yBottom);
 
   for (const item of drawList) {
@@ -1134,16 +2216,53 @@ function renderViewport() {
       }
     } else {
       const act = item.act;
+      const useDoll = item.useDoll;
+      const st = item.st;
       const sp = act.sprite || {};
       const activeSp = act.active_sprite || {};
-      const standeeImg = activeSp.data_url ? loadCachedImage(activeSp.data_url) : null;
+      const standeeImg = (!useDoll && activeSp.data_url) ? loadCachedImage(activeSp.data_url) : null;
       const useStandee = Boolean(standeeImg && standeeImg.complete && standeeImg.naturalWidth > 0);
+      const gx = useDoll ? st.cx : act.x;
+      const gy = useDoll ? st.cy : act.y;
       let dw = TILE;
       let dh = Math.round(TILE * 1.5);
-      let dx = act.x * TILE;
-      let dy = (act.y + 1) * TILE - dh;
+      let dx = gx * TILE;
+      let dy = (gy + 1) * TILE - dh;
+      let dollIcon = "";
 
-      if (useStandee) {
+      if (useDoll) {
+        const app = act.appearance;
+        const cf = app && app.custom_frames;
+        const cfH = (cf && Array.isArray(cf.down)) ? cf.down.length : 0;
+        const cfW = (cf && Array.isArray(cf.down) && cf.down[0]) ? cf.down[0].length : 0;
+        const S = cfH >= 48 ? 1 : (cfW > 26 || cfH > 34 ? 1.5 : (cfH >= 24 ? 2 : (TILE / PD_W)));
+        if (st.sleep === "lying") {
+          const bed = act.resting_on_id ? entById.get(act.resting_on_id) : null;
+          const bfw = bed ? ((bed.footprint && bed.footprint[0]) || 1) : 1;
+          const bfh = bed ? ((bed.footprint && bed.footprint[1]) || 1) : 1;
+          const ccx = bed ? (bed.x + bfw / 2) * TILE : (act.x + 0.5) * TILE;
+          const ccy = bed ? (bed.y + bfh / 2) * TILE : (act.y + 0.5) * TILE;
+          const breathe = Math.floor(nowMs / 700) % 2;
+          const cv = pdSprite(app, "down", breathe, "", "lying");
+          dw = Math.round(cv.width * S);
+          dh = Math.round(cv.height * S);
+          dx = Math.round(ccx - dw / 2);
+          dy = Math.round(ccy - dh / 2 + 4);
+          ctx.drawImage(cv, dx, dy, dw, dh);
+          pdDrawZzz(ctx, dx + dw * 0.22, dy + 4, nowMs);
+        } else {
+          const cv = pdSprite(app, st.dir, st.frame, st.pose, st.sleep === "sit" ? "sit" : "");
+          dw = Math.round(cv.width * S);
+          dh = Math.round(cv.height * S);
+          dx = Math.round(gx * TILE + (TILE - dw) / 2);
+          const bob = (st.moving && (st.frame === 1 || st.frame === 2)) ? -Math.round(S) : 0;
+          dy = Math.round((gy + 1) * TILE - dh + bob);
+          ctx.fillStyle = "rgba(0,0,0,0.28)";
+          ctx.fillRect(Math.round(gx * TILE + 8), Math.round((gy + 1) * TILE - 6), TILE - 16, 5);
+          ctx.drawImage(cv, dx, dy, dw, dh);
+          if (st.pose) dollIcon = pdIconForVerb(st.poseVerb);
+        }
+      } else if (useStandee) {
         const ratio = standeeImg.naturalWidth / Math.max(1, standeeImg.naturalHeight);
         dh = Math.round(TILE * 2.15);
         dw = Math.max(Math.round(TILE * 0.95), Math.min(Math.round(TILE * 1.85), Math.round(dh * ratio)));
@@ -1160,12 +2279,13 @@ function renderViewport() {
         ctx.fillRect(dx + 10, (act.y + 1) * TILE - 7, TILE - 20, 5);
         drawSprite(ctx, sp, sp.pixels || [], pal, dx, dy, dw, dh, act.name, sp.accent_color);
       }
+      if (dollIcon) pdDrawIcon(ctx, dx + dw / 2, dy, dollIcon);
 
       // 名字标与实时心情标签
-      const labelCx = act.x * TILE + TILE / 2;
+      const labelCx = gx * TILE + TILE / 2;
       const labelW = Math.max(TILE - 4, 58);
       const labelX = Math.max(2, Math.min(W - labelW - 2, labelCx - labelW / 2));
-      const labelY = Math.max(16, dy - 14);
+      const labelY = Math.max(16, dy - 14 - (dollIcon ? 18 : 0));
       ctx.fillStyle = "rgba(12,10,16,0.82)";
       ctx.fillRect(labelX, labelY, labelW, 13);
       ctx.fillStyle = act.actor_id === snap.active_actor_id ? "#ff9dbb" : "#e2e6f0";
@@ -1179,11 +2299,13 @@ function renderViewport() {
       // 状态静态角标（休息 Zzz / 沉默 ... / 碎碎念气泡 / 手持）
       const thoughtTxt = String((act.autonomy && act.autonomy.last_thought) || "").trim();
       if (act.posture === "resting") {
-        ctx.fillStyle = "#181d2e";
-        ctx.fillRect(labelX + labelW - 22, Math.max(2, labelY - 12), 22, 12);
-        ctx.fillStyle = "#88d4f5";
-        ctx.font = "bold 10px monospace";
-        ctx.fillText("Zzz", labelX + labelW - 11, Math.max(8, labelY - 6));
+        if (!useDoll) {
+          ctx.fillStyle = "#181d2e";
+          ctx.fillRect(labelX + labelW - 22, Math.max(2, labelY - 12), 22, 12);
+          ctx.fillStyle = "#88d4f5";
+          ctx.font = "bold 10px monospace";
+          ctx.fillText("Zzz", labelX + labelW - 11, Math.max(8, labelY - 6));
+        }
       } else if (act.vitals && act.vitals.disengaged) {
         ctx.fillStyle = "#2b1b24";
         ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 12), 20, 12);
@@ -1207,10 +2329,10 @@ function renderViewport() {
       }
       if (act.holding_id) {
         ctx.fillStyle = "#ffd166";
-        ctx.fillRect(act.x * TILE + TILE - 12, (act.y + 1) * TILE - 14, 9, 9);
+        ctx.fillRect(gx * TILE + TILE - 12, (gy + 1) * TILE - 14, 9, 9);
         ctx.strokeStyle = "#141016";
         ctx.lineWidth = 1;
-        ctx.strokeRect(act.x * TILE + TILE - 12, (act.y + 1) * TILE - 14, 9, 9);
+        ctx.strokeRect(gx * TILE + TILE - 12, (gy + 1) * TILE - 14, 9, 9);
       }
     }
   }
@@ -2408,7 +3530,8 @@ function openImportActorModal() {
     + '<div class="form-grid">'
     + '<div class="field full"><label>从宿主角色库新增/绑定（data/config/characters.yaml）</label><select class="px-sel" id="act-host">' + hostOpts + "</select></div>"
     + '<div class="field"><label>世界显示名</label><input class="px-inp" id="act-name" value="' + esc(preferredHost ? preferredHost.name : "新同伴") + '" maxlength="20"></div>'
-    + '<div class="field"><label>人物贴图来源</label><select class="px-sel" id="act-sp-mode"><option value="host_pack">角色包自带动态心情立绘（推荐）</option><option value="pixel_grid">以文生静态像素小人（16×24）</option><option value="image">上传静态 PNG 立牌</option><option value="token">零成本像素棋子</option></select></div>'
+    + '<div class="field"><label>地图上显示为</label><select class="px-sel" id="act-map-style"><option value="doll">像素小人（弹丸风，含走路/交互/睡觉动画）</option><option value="portrait">角色包立牌（静态）</option></select></div>'
+    + '<div class="field"><label>对话立绘来源</label><select class="px-sel" id="act-sp-mode"><option value="host_pack">角色包自带动态心情立绘（推荐）</option><option value="pixel_grid">以文生静态像素小人（16×24）</option><option value="image">上传静态 PNG 立牌</option><option value="token">零成本像素棋子</option></select></div>'
     + '<div class="field full" id="act-pack-hint" style="font-size:11px;color:var(--ok);border:1px solid var(--border);background:var(--panel-2);padding:6px 8px;">将自动使用角色包 sprites 立绘，并随精力、困意、心情与对话情绪自动切换。</div>'
     + '<div class="field full hidden" id="act-prompt-wrap"><label>外貌关键词（可选，如：淡粉短发、绿色连帽外套、小飞船发卡）</label><input class="px-inp" id="act-prompt" placeholder="留空则按角色名与默认色调生成"></div>'
     + '<div class="field full hidden" id="act-img-wrap"><label>选择静态图片</label><input type="file" id="act-img-file" accept="image/png,image/jpeg,image/webp"></div>'
@@ -2425,6 +3548,7 @@ function openImportActorModal() {
             host_character: el("act-host").value,
             name: el("act-name").value.trim(),
             sprite_mode: el("act-sp-mode").value,
+            map_style: el("act-map-style").value,
             sprite_prompt: el("act-prompt").value.trim(),
             sprite_image_data: imgData,
             space_id: state.snap.active_space_id,
@@ -2520,6 +3644,156 @@ function openImportActorModal() {
     r.onload = () => { imgData = String(r.result || ""); };
     r.readAsDataURL(f);
   });
+}
+
+function openAppearanceModal(act) {
+  if (!act) return toast("当前没有活动角色", true);
+  const cur = JSON.parse(JSON.stringify(act.appearance || {}));
+  let mapStyle = act.map_style === "portrait" ? "portrait" : "doll";
+  const colorFields = [
+    ["hair_color", "主发色"], ["hair_shade", "发梢/副发色"], ["skin", "肤色"], ["eye_color", "瞳色"],
+    ["outfit_color", "衣服主色"], ["outfit_accent", "衣服点缀"], ["outfit_inner", "内衬色"],
+    ["legs_color", "裤/裙下装"], ["shoes_color", "鞋色"], ["accessory_color", "配饰色"],
+  ];
+  const optHtml = (list, val) => list.map(([k, lb]) => '<option value="' + k + '"' + (k === val ? " selected" : "") + ">" + lb + "</option>").join("");
+  const colorHtml = colorFields.map(([k, lb]) =>
+    '<div class="field"><label>' + lb + '</label><input type="color" class="px-inp" id="ap-' + k + '" value="' + esc(cur[k] || "#888888") + '" style="padding:1px;height:26px;"></div>').join("");
+
+  showModal("🎨 编辑「" + act.name + "」的像素小人外观",
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;align-items:flex-end;justify-content:center;background:var(--panel-2);border:1px solid var(--border);padding:8px;">'
+    + ["down", "right", "up", "left"].map((d) => '<canvas id="ap-pv-' + d + '" width="69" height="96" style="width:69px;height:96px;image-rendering:pixelated;"></canvas>').join("")
+    + '<canvas id="ap-pv-lie" width="88" height="56" style="width:88px;height:56px;image-rendering:pixelated;"></canvas></div>'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;">'
+    + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);"><input type="checkbox" id="ap-use-web" checked> 🌐 联网检索参考'
+    + ((state.snap && state.snap.pixellab_ready) ? ' <span style="color:var(--ok);">[PixelLab 已配置]</span>' : '') + '</label>'
+    + '<div style="display:flex;align-items:center;gap:6px;"><span id="ap-mode-badge" style="color:var(--accent-2);"></span>'
+    + '<label class="px-btn" style="padding:1px 6px;font-size:10px;cursor:pointer;">🖼 导入像素图<input type="file" id="ap-img-file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;"></label>'
+    + '<button type="button" class="px-btn hidden" id="ap-clear-custom" style="padding:1px 6px;font-size:10px;">改用基础模板</button></div>'
+    + '</div>'
+    + '<div class="form-grid">'
+    + '<div class="field full"><label>自动生成方式（弹丸系列角色优先用原版像素小人；其他角色可用 PixelLab 备用）</label><select class="px-sel" id="ap-gen-mode">'
+    + '<option value="auto">自动（优先弹丸原版像素 → PixelLab → 文本）</option>'
+    + '<option value="official">仅搜弹丸论破原版像素小人（Wiki 原画）</option>'
+    + '<option value="pixellab">PixelLab 云端原生 4 向小人（需先在设置填 API Key）</option>'
+    + '<option value="llm">文本大模型 / 关键词基础模板</option>'
+    + '</select></div>'
+    + '<div class="field"><label>发型</label><select class="px-sel" id="ap-hair_style">' + optHtml(PD_HAIR_STYLES, cur.hair_style) + "</select></div>"
+    + '<div class="field"><label>服装</label><select class="px-sel" id="ap-outfit_style">' + optHtml(PD_OUTFITS, cur.outfit_style) + "</select></div>"
+    + '<div class="field"><label>配饰</label><select class="px-sel" id="ap-accessory">' + optHtml(PD_ACCESSORIES, cur.accessory) + "</select></div>"
+    + '<div class="field"><label>地图上显示为</label><select class="px-sel" id="ap-map-style"><option value="doll"' + (mapStyle === "doll" ? " selected" : "") + '>像素小人（走路/交互/睡觉动画）</option><option value="portrait"' + (mapStyle === "portrait" ? " selected" : "") + '>角色包立牌（静态）</option></select></div>'
+    + colorHtml
+    + "</div>",
+    [
+      {
+        label: "🪄 按角色设定重新生成",
+        onClick: (btn) => {
+          btn.disabled = true;
+          const prevLabel = btn.textContent;
+          const t0 = Date.now();
+          btn.textContent = "检索与生成中…";
+          const handleResult = async (res) => {
+            if (res.used_official_pixel && res.official_image_data_url) {
+              cur.custom_frames = await pdExtractNativePixelSprite(res.official_image_data_url);
+              redraw();
+              toast("已提取原版弹丸像素小人（" + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
+            } else if (res.used_pixellab && res.pixellab_images) {
+              cur.custom_frames = await pdExtract4DirPixelLabFrames(res.pixellab_images);
+              redraw();
+              toast("已生成 PixelLab 原生 4 向小人（" + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
+            } else {
+              Object.assign(cur, res.appearance || {});
+              ["hair_style", "outfit_style", "accessory"].forEach((k) => { el("ap-" + k).value = cur[k]; });
+              colorFields.forEach(([k]) => { el("ap-" + k).value = cur[k]; });
+              redraw();
+              const refs = [res.used_web ? ("联网(" + (res.web_sources || []).join("/") + ")") : "", res.used_vision ? "原作立绘" : "", res.has_custom_frames ? "AI精绘像素" : ""].filter(Boolean);
+              toast(res.used_llm ? ("已生成" + (refs.length ? "（参考：" + refs.join(" + ") + "）" : "")) : "未连接大模型，已按设定关键词生成（可继续微调）");
+            }
+          };
+          runAction("regen_actor_appearance", {
+            actor_id: act.actor_id,
+            use_web: Boolean(el("ap-use-web") && el("ap-use-web").checked),
+            gen_mode: (el("ap-gen-mode") && el("ap-gen-mode").value) || "auto",
+          })
+            .then(async (res) => {
+              const jobId = res && res.job_id;
+              while (res && (res.pending || res.done === false) && (res.job_id || jobId)) {
+                const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
+                btn.textContent = (res.label || "生图中") + "… " + sec + "s";
+                await new Promise((r) => setTimeout(r, 1500));
+                if (el("modal-mask").classList.contains("hidden")) return;
+                res = await runAction("get_regen_job", { job_id: res.job_id || jobId });
+              }
+              await handleResult(res || {});
+            })
+            .catch((e) => toast(e.message, true))
+            .finally(() => { btn.disabled = false; btn.textContent = prevLabel; });
+        },
+      },
+      { label: "取消", onClick: closeModal },
+      {
+        label: "保存外观",
+        cls: "primary",
+        onClick: (btn) => {
+          btn.disabled = true;
+          collect();
+          runAction("set_actor_appearance", { actor_id: act.actor_id, appearance: cur, map_style: el("ap-map-style").value })
+            .then(() => { closeModal(); toast("已保存「" + act.name + "」的外观"); })
+            .catch((e) => { btn.disabled = false; toast(e.message, true); });
+        },
+      },
+    ], true);
+
+  const collect = () => {
+    ["hair_style", "outfit_style", "accessory"].forEach((k) => { cur[k] = el("ap-" + k).value; });
+    colorFields.forEach(([k]) => { cur[k] = el("ap-" + k).value; });
+  };
+  const syncBadge = () => {
+    const cf = cur.custom_frames;
+    const hasCustom = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16);
+    const dimTxt = hasCustom ? ((cf.down[0] ? cf.down[0].length : (cf.w || 16)) + "×" + cf.down.length) : "";
+    el("ap-mode-badge").textContent = hasCustom ? ("✨ 精绘 " + dimTxt) : "🧩 基础模板";
+    el("ap-clear-custom").classList.toggle("hidden", !hasCustom);
+  };
+  const paint = (id, cv, isLie) => {
+    const c = el(id);
+    const x = c.getContext("2d");
+    const scale = isLie
+      ? (cv.width >= 40 ? 1.5 : (cv.width >= 26 ? 3 : 4))
+      : (cv.height >= 48 ? 1.5 : (cv.height >= 28 ? 3 : 4));
+    x.imageSmoothingEnabled = false;
+    x.clearRect(0, 0, c.width, c.height);
+    x.drawImage(cv, Math.floor((c.width - cv.width * scale) / 2), c.height - cv.height * scale, cv.width * scale, cv.height * scale);
+  };
+  const redraw = () => {
+    collect();
+    syncBadge();
+    const cf = cur.custom_frames;
+    const singleFace = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16 && !(Array.isArray(cf.up) && cf.up.length === cf.down.length));
+    if (singleFace) {
+      paint("ap-pv-down", pdSprite(cur, "down", 0, "", ""), false);
+      paint("ap-pv-right", pdSprite(cur, "down", 1, "", ""), false);
+      paint("ap-pv-up", pdSprite(cur, "down", 2, "", ""), false);
+      paint("ap-pv-left", pdSprite(cur, "left", 1, "", ""), false);
+    } else {
+      ["down", "right", "up", "left"].forEach((d) => paint("ap-pv-" + d, pdSprite(cur, d, 0, "", ""), false));
+    }
+    paint("ap-pv-lie", pdSprite(cur, "down", 0, "", "lying"), true);
+  };
+  el("ap-img-file").addEventListener("change", (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      pdExtractNativePixelSprite(String(r.result || ""))
+        .then((cf) => { cur.custom_frames = cf; redraw(); toast("已无损提取 " + cf.w + "×" + cf.h + " 像素小人"); })
+        .catch((e) => toast(e.message, true));
+    };
+    r.readAsDataURL(f);
+  });
+  el("ap-clear-custom").onclick = () => { cur.custom_frames = {}; redraw(); toast("已切换回基础模板，可用下方下拉与色板微调"); };
+  ["hair_style", "outfit_style", "accessory"].forEach((k) => el("ap-" + k).addEventListener("change", () => { cur.custom_frames = {}; redraw(); }));
+  colorFields.forEach(([k]) => el("ap-" + k).addEventListener("input", () => { cur.custom_frames = {}; redraw(); }));
+  redraw();
 }
 
 function openWorldMoodModal(act) {
@@ -2841,6 +4115,81 @@ function init() {
   el("btn-popout-world").onclick = () => {
     if (state.snap && state.snap.space) openStandaloneWorld(state.snap.space.space_id);
   };
+  el("btn-hub-popout").onclick = () => {
+    _openPopupOrShareUrl(withToken(window.location.pathname), "nanami_world_hub", "");
+  };
+  const setStageFullscreen = (on) => {
+    state.stageFullscreen = Boolean(on);
+    const win = el("world-window");
+    const btn = el("btn-stage-fullscreen");
+    if (win) win.classList.toggle("stage-fullscreen", state.stageFullscreen);
+    if (btn) {
+      btn.classList.toggle("eye-on", state.stageFullscreen);
+      btn.textContent = state.stageFullscreen ? "⛶ 退出全屏" : "⛶ 全屏";
+    }
+    try {
+      if (state.stageFullscreen && document.documentElement.requestFullscreen && !document.fullscreenElement) {
+        Promise.resolve(document.documentElement.requestFullscreen()).catch(() => {});
+      } else if (!state.stageFullscreen && document.fullscreenElement && document.exitFullscreen) {
+        Promise.resolve(document.exitFullscreen()).catch(() => {});
+      }
+    } catch {}
+  };
+  el("btn-stage-fullscreen").onclick = () => setStageFullscreen(!state.stageFullscreen);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && state.stageFullscreen) setStageFullscreen(false);
+  });
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement && state.stageFullscreen) setStageFullscreen(false);
+  });
+  (() => {
+    const KEY = "nanami_world_layout_v1";
+    const DEFAULTS = { dockH: 176, portraitW: 118, sideW: 340 };
+    let cfg = { ...DEFAULTS };
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+      if (saved && typeof saved === "object") cfg = { ...DEFAULTS, ...saved };
+    } catch {}
+    const apply = () => {
+      const dock = el("dialogue-dock"), port = el("dock-portrait-card"), side = el("side-col");
+      if (dock) dock.style.height = Math.max(76, Math.min(Math.round(window.innerHeight * 0.7), Number(cfg.dockH) || DEFAULTS.dockH)) + "px";
+      if (port) port.style.width = Math.max(64, Math.min(280, Number(cfg.portraitW) || DEFAULTS.portraitW)) + "px";
+      if (side) side.style.width = Math.max(210, Math.min(Math.round(window.innerWidth * 0.65), Number(cfg.sideW) || DEFAULTS.sideW)) + "px";
+    };
+    const save = () => { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch {} };
+    const bindSplit = (splitId, onMove, onReset) => {
+      const sp = el(splitId);
+      if (!sp) return;
+      sp.addEventListener("dblclick", () => { onReset(); apply(); save(); });
+      sp.addEventListener("pointerdown", (ev) => {
+        ev.preventDefault();
+        sp.classList.add("dragging");
+        const startX = ev.clientX, startY = ev.clientY;
+        const snapCfg = { ...cfg };
+        const move = (mv) => { onMove(mv.clientX - startX, mv.clientY - startY, snapCfg); apply(); };
+        const up = () => {
+          sp.classList.remove("dragging");
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          save();
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      });
+    };
+    bindSplit("split-dock-h", (_dx, dy, s) => { cfg.dockH = s.dockH - dy; }, () => { cfg.dockH = DEFAULTS.dockH; });
+    bindSplit("split-portrait-v", (dx, _dy, s) => { cfg.portraitW = s.portraitW + dx; }, () => { cfg.portraitW = DEFAULTS.portraitW; });
+    bindSplit("split-side-v", (dx, _dy, s) => { cfg.sideW = s.sideW - dx; }, () => { cfg.sideW = DEFAULTS.sideW; });
+    apply();
+    const wrap = el("stage-wrap");
+    if (wrap) {
+      wrap.addEventListener("wheel", (ev) => {
+        if (!ev.ctrlKey) return;
+        ev.preventDefault();
+        if (typeof setZoom === "function") setZoom((state.zoom || 1) + (ev.deltaY < 0 ? 0.15 : -0.15));
+      }, { passive: false });
+    }
+  })();
   el("btn-world-menu").onclick = openWorldMenuModal;
   document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
     btn.onclick = () => setUiMode(btn.dataset.uimode || "play");
@@ -2987,6 +4336,10 @@ function init() {
     const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
     openWorldMoodModal(act);
   };
+  el("btn-edit-appearance").onclick = () => {
+    const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+    openAppearanceModal(act);
+  };
 
   el("btn-chat-clear").onclick = () => {
     const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
@@ -3033,6 +4386,16 @@ function init() {
     const sid = (state.view === "world" && state.windowSpaceId) || "";
     runAction("get_world_snapshot", { space_id: sid }).catch(() => {});
   }, 6000);
+  setInterval(() => {
+    if (!state.snap || state.eyeMode || state.drag || state.view !== "world") return;
+    if (!el("modal-mask").classList.contains("hidden")) return;
+    if (PD_LOOP.moving) {
+      renderViewport();
+    } else if (PD_LOOP.resting) {
+      const ph = Math.floor(performance.now() / 350);
+      if (ph !== state._pdPhase) { state._pdPhase = ph; renderViewport(); }
+    }
+  }, 100);
 }
 
 init();

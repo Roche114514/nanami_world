@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import persona_bridge, projector, text_compiler
+from . import persona_bridge, projector, schema, text_compiler
 from .schema import clip_text, normalize_autonomy
 from .settings import WorldSettings
 
@@ -409,6 +409,9 @@ class WorldHeartbeat:
                 score -= 5.5
             elif rec_key in recent[:2]:
                 score -= 3.0
+            last_soc = float((actor.get("autonomy") or {}).get("last_social_ts") or 0.0)
+            if last_soc > 0 and (time.time() - last_soc) < 120.0:
+                score -= 4.0
 
             dist = max(abs(int(actor["x"]) - int(peer["x"])), abs(int(actor["y"]) - int(peer["y"])))
             adj = None if dist <= 1 else self._find_adjacent_walkable(actor, peer)
@@ -516,6 +519,34 @@ class WorldHeartbeat:
         space = sp_snap["space"]
         lighting = sp_snap["lighting"]
         holding_id = actor.get("holding_id")
+        host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
+        sid = str(space.get("space_id") or actor.get("space_id") or "room_default")
+        l0_cfg = persona_bridge.read_world_perception_config(
+            self._project_root,
+            host_char,
+            custom_persona_dir=settings.persona_data_dir,
+        )
+        peer_known = False
+        other_actors = [a for a in (sp_snap.get("actors") or []) if a.get("actor_id") != aid]
+        if other_actors:
+            rels_chk = persona_bridge.read_actor_relations(
+                self._project_root,
+                host_char,
+                space_id=sid,
+                world_data_root=self._engine.data_root,
+                custom_persona_dir=settings.persona_data_dir,
+                known_actors=[str(a.get("host_character") or a.get("name") or "") for a in other_actors],
+            )
+            peer_known = any(bool(v.get("known")) for k, v in rels_chk.items() if k.startswith("char:"))
+        l0_frame = persona_bridge.update_and_project_world_perception(
+            self._engine.data_root,
+            sid,
+            actor,
+            vis,
+            l0_cfg,
+            peer_known=peer_known,
+            advance_exposure=0.18 if vis else 0.10,
+        )
 
         # 1. 夜晚或室内变暗自动开灯
         if lighting.get("is_dark") and actor.get("posture") != "resting":
@@ -538,8 +569,18 @@ class WorldHeartbeat:
                     "record_thought_in_chat": True,
                 }
 
-        # 2. 疲劳或困意强时自动选最舒适的床/沙发休息
-        if (sleep_p >= 0.70 or energy <= 0.32) and actor.get("posture") != "resting":
+        # 2. 结合世界昼夜作息 + L0 Borbély 时型偏移判断是否该休息
+        hour = float(lighting.get("hour", 12))
+        chrono = float(l0_frame.get("chronotype_offset") or 0.0) if l0_frame.get("enabled") else 0.0
+        c_str = float(l0_frame.get("circadian_strength") or 0.75) if l0_frame.get("enabled") else 0.75
+        bio_hour = (hour - chrono) % 24.0
+        is_late_night = (bio_hour >= 23.0 or bio_hour < 6.0) if c_str >= 0.35 else False
+        is_daytime = (7.0 <= bio_hour < 22.0) if c_str >= 0.35 else True
+        need_sleep = (
+            (sleep_p >= 0.45 or energy <= 0.60) if is_late_night
+            else ((sleep_p >= 0.85 or energy <= 0.22) if is_daytime else (sleep_p >= 0.62 or energy <= 0.38))
+        )
+        if need_sleep and actor.get("posture") != "resting":
             free_beds = [
                 e for e in vis
                 if "restable" in (e.get("traits") or {})
@@ -552,18 +593,21 @@ class WorldHeartbeat:
                 )
                 bed = free_beds[0]
                 return {
-                    "goal": f"去「{bed['name']}」好好歇一会",
+                    "goal": f"去「{bed['name']}」{'睡觉' if is_late_night else '歇一会'}",
                     "drive": "rest",
-                    "thought": "唔……有点困了，先去那边躺着休息一会儿。",
+                    "thought": f"{'夜深了' if is_late_night else '有点困了'}，去「{bed['name']}」{'睡一觉' if is_late_night else '休息一会儿'}。",
                     "emotion": "困倦",
                     "target_id": bed["entity_id"],
                     "actions": [{"tool": "world_act", "entity_id": bed["entity_id"], "action": "rest"}],
                     "record_thought_in_chat": True,
                 }
 
-        # 3. 休息恢复够了自动起身；否则继续安睡
+        # 3. 休息恢复够了自动起身（深夜保持安睡，天亮或精神恢复后才起）；否则继续安睡
         if actor.get("posture") == "resting":
-            wake_ready = (energy >= 0.82 and sleep_p <= 0.30) or (force_autonomy and energy >= 0.62 and sleep_p <= 0.48)
+            wake_ready = (
+                (force_autonomy and energy >= 0.62 and sleep_p <= 0.48)
+                or (not is_late_night and ((energy >= 0.76 and sleep_p <= 0.38) or (hour >= 8 and energy >= 0.60 and sleep_p <= 0.48)))
+            )
             if wake_ready and actor.get("resting_on_id"):
                 rid = actor["resting_on_id"]
                 return {
@@ -598,6 +642,23 @@ class WorldHeartbeat:
                 "passive_summary": "",
                 "record_thought_in_chat": False,
             }
+
+        # 4.5 L0 陌生环境适应期：初入陌生空间时（familiarity < 0.25）优先环顾/确认身边物件，不立刻自来熟玩乐
+        if l0_frame.get("enabled") and l0_frame.get("stage") == "unfamiliar" and not force_autonomy:
+            look_cand = next(
+                (e for e in (l0_frame.get("focused_entities") or vis) if e["entity_id"] not in recent[:3]),
+                None,
+            )
+            if look_cand:
+                return {
+                    "goal": f"先打量一下周围的「{look_cand['name']}」",
+                    "drive": "curiosity",
+                    "thought": f"刚到这边还有点陌生……先看看「{look_cand['name']}」是什么。",
+                    "emotion": "好奇",
+                    "target_id": look_cand["entity_id"],
+                    "actions": [{"tool": "world_act", "entity_id": look_cand["entity_id"], "action": "look"}],
+                    "record_thought_in_chat": True,
+                }
 
         # 5. 探索组合：拿钥匙开带锁宝箱
         locked_box = next(
@@ -649,11 +710,13 @@ class WorldHeartbeat:
             picked_food = consumables[0]
 
         if picked_food is not None:
-            verb = ((picked_food.get("traits") or {}).get("consumable") or {}).get("consume_verb") or "享用"
+            cm_food = (picked_food.get("traits") or {}).get("consumable") or {}
+            verb = cm_food.get("consume_verb") or "享用"
+            food_name, _empty_name = schema.infer_consumable_names(picked_food["name"], str(cm_food.get("empty_name") or ""))
             return {
-                "goal": f"{verb}掉「{picked_food['name']}」",
+                "goal": f"{verb}「{food_name}」",
                 "drive": "hunger",
-                "thought": f"看着好诱人……刚好来{verb}一口「{picked_food['name']}」~",
+                "thought": f"正好{verb}点「{food_name}」。",
                 "emotion": "开心",
                 "target_id": picked_food["entity_id"],
                 "actions": [{"tool": "world_act", "entity_id": picked_food["entity_id"], "action": "consume"}],
@@ -732,7 +795,7 @@ class WorldHeartbeat:
             return {
                 "goal": f"去和「{p_name}」{'打招呼认识' if is_new else '聊几句'}",
                 "drive": "social",
-                "thought": f"看看「{p_name}」在做什么，{'先过去认识一下吧' if is_new else '过去聊两句吧'}~",
+                "thought": f"过去和「{p_name}」{'打个招呼' if is_new else '聊两句'}。",
                 "emotion": "好奇" if is_new else "开心",
                 "target_id": f"actor:{peer['actor_id']}",
                 "actions": seq_social,
@@ -745,10 +808,10 @@ class WorldHeartbeat:
             if best_score > 0.5 or force_autonomy or len(vis) <= 2:
                 dom = str(((best_ent.get("traits") or {}).get("activity") or {}).get("domain") or "hobby")
                 thought_map = {
-                    "game": f"来玩一会儿「{best_ent['name']}」，试试能不能刷新纪录~",
-                    "music": f"放上「{best_ent['name']}」听一首歌，房间立刻温柔起来了。",
-                    "reading": f"翻翻「{best_ent['name']}」看几页，顺便记点有意思的事情。",
-                    "hobby": f"稍微照料和摆弄一下「{best_ent['name']}」吧。",
+                    "game": f"用「{best_ent['name']}」玩一会儿。",
+                    "music": f"打开「{best_ent['name']}」听点音乐。",
+                    "reading": f"翻看「{best_ent['name']}」。",
+                    "hobby": f"去看看「{best_ent['name']}」。",
                 }
                 emo = "兴奋" if dom == "game" else ("温柔" if dom == "music" else "开心")
                 return {

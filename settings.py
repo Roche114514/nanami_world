@@ -63,6 +63,7 @@ class WorldSettings:
     persona_data_dir: str = ""
     default_space_width: int = 12
     default_space_height: int = 9
+    pixellab_api_key: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "WorldSettings":
@@ -80,6 +81,7 @@ class WorldSettings:
             persona_data_dir=str(src.get("persona_data_dir") or "").strip(),
             default_space_width=_clamp_int(src.get("default_space_width"), 8, 64, 12),
             default_space_height=_clamp_int(src.get("default_space_height"), 6, 64, 9),
+            pixellab_api_key=str(src.get("pixellab_api_key") or "").strip(),
         )
 
     def to_dict(self) -> dict[str, Any]:

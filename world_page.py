@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
@@ -101,13 +104,26 @@ def register_pages(
 
     def _snap_ok(extra: dict[str, Any] | None = None, *, space_id: str = "") -> dict[str, Any]:
         cfg = settings_store.get()
+        merged = dict(extra or {})
+        merged.setdefault("pixellab_ready", bool(getattr(cfg, "pixellab_api_key", "").strip()))
         return _ok_with_snap(
             engine,
-            extra,
+            merged,
             space_id=space_id,
             world_chat=world_chat,
             custom_persona_dir=str(getattr(cfg, "persona_data_dir", "") or ""),
         )
+
+    _regen_lock = threading.Lock()
+    _regen_jobs: dict[str, dict[str, Any]] = {}
+
+    def _act_get_regen_job(v: dict[str, Any]) -> dict[str, Any]:
+        jid = str(v.get("job_id") or "").strip()
+        with _regen_lock:
+            job = dict(_regen_jobs.get(jid) or {})
+        if not job:
+            return {"ok": False, "done": True, "error": "生图任务不存在或已过期"}
+        return job
 
     def _ensure_default_host_actor() -> None:
         if engine.list_actors():
@@ -122,7 +138,9 @@ def register_pages(
         if not cname:
             return
         try:
-            engine.import_actor(name=cname, host_character=cname)
+            desc = (str(chosen.get("brief") or "") + "。" + str(chosen.get("setting") or "")).strip("。")
+            app = text_compiler.compile_actor_appearance(cname, desc, use_llm=False)["appearance"]
+            engine.import_actor(name=cname, host_character=cname, appearance=app)
         except Exception:  # noqa: BLE001
             logger.debug("nanami_world: 自动导入默认宿主角色失败", exc_info=True)
 
@@ -265,17 +283,192 @@ def register_pages(
                 use_llm=bool(v.get("use_llm", cfg.auto_compile_llm)) and bool(sprite_prompt or host_char),
             )
 
+        def _ref_sprite_path(host_row: Mapping[str, Any] | None) -> Path | None:
+            if not host_row:
+                return None
+            sprites = host_row.get("pack_sprites") or []
+            if not sprites:
+                return None
+            raw_p = str(sprites[0].get("path") or "").strip()
+            if not raw_p:
+                return None
+            p = Path(raw_p)
+            if not p.is_absolute():
+                p = (engine.project_root / raw_p).resolve()
+            return p if p.is_file() else None
+
+        existing_ids = {a["actor_id"] for a in engine.list_actors()}
+        req_actor_id = str(v.get("actor_id") or "")
+        appearance_payload: dict[str, Any] | None = None
+        if isinstance(v.get("appearance"), Mapping):
+            appearance_payload = dict(v["appearance"])
+        elif not req_actor_id or req_actor_id not in existing_ids:
+            app_desc = sprite_prompt
+            if not app_desc and matched_host:
+                app_desc = (str(matched_host.get("brief") or "") + "。" + str(matched_host.get("setting") or "")).strip("。")
+            ref_img = _ref_sprite_path(matched_host)
+            appearance_payload = text_compiler.compile_actor_appearance(
+                lookup_name,
+                app_desc,
+                use_llm=bool(v.get("use_llm", cfg.auto_compile_llm)) and bool(app_desc or ref_img),
+                use_web=bool(v.get("use_web", False)),
+                reference_image_path=ref_img,
+            )["appearance"]
+
         actor = engine.import_actor(
             name=name,
             host_character=lookup_name,
-            actor_id=str(v.get("actor_id") or ""),
+            actor_id=req_actor_id,
             space_id=str(v.get("space_id") or ""),
             x=v.get("x"),
             y=v.get("y"),
             sprite=sprite_payload,
+            appearance=appearance_payload,
+            map_style=str(v.get("map_style") or "").strip(),
         )
+        synced = persona_bridge.read_persona_state(
+            engine.project_root,
+            lookup_name,
+            space_id=actor["space_id"],
+            actor_id=actor["actor_id"],
+            custom_persona_dir=str(getattr(cfg, "persona_data_dir", "") or ""),
+        )
+        if synced is not None:
+            engine.set_actor_world_mood(
+                actor["actor_id"],
+                space_id=actor["space_id"],
+                vitals_patch={
+                    "energy": synced["energy"],
+                    "sleep_pressure": synced["sleep_pressure"],
+                    "mood_v": synced["mood_v"],
+                    "agenda": synced["agenda"],
+                    "disengaged": synced["disengaged"],
+                    "preferred_domains": synced["preferred_domains"],
+                    "source": "nanami_persona",
+                },
+            )
+            actor = next((a for a in engine.list_actors() if a["actor_id"] == actor["actor_id"]), actor)
         heartbeat.step(advance_minutes=0.0)
         return _snap_ok({"actor": actor}, space_id=actor["space_id"])
+
+    def _act_set_actor_appearance(v: dict[str, Any]) -> dict[str, Any]:
+        aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=str(v.get("space_id") or ""))
+        if not aid:
+            raise ValueError("当前没有活动角色。")
+        raw_app = v.get("appearance")
+        actor = engine.set_actor_appearance(
+            aid,
+            appearance=dict(raw_app) if isinstance(raw_app, Mapping) else None,
+            map_style=str(v.get("map_style") or "").strip(),
+        )
+        return _snap_ok({"actor": actor}, space_id=actor["space_id"])
+
+    def _act_regen_actor_appearance(v: dict[str, Any]) -> dict[str, Any]:
+        cfg = settings_store.get()
+        aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=str(v.get("space_id") or ""))
+        act = next((a for a in engine.list_actors() if a["actor_id"] == aid), None)
+        if act is None:
+            raise ValueError("当前没有活动角色。")
+        host_name = str(act.get("host_character") or act.get("name") or "")
+        matched = next((row for row in engine.list_host_characters() if row.get("name") == host_name), None)
+        desc = str(v.get("description") or "").strip()
+        if not desc and matched:
+            desc = (str(matched.get("brief") or "") + "。" + str(matched.get("setting") or "")).strip("。")
+        ref_img: Path | None = None
+        if matched and matched.get("pack_sprites"):
+            raw_p = str(matched["pack_sprites"][0].get("path") or "").strip()
+            if raw_p:
+                cand = Path(raw_p) if Path(raw_p).is_absolute() else (engine.project_root / raw_p).resolve()
+                if cand.is_file():
+                    ref_img = cand
+        use_web = bool(v.get("use_web", True))
+        use_llm = bool(v.get("use_llm", cfg.auto_compile_llm)) and bool(desc or use_web or ref_img)
+        gen_mode = str(v.get("gen_mode") or "auto").strip().lower()
+        pixellab_key = str(v.get("pixellab_api_key") or getattr(cfg, "pixellab_api_key", "") or "").strip()
+
+        def _spawn_async(job_fn: Callable[[], dict[str, Any]], label: str) -> dict[str, Any]:
+            if not bool(v.get("async_job", True)):
+                return job_fn()
+            job_id = uuid.uuid4().hex[:12]
+            with _regen_lock:
+                _regen_jobs[job_id] = {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label, "started_ts": time.time()}
+
+            def _worker() -> None:
+                try:
+                    res_payload = job_fn()
+                    res_payload["pending"] = False
+                    res_payload["done"] = True
+                    res_payload["job_id"] = job_id
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("nanami_world: 生图后台任务异常")
+                    res_payload = {"ok": False, "pending": False, "done": True, "job_id": job_id, "error": str(exc)}
+                with _regen_lock:
+                    _regen_jobs[job_id] = res_payload
+                    if len(_regen_jobs) > 24:
+                        oldest = next(iter(_regen_jobs))
+                        if oldest != job_id:
+                            _regen_jobs.pop(oldest, None)
+
+            threading.Thread(target=_worker, name=f"nanami-gen-{job_id}", daemon=True).start()
+            return {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label}
+
+        # 1. 优先尝试检索弹丸论破原版像素小人（auto 或 official）
+        if gen_mode in ("auto", "official") and (use_web or gen_mode == "official"):
+            en_hint = ""
+            if gen_mode == "official" or use_web:
+                off = text_compiler.search_official_pixel_sprite(host_name or act["name"], en_hint)
+                if off is not None:
+                    return {
+                        "ok": True,
+                        "used_official_pixel": True,
+                        "official_image_data_url": off["image_data_url"],
+                        "official_title": off["title"],
+                        "english_name": off["english_name"],
+                    }
+            if gen_mode == "official":
+                raise ValueError(f"未在弹丸论破 Wiki 找到「{host_name or act['name']}」的原版像素小人，可尝试改用 PixelLab 或手动导入图片。")
+
+        # 2. PixelLab 云端 4 向生成（作为备用 / 或显式选择 pixellab）
+        if gen_mode == "pixellab" or (gen_mode == "auto" and pixellab_key and bool(v.get("use_pixellab", True))):
+            if not pixellab_key:
+                raise ValueError("尚未在「文字世界设置」中填写 PixelLab API Key。")
+
+            def _run_pixellab() -> dict[str, Any]:
+                pl_res = text_compiler.generate_pixellab_4dir_sprites(
+                    host_name or act["name"],
+                    desc,
+                    api_key=pixellab_key,
+                    use_web=use_web,
+                    use_llm=use_llm,
+                )
+                return {
+                    "ok": True,
+                    "used_pixellab": True,
+                    "pixellab_images": pl_res["images"],
+                    "used_llm": pl_res["used_llm"],
+                    "used_web": pl_res["used_web"],
+                    "web_sources": pl_res["web_sources"],
+                    "english_name": pl_res["english_name"],
+                }
+
+            return _spawn_async(_run_pixellab, "PixelLab 4向生图中")
+
+        res = text_compiler.compile_actor_appearance(
+            host_name or act["name"],
+            desc,
+            use_llm=use_llm,
+            use_web=use_web,
+            reference_image_path=ref_img,
+        )
+        return {
+            "ok": True,
+            "appearance": res["appearance"],
+            "used_llm": res["used_llm"],
+            "used_web": res.get("used_web", False),
+            "web_sources": res.get("web_sources", []),
+            "used_vision": res.get("used_vision", False),
+            "has_custom_frames": res.get("has_custom_frames", False),
+        }
 
     def _act_place_actor(v: dict[str, Any]) -> dict[str, Any]:
         actor = engine.place_actor(
@@ -556,6 +749,9 @@ def register_pages(
         ("trigger_social_talk", "同屋角色交流", _act_trigger_social_talk),
         ("set_world_actor_mood", "调整本世界心情", _act_set_world_actor_mood),
         ("save_world_relation", "保存本世界社交指针", _act_save_world_relation),
+        ("set_actor_appearance", "保存像素小人外观", _act_set_actor_appearance),
+        ("regen_actor_appearance", "按设定生成小人外观", _act_regen_actor_appearance),
+        ("get_regen_job", "查询生图任务状态", _act_get_regen_job),
         ("create_space", "新建空间", _act_create_space),
         ("switch_space", "切换空间", _act_switch_space),
         ("delete_space", "删除世界", _act_delete_space),
@@ -654,6 +850,19 @@ def register_pages(
                 {"key": "default_space_height", "type": "integer", "label": "默认格网高度（6–64）", "min": 6, "max": 64, "step": 1},
             ],
         },
+        {
+            "id": "pixellab_sprite",
+            "title": "像素小人云端生成配置（PixelLab）",
+            "fields": [
+                {
+                    "key": "pixellab_api_key",
+                    "type": "text",
+                    "label": "PixelLab API Key（云端原生 4 向像素小人备用）",
+                    "description": "在 pixellab.ai 获取免费试用/正式 Key（格式 pixl_...），非弹丸论破角色可由此生成 4 向小人",
+                    "placeholder": "pixl_...",
+                },
+            ],
+        },
     ]
 
     register.register_frontend_config_page(
@@ -682,7 +891,7 @@ def register_pages(
                     presentation="button",
                     variant="ghost",
                     order=65.0,
-                    action={"type": "open-plugin-page", "page_id": CANVAS_PAGE_ID, "mode": "overlay"},
+                    action={"type": "open-plugin-page", "page_id": CANVAS_PAGE_ID, "mode": "navigate"},
                 )
             )
         except Exception:  # noqa: BLE001
