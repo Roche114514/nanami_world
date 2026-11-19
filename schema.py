@@ -706,13 +706,59 @@ def normalize_autonomy(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_vitals(raw: Any) -> dict[str, Any]:
+    vitals_raw = raw if isinstance(raw, Mapping) else {}
+    return {
+        "energy": clamp_float(vitals_raw.get("energy"), 0.0, 1.0, 0.72),
+        "sleep_pressure": clamp_float(vitals_raw.get("sleep_pressure"), 0.0, 1.0, 0.30),
+        "mood_v": clamp_float(vitals_raw.get("mood_v"), -1.0, 1.0, 0.15),
+        "agenda": str(vitals_raw.get("agenda") or "").strip(),
+        "disengaged": bool(vitals_raw.get("disengaged", False)),
+        "preferred_domains": [
+            str(d).strip() for d in (vitals_raw.get("preferred_domains") or []) if str(d).strip()
+        ],
+        "source": str(vitals_raw.get("source") or "builtin"),
+    }
+
+
+def normalize_world_states(
+    raw: Any,
+    *,
+    current_space_id: str,
+    current_vitals: Mapping[str, Any],
+    current_autonomy: Mapping[str, Any],
+    current_expression: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    if isinstance(raw, Mapping):
+        for k, v in raw.items():
+            wsid = str(k or "").strip()
+            if not wsid or not isinstance(v, Mapping):
+                continue
+            out[wsid] = {
+                "vitals": _normalize_vitals(v.get("vitals")),
+                "autonomy": normalize_autonomy(v.get("autonomy")),
+                "expression": _normalize_expression(v.get("expression")),
+            }
+    cur_sid = str(current_space_id or "room_default").strip() or "room_default"
+    out[cur_sid] = {
+        "vitals": _normalize_vitals(current_vitals),
+        "autonomy": normalize_autonomy(current_autonomy),
+        "expression": _normalize_expression(current_expression),
+    }
+    return out
+
+
 def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     name = clip_text(raw.get("name"), 20, "七海千秋")
     aid = str(raw.get("actor_id") or "").strip() or slugify(name, prefix="actor")
     posture = str(raw.get("posture") or "standing").strip().lower()
     if posture not in ("standing", "resting"):
         posture = "standing"
-    vitals_raw = raw.get("vitals") if isinstance(raw.get("vitals"), Mapping) else {}
+    cur_sid = str(raw.get("space_id") or "room_default").strip() or "room_default"
+    vitals = _normalize_vitals(raw.get("vitals"))
+    expression = _normalize_expression(raw.get("expression"))
+    autonomy = normalize_autonomy(raw.get("autonomy"))
     sprite_raw = raw.get("sprite") if isinstance(raw.get("sprite"), Mapping) else {}
     sprite_mode = str(sprite_raw.get("mode") or "pixel_grid").strip().lower()
     if sprite_mode not in ("host_pack", "pixel_grid", "image", "token"):
@@ -728,11 +774,18 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     pack_sprites = _normalize_pack_sprites(sprite_raw.get("pack_sprites"))
     if sprite_mode == "host_pack" and not pack_sprites:
         sprite_mode = "pixel_grid"
+    world_states = normalize_world_states(
+        raw.get("world_states"),
+        current_space_id=cur_sid,
+        current_vitals=vitals,
+        current_autonomy=autonomy,
+        current_expression=expression,
+    )
     return {
         "actor_id": aid,
         "host_character": str(raw.get("host_character") or "").strip(),
         "name": name,
-        "space_id": str(raw.get("space_id") or "room_default").strip() or "room_default",
+        "space_id": cur_sid,
         "x": clamp_int(raw.get("x"), 0, MAX_SPACE_WIDTH - 1, 5),
         "y": clamp_int(raw.get("y"), 0, MAX_SPACE_HEIGHT - 1, 4),
         "facing": str(raw.get("facing") or "down").strip(),
@@ -740,7 +793,7 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         "holding_id": str(raw.get("holding_id")).strip() if raw.get("holding_id") else None,
         "resting_on_id": str(raw.get("resting_on_id")).strip() if raw.get("resting_on_id") else None,
         "last_action_kind": str(raw.get("last_action_kind") or "").strip(),
-        "expression": _normalize_expression(raw.get("expression")),
+        "expression": expression,
         "sprite": {
             "mode": sprite_mode,
             "w": 16,
@@ -755,18 +808,9 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
             "pack_sprites": pack_sprites,
             "portrait_crop": _normalize_portrait_crop(sprite_raw.get("portrait_crop")),
         },
-        "vitals": {
-            "energy": clamp_float(vitals_raw.get("energy"), 0.0, 1.0, 0.72),
-            "sleep_pressure": clamp_float(vitals_raw.get("sleep_pressure"), 0.0, 1.0, 0.30),
-            "mood_v": clamp_float(vitals_raw.get("mood_v"), -1.0, 1.0, 0.15),
-            "agenda": str(vitals_raw.get("agenda") or "").strip(),
-            "disengaged": bool(vitals_raw.get("disengaged", False)),
-            "preferred_domains": [
-                str(d).strip() for d in (vitals_raw.get("preferred_domains") or []) if str(d).strip()
-            ],
-            "source": str(vitals_raw.get("source") or "builtin"),
-        },
-        "autonomy": normalize_autonomy(raw.get("autonomy")),
+        "vitals": vitals,
+        "autonomy": autonomy,
+        "world_states": world_states,
     }
 
 

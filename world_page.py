@@ -28,6 +28,7 @@ def _ok_with_snap(
     custom_persona_dir: str = "",
 ) -> dict[str, Any]:
     snap = engine.snapshot_for_ui(space_id)
+    eff_sid = str(snap.get("active_space_id") or space_id or "room_default").strip() or "room_default"
     aid = snap.get("active_actor_id") or ""
     if aid:
         act = next((a for a in (snap.get("actors") or []) if a.get("actor_id") == aid), None)
@@ -45,6 +46,7 @@ def _ok_with_snap(
             snap["actor_relations"] = persona_bridge.read_actor_relations(
                 engine.project_root,
                 host_char,
+                space_id=eff_sid,
                 world_data_root=engine.data_root,
                 custom_persona_dir=custom_persona_dir,
                 known_actors=all_names,
@@ -55,7 +57,7 @@ def _ok_with_snap(
         snap["actor_relations"] = {}
 
     terminal = projector.project_terminal_data(engine, aid, consume_diffs=False) if aid else {"text": "（尚未导入角色）", "anchors": []}
-    chat_history = world_chat.get_history(aid) if (world_chat is not None and aid) else []
+    chat_history = world_chat.get_history(aid, space_id=eff_sid) if (world_chat is not None and aid) else []
     out: dict[str, Any] = {
         "ok": True,
         "snapshot": snap,
@@ -295,12 +297,84 @@ def register_pages(
     def _act_trigger_social_talk(v: dict[str, Any]) -> dict[str, Any]:
         if world_chat is None:
             raise ValueError("世界对话服务未就绪。")
-        aid = str(v.get("initiator_id") or v.get("actor_id") or "").strip() or engine.resolve_actor_id()
+        req_sid = str(v.get("space_id") or "").strip()
+        aid = str(v.get("initiator_id") or v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=req_sid)
         tid = str(v.get("target_actor_id") or "").strip()
         if not aid or not tid:
             raise ValueError("需要指定参与社交的两位角色。")
         res = world_chat.conduct_actor_social_exchange(aid, tid, reason=str(v.get("reason") or ""))
-        return _snap_ok({"social_exchange": res})
+        return _snap_ok({"social_exchange": res}, space_id=req_sid)
+
+    def _act_set_world_actor_mood(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "").strip()
+        aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=sid)
+        if not aid:
+            raise ValueError("当前没有活动角色。")
+        if not sid:
+            act = next((a for a in engine.list_actors() if a.get("actor_id") == aid), None)
+            sid = str((act or {}).get("space_id") or "room_default")
+
+        vit_patch: dict[str, Any] = {}
+        for key in ("energy", "sleep_pressure", "mood_v"):
+            if key in v and v.get(key) not in (None, ""):
+                vit_patch[key] = float(v[key])
+        if "agenda" in v and v.get("agenda") is not None:
+            vit_patch["agenda"] = str(v.get("agenda") or "")
+        if "disengaged" in v and v.get("disengaged") is not None:
+            vit_patch["disengaged"] = bool(v.get("disengaged"))
+
+        aut_patch: dict[str, Any] = {}
+        for key in ("hunger", "curiosity"):
+            if key in v and v.get(key) not in (None, ""):
+                aut_patch[key] = float(v[key])
+        for key in ("current_goal", "current_drive", "last_thought"):
+            if key in v and v.get(key) is not None:
+                aut_patch[key] = str(v.get(key) or "")
+        if "enabled" in v and v.get("enabled") is not None:
+            aut_patch["enabled"] = bool(v.get("enabled"))
+
+        updated = engine.set_actor_world_mood(
+            aid,
+            space_id=sid,
+            vitals_patch=vit_patch or None,
+            autonomy_patch=aut_patch or None,
+        )
+        return _snap_ok({"actor": updated}, space_id=sid)
+
+    def _act_save_world_relation(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "").strip()
+        if not sid:
+            sid = str(engine.snapshot_for_ui().get("active_space_id") or "room_default")
+        subj = str(v.get("subject_character") or "").strip()
+        if not subj:
+            aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=sid)
+            act = next((a for a in engine.list_actors() if a.get("actor_id") == aid), None)
+            if act:
+                subj = str(act.get("host_character") or act.get("name") or "").strip()
+        target_key = str(v.get("target_key") or "").strip()
+        if not subj or not target_key:
+            raise ValueError("缺少主体角色名称或目标对象标识（target_key）。")
+
+        patch: dict[str, Any] = {}
+        if "known" in v and v.get("known") is not None:
+            patch["known"] = bool(v["known"])
+        for key in ("rel_stage", "attitude_stance", "call_name", "relation_tag", "shared_memories"):
+            if key in v and v.get(key) is not None:
+                patch[key] = str(v.get(key) or "")
+        for key in ("affective_valence", "trust", "warmth", "social_willingness", "repulsion"):
+            if key in v and v.get(key) not in (None, ""):
+                patch[key] = float(v[key])
+        if "cool_off_turns" in v and v.get("cool_off_turns") not in (None, ""):
+            patch["cool_off_turns"] = int(v["cool_off_turns"])
+
+        edge = persona_bridge.save_world_actor_relation(
+            engine.data_root,
+            sid,
+            subj,
+            target_key,
+            patch,
+        )
+        return _snap_ok({"relation": edge, "space_id": sid}, space_id=sid)
 
     def _act_create_space(v: dict[str, Any]) -> dict[str, Any]:
         cfg = settings_store.get()
@@ -366,7 +440,8 @@ def register_pages(
 
     def _act_chat_in_world(v: dict[str, Any]) -> dict[str, Any]:
         _ensure_default_host_actor()
-        aid = str(v.get("actor_id") or "") or engine.resolve_actor_id()
+        req_sid = str(v.get("space_id") or "").strip()
+        aid = str(v.get("actor_id") or "") or engine.resolve_actor_id(space_id=req_sid)
         if not aid:
             raise ValueError("当前房间内还没有角色，请先导入角色。")
         if world_chat is None:
@@ -374,16 +449,17 @@ def register_pages(
         text = str(v.get("text") or "").strip()
         if not text:
             raise ValueError("请输入想对她说的话。")
-        res = world_chat.chat(aid, text)
-        return _snap_ok({"chat_result": res})
+        res = world_chat.chat(aid, text, space_id=req_sid)
+        return _snap_ok({"chat_result": res}, space_id=req_sid)
 
     def _act_clear_world_chat(v: dict[str, Any]) -> dict[str, Any]:
-        aid = str(v.get("actor_id") or "") or engine.resolve_actor_id()
+        req_sid = str(v.get("space_id") or "").strip()
+        aid = str(v.get("actor_id") or "") or engine.resolve_actor_id(space_id=req_sid)
         if not aid:
             raise ValueError("当前没有活动角色。")
         if world_chat is not None:
-            world_chat.clear_history(aid)
-        return _snap_ok({})
+            world_chat.clear_history(aid, space_id=req_sid)
+        return _snap_ok({}, space_id=req_sid)
 
     def _act_set_actor_expression(v: dict[str, Any]) -> dict[str, Any]:
         aid = str(v.get("actor_id") or "") or engine.resolve_actor_id()
@@ -478,6 +554,8 @@ def register_pages(
         ("set_active_actor", "切换观察角色", _act_set_active_actor),
         ("remove_actor", "移除角色", _act_remove_actor),
         ("trigger_social_talk", "同屋角色交流", _act_trigger_social_talk),
+        ("set_world_actor_mood", "调整本世界心情", _act_set_world_actor_mood),
+        ("save_world_relation", "保存本世界社交指针", _act_save_world_relation),
         ("create_space", "新建空间", _act_create_space),
         ("switch_space", "切换空间", _act_switch_space),
         ("delete_space", "删除世界", _act_delete_space),

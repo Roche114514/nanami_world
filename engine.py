@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import persona_bridge
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -33,6 +34,8 @@ from .schema import (
     MIN_SPACE_HEIGHT,
     MIN_SPACE_WIDTH,
     TILE_CATALOG,
+    _normalize_expression,
+    _normalize_vitals,
     clamp_float,
     clamp_int,
     clip_text,
@@ -1068,12 +1071,16 @@ class WorldEngine:
                         fallback_space,
                         ignore_actor_id=act["actor_id"],
                     )
-                    act["space_id"] = fallback_sid
+                    self._switch_actor_world_state_locked(act, fallback_sid)
                     act["x"] = nx
                     act["y"] = ny
                     act["posture"] = "standing"
+                    self._refresh_actor_expression_locked(act)
                     if hid and hid in self._world["entities"]:
                         self._world["entities"][hid]["space_id"] = fallback_sid
+                ws = act.get("world_states")
+                if isinstance(ws, dict):
+                    ws.pop(sid, None)
 
             removed_ids: list[str] = []
             for eid, ent in list(self._world["entities"].items()):
@@ -1094,6 +1101,7 @@ class WorldEngine:
             deleted_space = spaces.pop(sid)
             if self._world.get("active_space_id") == sid:
                 self._world["active_space_id"] = fallback_sid
+            persona_bridge.delete_world_relations(self._data_root, sid)
 
             self._append_event_locked(
                 "space_deleted",
@@ -1518,7 +1526,7 @@ class WorldEngine:
                 actor = self._world["actors"][aid]
                 self._clear_actor_rest_locked(actor)
                 ax, ay = self._find_open_floor_cell_locked(space, preferred_x=w // 2, preferred_y=h // 2, ignore_actor_id=aid)
-                actor["space_id"] = sid
+                self._switch_actor_world_state_locked(actor, sid)
                 actor["x"] = ax
                 actor["y"] = ay
                 self._refresh_actor_expression_locked(actor)
@@ -1707,6 +1715,7 @@ class WorldEngine:
             or str(cur_expr.get("path") or "") != new_expr["path"]
         )
         actor["expression"] = new_expr
+        self._sync_actor_world_state_locked(actor)
         if changed and cur_expr:
             self._append_event_locked(
                 "actor_expression_changed",
@@ -1715,6 +1724,34 @@ class WorldEngine:
                 payload={"index": new_expr["index"], "tag": new_expr["tag"], "bucket": new_expr["bucket"]},
             )
         return new_expr
+
+    def _sync_actor_world_state_locked(self, actor: dict[str, Any], space_id: str = "") -> None:
+        sid = str(space_id or actor.get("space_id") or "room_default").strip() or "room_default"
+        states = actor.setdefault("world_states", {})
+        states[sid] = {
+            "vitals": _normalize_vitals(actor.get("vitals")),
+            "autonomy": normalize_autonomy(actor.get("autonomy")),
+            "expression": _normalize_expression(actor.get("expression")),
+        }
+
+    def _switch_actor_world_state_locked(self, actor: dict[str, Any], new_space_id: str) -> None:
+        old_sid = str(actor.get("space_id") or "room_default").strip() or "room_default"
+        new_sid = str(new_space_id or old_sid).strip() or old_sid
+        if old_sid != new_sid:
+            self._sync_actor_world_state_locked(actor, old_sid)
+            actor["space_id"] = new_sid
+            states = actor.setdefault("world_states", {})
+            saved = states.get(new_sid)
+            if isinstance(saved, Mapping):
+                actor["vitals"] = _normalize_vitals(saved.get("vitals"))
+                actor["autonomy"] = normalize_autonomy(saved.get("autonomy"))
+                actor["expression"] = _normalize_expression(saved.get("expression"))
+            else:
+                pref = list((actor.get("vitals") or {}).get("preferred_domains") or [])
+                actor["vitals"] = _normalize_vitals({"preferred_domains": pref, "source": "builtin"})
+                actor["autonomy"] = normalize_autonomy({})
+                actor["expression"] = _normalize_expression({})
+        self._sync_actor_world_state_locked(actor, new_sid)
 
     def refresh_actor_expression(
         self,
@@ -1763,6 +1800,7 @@ class WorldEngine:
                 "path": str(picked["path"]),
                 "manual": True,
             }
+            self._sync_actor_world_state_locked(actor)
             self._append_event_locked(
                 "actor_expression_changed",
                 actor_id=actor_id,
@@ -1787,10 +1825,10 @@ class WorldEngine:
             return out
 
     # ── 角色导入与坐标落格 ──────────────────────────────────────────────
-    def _alloc_actor_id_locked(self, clean_name: str, host_character: str = "") -> str:
-        # 1. 同名（或明确绑定同一宿主角色且同显示名）已存在时复用其 actor_id，支持召唤切换空间
+    def _alloc_actor_id_locked(self, clean_name: str, host_character: str = "", space_id: str = "") -> str:
+        # 1. 同一个世界（space_id）内同名角色已存在时复用其 actor_id；不同世界彼此独立
         for eid_a, act in self._world["actors"].items():
-            if act.get("name") == clean_name:
+            if act.get("name") == clean_name and (not space_id or act.get("space_id") == space_id):
                 return eid_a
         # 2. 新建角色时保证 ID 唯一（中文名不可退化覆盖既有 `"actor"`）
         base_ascii = re.sub(r"[^a-zA-Z0-9_]+", "_", str(clean_name or "").strip().lower()).strip("_")
@@ -1801,7 +1839,7 @@ class WorldEngine:
         elif not self._world["actors"]:
             cand_base = "actor"
         else:
-            short_h = hashlib.md5(clean_name.encode("utf-8")).hexdigest()[:6]
+            short_h = hashlib.md5(f"{clean_name}@{space_id}".encode("utf-8")).hexdigest()[:6]
             cand_base = f"actor_{short_h}"
         aid = cand_base
         idx = 2
@@ -1823,10 +1861,10 @@ class WorldEngine:
     ) -> dict[str, Any]:
         with self._lock:
             clean_name = clip_text(name or host_character, 20, "七海千秋")
-            explicit_aid = str(actor_id or "").strip()
-            aid = explicit_aid or self._alloc_actor_id_locked(clean_name, host_character)
             if not space_id or space_id not in self._world["spaces"]:
                 space_id = self._world["active_space_id"]
+            explicit_aid = str(actor_id or "").strip()
+            aid = explicit_aid or self._alloc_actor_id_locked(clean_name, host_character, space_id=space_id)
             space = self._world["spaces"][space_id]
             tx, ty = self._find_open_floor_cell_locked(space, preferred_x=x, preferred_y=y, ignore_actor_id=aid)
 
@@ -1851,7 +1889,7 @@ class WorldEngine:
                     existing["host_character"] = host_character
                 if existing.get("space_id") != space_id or x is not None or y is not None:
                     self._clear_actor_rest_locked(existing)
-                    existing["space_id"] = space_id
+                    self._switch_actor_world_state_locked(existing, space_id)
                     existing["x"] = tx
                     existing["y"] = ty
                 if resolved_sprite:
@@ -1876,6 +1914,7 @@ class WorldEngine:
                 self._world["actors"][aid] = actor
 
             self._refresh_actor_expression_locked(actor, force_auto=True)
+            self._sync_actor_world_state_locked(actor)
             self._world["active_actor_id"] = aid
             self._append_event_locked("actor_imported", actor_id=aid, space_id=space_id, payload={"name": clean_name, "x": actor["x"], "y": actor["y"], "mode": actor["sprite"]["mode"]})
             self._save_world_locked()
@@ -1917,7 +1956,7 @@ class WorldEngine:
             if not self._is_floor_walkable_locked(space, int(x), int(y), ignore_actor_id=actor_id):
                 raise ValueError(f"坐标 ({x}, {y}) 不可落脚（墙面或被实心家具占用）。")
             self._clear_actor_rest_locked(actor)
-            actor["space_id"] = space_id
+            self._switch_actor_world_state_locked(actor, space_id)
             actor["x"] = int(x)
             actor["y"] = int(y)
             self._refresh_actor_expression_locked(actor, action_kind="move")
@@ -1993,9 +2032,68 @@ class WorldEngine:
             target = self._world["actors"].get(actor_id)
             if not target:
                 return
-            target["vitals"] = dict(vitals)
+            target["vitals"] = _normalize_vitals(vitals)
             self._refresh_actor_expression_locked(target)
+            self._sync_actor_world_state_locked(target)
             self._save_world_locked()
+
+    def set_actor_world_mood(
+        self,
+        actor_id: str,
+        *,
+        space_id: str = "",
+        vitals_patch: Mapping[str, Any] | None = None,
+        autonomy_patch: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """针对指定世界（space_id）更新角色的心情参数与心愿状态，与其他世界完全隔离。"""
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            if not actor:
+                raise ValueError(f"角色不存在：{actor_id}")
+            target_sid = str(space_id or actor.get("space_id") or "room_default").strip() or "room_default"
+            cur_sid = str(actor.get("space_id") or "room_default").strip() or "room_default"
+
+            if target_sid == cur_sid:
+                vit = dict(actor.get("vitals") or {})
+                if isinstance(vitals_patch, Mapping):
+                    vit.update(dict(vitals_patch))
+                actor["vitals"] = _normalize_vitals(vit)
+
+                aut = normalize_autonomy(actor.get("autonomy"))
+                if isinstance(autonomy_patch, Mapping):
+                    aut.update(dict(autonomy_patch))
+                actor["autonomy"] = normalize_autonomy(aut)
+
+                self._refresh_actor_expression_locked(actor, force_auto=True)
+                self._sync_actor_world_state_locked(actor, target_sid)
+                result_state = actor["world_states"][target_sid]
+            else:
+                states = actor.setdefault("world_states", {})
+                bucket = copy.deepcopy(states.get(target_sid) or {})
+                vit = dict(bucket.get("vitals") or {"preferred_domains": list((actor.get("vitals") or {}).get("preferred_domains") or []), "source": "builtin"})
+                if isinstance(vitals_patch, Mapping):
+                    vit.update(dict(vitals_patch))
+                aut = normalize_autonomy(bucket.get("autonomy"))
+                if isinstance(autonomy_patch, Mapping):
+                    aut.update(dict(autonomy_patch))
+                bucket["vitals"] = _normalize_vitals(vit)
+                bucket["autonomy"] = normalize_autonomy(aut)
+                bucket["expression"] = _normalize_expression(bucket.get("expression"))
+                states[target_sid] = bucket
+                result_state = bucket
+
+            self._append_event_locked(
+                "actor_world_mood_updated",
+                actor_id=actor_id,
+                space_id=target_sid,
+                payload={
+                    "energy": result_state["vitals"]["energy"],
+                    "sleep_pressure": result_state["vitals"]["sleep_pressure"],
+                    "mood_v": result_state["vitals"]["mood_v"],
+                },
+            )
+            self._save_world_locked()
+            return copy.deepcopy(result_state)
 
     def update_actor_sprite(self, actor_id: str, sprite: Mapping[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -2007,17 +2105,30 @@ class WorldEngine:
             self._save_world_locked()
             return copy.deepcopy(actor)
 
-    def resolve_actor_id(self, character_name: str = "") -> str:
+    def resolve_actor_id(self, character_name: str = "", *, space_id: str = "") -> str:
         with self._lock:
             actors = self._world["actors"]
             if not actors:
                 return ""
             target = str(character_name or "").strip()
+            sid = str(space_id or "").strip()
+            active = str(self._world.get("active_actor_id") or "")
+
+            if sid:
+                if target:
+                    for aid, act in actors.items():
+                        if act.get("space_id") == sid and (act.get("host_character") == target or act.get("name") == target):
+                            return aid
+                if active in actors and actors[active].get("space_id") == sid:
+                    return active
+                for aid, act in actors.items():
+                    if act.get("space_id") == sid:
+                        return aid
+
             if target:
                 for aid, act in actors.items():
                     if act.get("host_character") == target or act.get("name") == target:
                         return aid
-            active = str(self._world.get("active_actor_id") or "")
             if active in actors:
                 return active
             return next(iter(actors))
@@ -2467,6 +2578,7 @@ class WorldEngine:
             actor["autonomy"] = normalize_autonomy(cur)
             if emotion_hint:
                 self._refresh_actor_expression_locked(actor, emotion_hint=emotion_hint)
+            self._sync_actor_world_state_locked(actor)
             if patch.get("last_action_summary"):
                 self._append_event_locked(
                     "actor_autonomous_step",
@@ -2842,9 +2954,10 @@ class WorldEngine:
                     preferred_y=int(pt.get("target_y") or 2),
                     ignore_actor_id=actor_id,
                 )
-                actor["space_id"] = target_sid
+                self._switch_actor_world_state_locked(actor, target_sid)
                 actor["x"] = tx
                 actor["y"] = ty
+                self._refresh_actor_expression_locked(actor)
                 # 手持物随角色同步迁入新空间
                 if actor.get("holding_id") and actor["holding_id"] in self._world["entities"]:
                     self._world["entities"][actor["holding_id"]]["space_id"] = target_sid
@@ -3000,6 +3113,7 @@ class WorldEngine:
                     aut["curiosity"] = round(clamp_float(aut["curiosity"] + 0.006 * delta_min, 0.0, 1.0, 0.55), 3)
                     act["autonomy"] = aut
                     self._refresh_actor_expression_locked(act)
+                    self._sync_actor_world_state_locked(act)
 
                 if delta_min >= 1.0 or cooled:
                     self._append_event_locked("world_tick", payload={"delta_min": round(delta_min, 2), "cooled": cooled})
@@ -3066,7 +3180,7 @@ class WorldEngine:
             )
             return {
                 "active_space_id": sid,
-                "active_actor_id": self.resolve_actor_id(),
+                "active_actor_id": self.resolve_actor_id(space_id=sid),
                 "clock_offset_minutes": float(self._world.get("clock_offset_minutes") or 0.0),
                 "looked_entities": dict(self._world.get("looked_entities") or {}),
                 "spaces": [

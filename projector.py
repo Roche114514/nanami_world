@@ -135,6 +135,7 @@ def project_terminal_data(
         persona_bridge.read_actor_relations(
             engine.project_root,
             actor_host,
+            space_id=sid,
             world_data_root=engine.data_root,
             known_actors=peer_names,
         )

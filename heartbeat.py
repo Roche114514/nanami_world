@@ -99,22 +99,26 @@ class WorldHeartbeat:
     def _sync_persona_vitals(self, settings: WorldSettings) -> None:
         for act in self._engine.list_actors():
             aid = act["actor_id"]
+            sid = str(act.get("space_id") or "room_default")
             host_name = str(act.get("host_character") or act.get("name") or "").strip()
             synced = persona_bridge.read_persona_state(
                 self._project_root,
                 host_name,
                 custom_persona_dir=settings.persona_data_dir,
+                space_id=sid,
+                actor_id=aid,
             )
             if synced is None:
                 continue
 
             cur_vit = dict(act.get("vitals") or {})
             remote_ts = float(synced.get("updated_at") or 0.0)
-            prev_ts = self._last_persona_ts.get(aid, -1.0)
+            ts_key = f"{sid}::{aid}"
+            prev_ts = self._last_persona_ts.get(ts_key, -1.0)
             is_fresh_remote = prev_ts < 0 or (remote_ts > 0 and remote_ts != prev_ts)
 
             if is_fresh_remote:
-                self._last_persona_ts[aid] = remote_ts
+                self._last_persona_ts[ts_key] = remote_ts
                 next_vit = {
                     "energy": synced["energy"],
                     "sleep_pressure": synced["sleep_pressure"],
@@ -205,6 +209,7 @@ class WorldHeartbeat:
                         action_summary=summary,
                         thought=str(plan.get("thought") or ""),
                         emotion=str(plan.get("emotion") or ""),
+                        space_id=act["space_id"],
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug("nanami_world: 同步自主行动到世界对话历史失败", exc_info=True)
@@ -255,10 +260,12 @@ class WorldHeartbeat:
                 else:
                     a_host = str(me.get("host_character") or me.get("name") or "").strip()
                     b_host = str(peer.get("host_character") or peer.get("name") or "").strip()
+                    me_sid = str(me.get("space_id") or "room_default")
                     settings = self._settings_provider()
                     rels_a = persona_bridge.read_actor_relations(
                         self._project_root,
                         a_host,
+                        space_id=me_sid,
                         world_data_root=self._engine.data_root,
                         custom_persona_dir=settings.persona_data_dir,
                         known_actors=[b_host],
@@ -271,6 +278,7 @@ class WorldHeartbeat:
                         self._engine.data_root,
                         a_host,
                         b_host,
+                        space_id=me_sid,
                         summary=note,
                         first_meet=first_meet,
                         call_a_to_b=peer["name"] if first_meet else "",
@@ -363,6 +371,7 @@ class WorldHeartbeat:
         rels = persona_bridge.read_actor_relations(
             self._project_root,
             actor_host,
+            space_id=sid,
             world_data_root=self._engine.data_root,
             custom_persona_dir=settings.persona_data_dir,
             known_actors=peer_hosts,

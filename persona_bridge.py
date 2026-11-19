@@ -114,9 +114,11 @@ def read_persona_state(
     project_root: Path,
     host_character: str,
     *,
+    space_id: str = "",
+    actor_id: str = "",
     custom_persona_dir: str = "",
 ) -> dict[str, Any] | None:
-    """只读读取 nanami_persona 的心理与特质快照；未安装或损坏返回 None。"""
+    """只读读取 nanami_persona 的心理与特质快照（按 space_id 隔离，防止不同世界串味）。"""
     base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
     if base_dir is None:
         return None
@@ -128,7 +130,26 @@ def read_persona_state(
     if not mind_raw:
         return None
 
-    entries = [v for v in mind_raw.values() if isinstance(v, dict)]
+    eff_sid = str(space_id or "").strip()
+    matched_entries: list[dict[str, Any]] = []
+    if eff_sid:
+        needle_exact = f"world:{eff_sid}:{actor_id}" if actor_id else ""
+        needle_space = f"world:{eff_sid}:"
+        for k, v in mind_raw.items():
+            if not isinstance(v, dict):
+                continue
+            ks = str(k)
+            if (needle_exact and needle_exact in ks) or (needle_space in ks):
+                matched_entries.append(v)
+
+    if matched_entries:
+        entries = matched_entries
+    elif eff_sid in ("", "room_default"):
+        entries = [v for v in mind_raw.values() if isinstance(v, dict)]
+    else:
+        # 非默认世界且尚无该世界专属 mind.json 记录时，不继承主世界状态，维持该世界独立心情
+        return None
+
     if not entries:
         return None
     latest = max(entries, key=lambda e: float(e.get("updatedAt") or 0))
@@ -325,30 +346,142 @@ def _read_user_fallback_from_mind(state_root: Path) -> dict[str, Any]:
     return out
 
 
+def _read_relations_doc(world_data_root: Path) -> dict[str, Any]:
+    raw = _read_json(_world_relations_path(world_data_root)) or {}
+    worlds = raw.get("worlds") if isinstance(raw.get("worlds"), Mapping) else None
+    if isinstance(worlds, Mapping):
+        clean_worlds: dict[str, dict[str, Any]] = {}
+        for sid, bucket in worlds.items():
+            if not isinstance(bucket, Mapping):
+                continue
+            edges = bucket.get("edges") if isinstance(bucket.get("edges"), Mapping) else {}
+            clean_worlds[str(sid)] = {
+                "edges": {
+                    str(subj): {
+                        str(tk): dict(val)
+                        for tk, val in tgt_map.items()
+                        if isinstance(val, Mapping)
+                    }
+                    for subj, tgt_map in edges.items()
+                    if isinstance(tgt_map, Mapping)
+                }
+            }
+        return {"version": 2, "worlds": clean_worlds}
+
+    # 兼容 v1：旧版顶层 edges 归属默认房间 room_default，绝不污染其他世界
+    legacy_edges = raw.get("edges") if isinstance(raw.get("edges"), Mapping) else {}
+    if legacy_edges:
+        return {
+            "version": 2,
+            "worlds": {
+                "room_default": {
+                    "edges": {
+                        str(subj): {
+                            str(tk): dict(val)
+                            for tk, val in tgt_map.items()
+                            if isinstance(val, Mapping)
+                        }
+                        for subj, tgt_map in legacy_edges.items()
+                        if isinstance(tgt_map, Mapping)
+                    }
+                }
+            },
+        }
+    return {"version": 2, "worlds": {}}
+
+
+def _load_world_edges(world_data_root: Path, space_id: str) -> dict[str, dict[str, Any]]:
+    sid = str(space_id or "room_default").strip() or "room_default"
+    doc = _read_relations_doc(world_data_root)
+    bucket = doc["worlds"].get(sid) or {}
+    edges = bucket.get("edges")
+    return dict(edges) if isinstance(edges, Mapping) else {}
+
+
+def _save_world_edges(world_data_root: Path, space_id: str, space_edges: Mapping[str, Any]) -> None:
+    sid = str(space_id or "room_default").strip() or "room_default"
+    doc = _read_relations_doc(world_data_root)
+    doc["worlds"][sid] = {"edges": {str(k): dict(v) for k, v in space_edges.items() if isinstance(v, Mapping)}}
+    doc["updatedAt"] = round(time.time(), 3)
+    try:
+        _atomic_write_json(_world_relations_path(world_data_root), doc)
+    except OSError:
+        logger.debug("nanami_world: 写出 social_relations.json 失败", exc_info=True)
+
+
+def save_world_actor_relation(
+    world_data_root: Path,
+    space_id: str,
+    subject_character: str,
+    target_key: str,
+    patch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """针对指定世界（space_id）保存一条角色社交指针，独立于其他世界。"""
+    sid = str(space_id or "room_default").strip() or "room_default"
+    subj = str(subject_character or "").strip()
+    tkey = str(target_key or "").strip()
+    if not subj or not tkey or (tkey != "user" and not tkey.startswith("char:")):
+        raise ValueError(f"社交指针目标非法：{target_key}")
+    if tkey == f"char:{subj}":
+        raise ValueError("社交指针不能指向角色自身。")
+
+    edges = _load_world_edges(world_data_root, sid)
+    subj_map = dict(edges.get(subj) or {})
+    cur = dict(subj_map.get(tkey) or {})
+    cur.update(dict(patch or {}))
+    cur["manual_override"] = True
+    cur["updated_at"] = round(time.time(), 3)
+    coerced = _coerce_rel(tkey, cur)
+    subj_map[tkey] = coerced
+    edges[subj] = subj_map
+    _save_world_edges(world_data_root, sid, edges)
+    return coerced
+
+
+def delete_world_relations(world_data_root: Path, space_id: str) -> None:
+    """删除世界时清理该世界对应的社交指针桶。"""
+    sid = str(space_id or "").strip()
+    if not sid or world_data_root is None:
+        return
+    wpath = _world_relations_path(world_data_root)
+    if not wpath.is_file():
+        return
+    doc = _read_relations_doc(world_data_root)
+    if sid in doc["worlds"]:
+        doc["worlds"].pop(sid, None)
+        doc["updatedAt"] = round(time.time(), 3)
+        try:
+            _atomic_write_json(wpath, doc)
+        except OSError:
+            logger.debug("nanami_world: 清理已删世界社交指针失败", exc_info=True)
+
+
 def read_actor_relations(
     project_root: Path,
     host_character: str,
     *,
+    space_id: str = "room_default",
     world_data_root: Path | None = None,
     custom_persona_dir: str = "",
     known_actors: Sequence[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """合并读取角色的态度与情感指针（persona relations.json + 世界 social_relations.json）。"""
+    """按世界（space_id）读取角色的态度与情感指针；不同世界之间完全隔离。"""
+    eff_sid = str(space_id or "room_default").strip() or "room_default"
     subj = str(host_character or "").strip()
     persona_targets: dict[str, dict[str, Any]] = {}
     user_live: dict[str, Any] = {}
 
-    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-    if base_dir is not None:
-        sr = _resolve_persona_state_root(base_dir, subj, strict=True)
-        if sr is not None and sr.is_dir():
-            persona_targets = _read_persona_relations_targets(sr)
-            user_live = _read_user_fallback_from_mind(sr)
+    if eff_sid == "room_default":
+        base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+        if base_dir is not None:
+            sr = _resolve_persona_state_root(base_dir, subj, strict=True)
+            if sr is not None and sr.is_dir():
+                persona_targets = _read_persona_relations_targets(sr)
+                user_live = _read_user_fallback_from_mind(sr)
 
     world_targets: dict[str, dict[str, Any]] = {}
     if world_data_root is not None:
-        wraw = _read_json(_world_relations_path(world_data_root)) or {}
-        edges = wraw.get("edges") if isinstance(wraw.get("edges"), Mapping) else {}
+        edges = _load_world_edges(world_data_root, eff_sid)
         if isinstance(edges.get(subj), Mapping):
             world_targets = {str(k): dict(v) for k, v in edges[subj].items() if isinstance(v, Mapping)}
 
@@ -375,12 +508,12 @@ def read_actor_relations(
     for tkey in candidate_keys:
         p_entry = persona_targets.get(tkey)
         w_entry = world_targets.get(tkey)
-        if p_entry and w_entry:
-            chosen = w_entry if float(w_entry.get("updated_at") or 0) > float(p_entry.get("updated_at") or 0) else p_entry
-        elif p_entry:
-            chosen = p_entry
+        if w_entry and p_entry:
+            chosen = w_entry if float(w_entry.get("updated_at") or 0) >= float(p_entry.get("updated_at") or 0) else p_entry
         elif w_entry:
             chosen = w_entry
+        elif p_entry:
+            chosen = p_entry
         elif tkey == "user" and user_live:
             chosen = user_live
         else:
@@ -437,6 +570,7 @@ def record_world_social_interaction(
     actor_a_name: str,
     actor_b_name: str,
     *,
+    space_id: str = "room_default",
     summary: str,
     first_meet: bool = False,
     valence_delta: float = 0.06,
@@ -446,7 +580,8 @@ def record_world_social_interaction(
     call_b_to_a: str = "",
     custom_persona_dir: str = "",
 ) -> dict[str, dict[str, Any]]:
-    """双向记录两名角色在世界里的互动并持久化到世界关系账本与已安装人格目录。"""
+    """按世界（space_id）双向记录两名角色的社交互动，各世界社交指针独立持久化互不覆盖。"""
+    eff_sid = str(space_id or "room_default").strip() or "room_default"
     a_name = str(actor_a_name or "").strip()
     b_name = str(actor_b_name or "").strip()
     if not a_name or not b_name or a_name == b_name:
@@ -455,6 +590,7 @@ def record_world_social_interaction(
     rel_a = read_actor_relations(
         project_root,
         a_name,
+        space_id=eff_sid,
         world_data_root=world_data_root,
         custom_persona_dir=custom_persona_dir,
         known_actors=[b_name],
@@ -462,6 +598,7 @@ def record_world_social_interaction(
     rel_b = read_actor_relations(
         project_root,
         b_name,
+        space_id=eff_sid,
         world_data_root=world_data_root,
         custom_persona_dir=custom_persona_dir,
         known_actors=[a_name],
@@ -492,31 +629,14 @@ def record_world_social_interaction(
         call_name=call_b_to_a,
     )
 
-    # 1. 写入世界本地 social_relations.json
-    wpath = _world_relations_path(world_data_root)
-    wraw = _read_json(wpath) or {}
-    edges = wraw.get("edges") if isinstance(wraw.get("edges"), dict) else {}
-    edges.setdefault(a_name, {})[k_ab] = next_ab
-    edges.setdefault(b_name, {})[k_ba] = next_ba
-    try:
-        _atomic_write_json(wpath, {"version": 1, "updatedAt": round(time.time(), 3), "edges": edges})
-    except OSError:
-        logger.debug("nanami_world: 写出 social_relations.json 失败", exc_info=True)
-
-    # 2. 若双方存在可写的 nanami_persona state_root，同步更新其 relations.json
-    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-    if base_dir is not None:
-        for subj_name, target_k, entry in ((a_name, k_ab, next_ab), (b_name, k_ba, next_ba)):
-            sr = _resolve_persona_state_root(base_dir, subj_name, strict=True)
-            if sr is not None and (sr / "state").is_dir():
-                rfile = sr / "state" / "relations.json"
-                raw_p = _read_json(rfile) or {}
-                targets = raw_p.get("targets") if isinstance(raw_p.get("targets"), dict) else {}
-                targets[target_k] = entry
-                try:
-                    _atomic_write_json(rfile, {"version": 1, "updatedAt": round(time.time(), 3), "targets": targets})
-                except OSError:
-                    logger.debug("nanami_world: 同步写回 persona relations.json 失败", exc_info=True)
+    edges = _load_world_edges(world_data_root, eff_sid)
+    a_map = dict(edges.get(a_name) or {})
+    b_map = dict(edges.get(b_name) or {})
+    a_map[k_ab] = next_ab
+    b_map[k_ba] = next_ba
+    edges[a_name] = a_map
+    edges[b_name] = b_map
+    _save_world_edges(world_data_root, eff_sid, edges)
 
     return {"a_to_b": next_ab, "b_to_a": next_ba}
 

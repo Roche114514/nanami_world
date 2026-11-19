@@ -84,17 +84,44 @@ class WorldChatService:
         except OSError:
             logger.debug("nanami_world: 保存 chat_history.json 失败", exc_info=True)
 
-    def get_history(self, actor_id: str) -> list[dict[str, Any]]:
-        if not actor_id:
-            return []
-        with self._lock:
-            return [dict(item) for item in self._history.get(actor_id, [])]
+    def _resolve_space_id(self, actor_id: str, space_id: str = "") -> str:
+        sid = str(space_id or "").strip()
+        if sid:
+            return sid
+        if actor_id:
+            try:
+                actors = self._engine.list_actors()
+                act = next((a for a in actors if a["actor_id"] == actor_id), None)
+                if act and act.get("space_id"):
+                    return str(act["space_id"])
+            except Exception:
+                pass
+        return "room_default"
 
-    def clear_history(self, actor_id: str) -> list[dict[str, Any]]:
+    def _history_key_locked(self, actor_id: str, space_id: str) -> str:
+        sid = str(space_id or "room_default").strip() or "room_default"
+        key = f"{sid}::{actor_id}"
+        if sid == "room_default" and key not in self._history and actor_id in self._history:
+            self._history[key] = list(self._history.pop(actor_id) or [])
+        return key
+
+    def get_history(self, actor_id: str, *, space_id: str = "") -> list[dict[str, Any]]:
         if not actor_id:
             return []
+        eff_sid = self._resolve_space_id(actor_id, space_id)
         with self._lock:
-            self._history[actor_id] = []
+            key = self._history_key_locked(actor_id, eff_sid)
+            return [dict(item) for item in self._history.get(key, [])]
+
+    def clear_history(self, actor_id: str, *, space_id: str = "") -> list[dict[str, Any]]:
+        if not actor_id:
+            return []
+        eff_sid = self._resolve_space_id(actor_id, space_id)
+        with self._lock:
+            key = self._history_key_locked(actor_id, eff_sid)
+            self._history[key] = []
+            if eff_sid == "room_default":
+                self._history.pop(actor_id, None)
             self._save_history_locked()
             return []
 
@@ -105,21 +132,24 @@ class WorldChatService:
         action_summary: str,
         thought: str,
         emotion: str = "",
+        space_id: str = "",
     ) -> None:
         if not actor_id:
             return
+        eff_sid = self._resolve_space_id(actor_id, space_id)
         with self._lock:
-            items = self._history.setdefault(actor_id, [])
+            key = self._history_key_locked(actor_id, eff_sid)
+            items = self._history.setdefault(key, [])
             summary = str(action_summary or "").strip()
             clean_thought = str(thought or "").strip()
             if summary:
                 act_line = f"[自主行动] {summary}"
                 if not items or items[-1].get("text") != act_line:
-                    self._append_msg_locked(actor_id, "action", act_line)
+                    self._append_msg_locked(actor_id, "action", act_line, space_id=eff_sid)
             if clean_thought:
                 bubble = f"（{clean_thought}）" if not (clean_thought.startswith("（") or clean_thought.startswith("(")) else clean_thought
                 if not items or items[-1].get("text") != bubble:
-                    self._append_msg_locked(actor_id, "assistant", bubble, emotion=emotion)
+                    self._append_msg_locked(actor_id, "assistant", bubble, emotion=emotion, space_id=eff_sid)
             self._save_history_locked()
 
     def _append_msg_locked(
@@ -131,8 +161,10 @@ class WorldChatService:
         emotion: str = "",
         sprite_index: int = 0,
         sprite_tag: str = "",
+        space_id: str = "room_default",
     ) -> dict[str, Any]:
-        items = self._history.setdefault(actor_id, [])
+        key = self._history_key_locked(actor_id, space_id)
+        items = self._history.setdefault(key, [])
         entry = {
             "id": f"m_{int(time.time() * 1000)}_{len(items)}",
             "role": role,
@@ -144,7 +176,7 @@ class WorldChatService:
         }
         items.append(entry)
         if len(items) > _MAX_HISTORY_PER_ACTOR:
-            self._history[actor_id] = items[-_MAX_HISTORY_PER_ACTOR:]
+            self._history[key] = items[-_MAX_HISTORY_PER_ACTOR:]
         self._save_history_locked()
         return entry
 
@@ -188,13 +220,16 @@ class WorldChatService:
         actor_id: str,
         flag: str,
         text: str,
+        *,
+        space_id: str = "room_default",
     ) -> dict[str, Any] | None:
         if mind_mjs is None or state_root is None or not text.strip():
             return None
         node = _find_node_exe()
         if not node:
             return None
-        cmd = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{actor_id}", flag, text]
+        sid = str(space_id or "room_default").strip() or "room_default"
+        cmd = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{sid}:{actor_id}", flag, text]
         if flag == "--his":
             cmd.append("--json")
         try:
@@ -377,7 +412,7 @@ class WorldChatService:
         return {"world_actions": actions, "emotion": emotion, "reply": reply}
 
     # ── 主对话入口 ──────────────────────────────────────────────────────
-    def chat(self, actor_id: str, user_text: str) -> dict[str, Any]:
+    def chat(self, actor_id: str, user_text: str, *, space_id: str = "") -> dict[str, Any]:
         clean_user = str(user_text or "").strip()
         if not clean_user:
             raise ValueError("对话内容不能为空。")
@@ -387,32 +422,37 @@ class WorldChatService:
         if actor is None:
             raise ValueError("请先在文字世界里导入一个角色。")
 
+        eff_sid = str(space_id or actor.get("space_id") or "room_default").strip() or "room_default"
         with self._lock:
-            self._append_msg_locked(actor_id, "user", clean_user)
+            self._append_msg_locked(actor_id, "user", clean_user, space_id=eff_sid)
 
         host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
         mind_mjs, state_root, soul_text = self._persona_context_for(host_char)
-        mind_data = self._run_mind_mjs(mind_mjs, state_root, actor_id, "--his", clean_user)
+        mind_data = self._run_mind_mjs(mind_mjs, state_root, actor_id, "--his", clean_user, space_id=eff_sid)
         mind_card_text = ""
         if isinstance(mind_data, dict):
             mind_card_text = str(mind_data.get("card") or "")
             raw_state = mind_data.get("state") if isinstance(mind_data.get("state"), dict) else mind_data
             att = raw_state.get("attitude") if isinstance(raw_state.get("attitude"), dict) else {}
-            self._engine.set_actor_vitals(actor_id, {
-                "energy": float(raw_state.get("energy", actor["vitals"].get("energy", 0.72))),
-                "sleep_pressure": float(raw_state.get("sleepPressure", actor["vitals"].get("sleep_pressure", 0.30))),
-                "mood_v": float(raw_state.get("moodV", actor["vitals"].get("mood_v", 0.15))),
-                "agenda": str(raw_state.get("agenda") or ""),
-                "disengaged": bool(att.get("disengaged", False)),
-                "preferred_domains": actor["vitals"].get("preferred_domains") or ["game"],
-                "source": "nanami_persona",
-            })
+            self._engine.set_actor_world_mood(
+                actor_id,
+                space_id=eff_sid,
+                vitals_patch={
+                    "energy": float(raw_state.get("energy", actor["vitals"].get("energy", 0.72))),
+                    "sleep_pressure": float(raw_state.get("sleepPressure", actor["vitals"].get("sleep_pressure", 0.30))),
+                    "mood_v": float(raw_state.get("moodV", actor["vitals"].get("mood_v", 0.15))),
+                    "agenda": str(raw_state.get("agenda") or ""),
+                    "disengaged": bool(att.get("disengaged", False)),
+                    "preferred_domains": actor["vitals"].get("preferred_domains") or ["game"],
+                    "source": "nanami_persona",
+                },
+            )
             actor = next(a for a in self._engine.list_actors() if a["actor_id"] == actor_id)
 
         world_view = projector.project_view(self._engine, actor_id, consume_diffs=True)
         setting_text = soul_text or self._character_setting_of(actor)
         history = [
-            m for m in self.get_history(actor_id)[:-1]
+            m for m in self.get_history(actor_id, space_id=eff_sid)[:-1]
             if m.get("role") in ("user", "assistant")
         ][-8:]
         hist_lines = "\n".join(
@@ -457,7 +497,7 @@ class WorldChatService:
 
         with self._lock:
             for alog in action_logs:
-                self._append_msg_locked(actor_id, "action", alog)
+                self._append_msg_locked(actor_id, "action", alog, space_id=eff_sid)
 
         # 按动作与心情刷新立绘贴图
         expr = self._engine.refresh_actor_expression(actor_id, emotion_hint=emotion, force_auto=True) or {}
@@ -470,10 +510,11 @@ class WorldChatService:
                 emotion=emotion or str(expr.get("bucket") or ""),
                 sprite_index=int(expr.get("index") or 1),
                 sprite_tag=str(expr.get("tag") or ""),
+                space_id=eff_sid,
             )
 
         if mind_mjs is not None and state_root is not None:
-            self._run_mind_mjs(mind_mjs, state_root, actor_id, "--her", reply)
+            self._run_mind_mjs(mind_mjs, state_root, actor_id, "--her", reply, space_id=eff_sid)
 
         return {
             "reply": reply,
@@ -481,7 +522,7 @@ class WorldChatService:
             "actions_executed": action_logs,
             "expression": expr,
             "used_llm": used_llm,
-            "history": self.get_history(actor_id),
+            "history": self.get_history(actor_id, space_id=eff_sid),
         }
 
     def conduct_actor_social_exchange(
@@ -500,6 +541,7 @@ class WorldChatService:
         if actor_a["space_id"] != actor_b["space_id"]:
             raise ValueError("两位角色当前不在同一个世界空间内，无法当面交流。")
 
+        sid = str(actor_a.get("space_id") or "room_default").strip() or "room_default"
         a_name = str(actor_a.get("name") or initiator_id).strip()
         b_name = str(actor_b.get("name") or target_actor_id).strip()
         a_host = str(actor_a.get("host_character") or a_name).strip()
@@ -510,6 +552,7 @@ class WorldChatService:
         rels_a = persona_bridge.read_actor_relations(
             self._project_root,
             a_host,
+            space_id=sid,
             world_data_root=self._engine.data_root,
             custom_persona_dir=custom_pdir,
             known_actors=[b_host, b_name],
@@ -517,6 +560,7 @@ class WorldChatService:
         rels_b = persona_bridge.read_actor_relations(
             self._project_root,
             b_host,
+            space_id=sid,
             world_data_root=self._engine.data_root,
             custom_persona_dir=custom_pdir,
             known_actors=[a_host, a_name],
@@ -614,6 +658,7 @@ class WorldChatService:
             self._engine.data_root,
             a_host,
             b_host,
+            space_id=sid,
             summary=mem_note,
             first_meet=first_meet,
             valence_delta=0.08 if (first_meet or stance_ok) else 0.03,
@@ -629,7 +674,7 @@ class WorldChatService:
 
         action_note = f"[角色社交{'·初次破冰' if first_meet else ''}] {a_name} 与 {b_name} 聊了起来：{mem_note}"
         with self._lock:
-            self._append_msg_locked(initiator_id, "action", action_note)
+            self._append_msg_locked(initiator_id, "action", action_note, space_id=sid)
             self._append_msg_locked(
                 initiator_id,
                 "assistant",
@@ -637,6 +682,7 @@ class WorldChatService:
                 emotion=emo_a,
                 sprite_index=int(expr_a.get("index") or 1),
                 sprite_tag=str(expr_a.get("tag") or ""),
+                space_id=sid,
             )
             self._append_msg_locked(
                 initiator_id,
@@ -645,9 +691,10 @@ class WorldChatService:
                 emotion=emo_b,
                 sprite_index=int(expr_b.get("index") or 1),
                 sprite_tag=str(expr_b.get("tag") or ""),
+                space_id=sid,
             )
 
-            self._append_msg_locked(target_actor_id, "action", action_note)
+            self._append_msg_locked(target_actor_id, "action", action_note, space_id=sid)
             self._append_msg_locked(
                 target_actor_id,
                 "assistant",
@@ -655,6 +702,7 @@ class WorldChatService:
                 emotion=emo_a,
                 sprite_index=int(expr_a.get("index") or 1),
                 sprite_tag=str(expr_a.get("tag") or ""),
+                space_id=sid,
             )
             self._append_msg_locked(
                 target_actor_id,
@@ -663,6 +711,7 @@ class WorldChatService:
                 emotion=emo_b,
                 sprite_index=int(expr_b.get("index") or 1),
                 sprite_tag=str(expr_b.get("tag") or ""),
+                space_id=sid,
             )
 
         self._engine.record_custom_event(

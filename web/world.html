@@ -564,7 +564,7 @@
 
       <div class="side-body hidden" id="tab-status">
         <div class="sec-box">
-          <div class="sec-title"><span>角色状态监控</span><span id="vital-source">builtin</span></div>
+          <div class="sec-title"><span>角色状态监控（本世界独立）</span><div style="display:flex;align-items:center;gap:6px;"><span id="vital-source">builtin</span><button class="px-btn" id="btn-edit-world-mood" style="padding:1px 6px;font-size:10px;">🎛 心情参数</button></div></div>
           <div id="actor-status-name" style="font-weight:700;">未导入角色</div>
           <div id="actor-status-pos" style="font-size:11px;color:var(--muted);font-family:var(--px-font);">坐标：—</div>
           <div class="vitals-row">
@@ -586,7 +586,7 @@
         </div>
 
         <div class="sec-box">
-          <div class="sec-title"><span>💞 态度与情感指针（用户 & 同伴）</span><span id="rel-count-label">0</span></div>
+          <div class="sec-title"><span>💞 态度与情感指针（本世界独立）</span><span id="rel-count-label">0</span></div>
           <div id="actor-relations-list" style="display:flex;flex-direction:column;gap:5px;max-height:210px;overflow:auto;"></div>
         </div>
 
@@ -1432,10 +1432,14 @@ function renderTopbar() {
     opt.textContent = "（未导入角色）";
     sel.appendChild(opt);
   } else {
-    for (const act of snap.actors) {
+    const spMap = new Map((snap.spaces || []).map((s) => [s.space_id, s.name]));
+    const sortedActors = [...snap.actors].sort((a, b) => (b.space_id === snap.active_space_id ? 1 : 0) - (a.space_id === snap.active_space_id ? 1 : 0));
+    for (const act of sortedActors) {
       const opt = document.createElement("option");
       opt.value = act.actor_id;
-      opt.textContent = act.name + (act.space_id === snap.active_space_id ? "" : " (在别处)");
+      const inCur = act.space_id === snap.active_space_id;
+      const spLabel = spMap.get(act.space_id) || act.space_id;
+      opt.textContent = act.name + (inCur ? " [当前世界]" : (" [在:" + spLabel + "]"));
       if (act.actor_id === snap.active_actor_id) opt.selected = true;
       sel.appendChild(opt);
     }
@@ -1740,6 +1744,8 @@ function renderStatusPanel() {
           + '<span style="color:' + stColor + ';font-family:var(--px-font);">[' + esc(stText) + "]</span>"
           + (r.call_name ? '<span style="color:var(--accent-2);">称:' + esc(r.call_name) + "</span>" : "");
 
+        const btnWrap = document.createElement("div");
+        btnWrap.style.cssText = "margin-left:auto;display:flex;align-items:center;gap:4px;";
         const sameRoomPeer = (!isUser && act)
           ? snap.actors.find((pa) => pa.actor_id !== act.actor_id && pa.space_id === curSid && (pa.host_character === r.target_name || pa.name === r.target_name))
           : null;
@@ -1747,10 +1753,10 @@ function renderStatusPanel() {
           const talkBtn = document.createElement("button");
           talkBtn.className = "px-btn";
           talkBtn.textContent = "💬 交流";
-          talkBtn.style.cssText = "margin-left:auto;padding:1px 6px;font-size:10px;";
+          talkBtn.style.cssText = "padding:1px 6px;font-size:10px;";
           talkBtn.onclick = () => {
             talkBtn.disabled = true;
-            runAction("trigger_social_talk", { initiator_id: act.actor_id, target_actor_id: sameRoomPeer.actor_id })
+            runAction("trigger_social_talk", { initiator_id: act.actor_id, target_actor_id: sameRoomPeer.actor_id, space_id: curSid })
               .then((res) => {
                 const ex = res.social_exchange || {};
                 toast(ex.summary || "她们聊了几句");
@@ -1758,8 +1764,15 @@ function renderStatusPanel() {
               .catch((e) => toast(e.message, true))
               .finally(() => { talkBtn.disabled = false; });
           };
-          top.appendChild(talkBtn);
+          btnWrap.appendChild(talkBtn);
         }
+        const editBtn = document.createElement("button");
+        editBtn.className = "px-btn";
+        editBtn.textContent = "✎ 编辑";
+        editBtn.style.cssText = "padding:1px 6px;font-size:10px;";
+        editBtn.onclick = () => openWorldRelationModal(r, act);
+        btnWrap.appendChild(editBtn);
+        top.appendChild(btnWrap);
         row.appendChild(top);
 
         const sub = document.createElement("div");
@@ -2377,7 +2390,7 @@ function openImportActorModal() {
   const hosts = snap.host_characters || [];
   const actorsNow = snap.actors || [];
   const spacesById = new Map((snap.spaces || []).map((s) => [s.space_id, s.name]));
-  const importedNames = new Set(actorsNow.map((a) => a.host_character || a.name));
+  const importedNames = new Set(actorsNow.filter((a) => a.space_id === snap.active_space_id).map((a) => a.host_character || a.name));
   const preferredHost = hosts.find((h) => !importedNames.has(h.name)) || hosts[0] || null;
 
   const hostOpts = ['<option value="">（不绑定，新建独立角色）</option>'].concat(hosts.map((h) => {
@@ -2507,6 +2520,116 @@ function openImportActorModal() {
     r.onload = () => { imgData = String(r.result || ""); };
     r.readAsDataURL(f);
   });
+}
+
+function openWorldMoodModal(act) {
+  if (!act) return toast("当前没有活动角色", true);
+  const snap = state.snap || {};
+  const curSid = act.space_id || snap.active_space_id || "room_default";
+  const spName = ((snap.spaces || []).find((s) => s.space_id === curSid) || {}).name || curSid;
+  const vit = act.vitals || {};
+  const aut = act.autonomy || {};
+
+  showModal("🎛 编辑「" + act.name + "」本世界心情与驱力（" + spName + "）",
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">仅作用于世界「' + esc(spName) + '」，不会影响其他世界的角色心情。</div>'
+    + '<div class="form-grid">'
+    + '<div class="field"><label>精力 energy (0–1)</label><input class="px-inp" type="number" id="wm-energy" min="0" max="1" step="0.05" value="' + esc(Number(vit.energy ?? 0.72).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>困意 sleep_pressure (0–1)</label><input class="px-inp" type="number" id="wm-sleep" min="0" max="1" step="0.05" value="' + esc(Number(vit.sleep_pressure ?? 0.30).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>心情值 mood_v (-1 ~ +1)</label><input class="px-inp" type="number" id="wm-mood" min="-1" max="1" step="0.05" value="' + esc(Number(vit.mood_v ?? 0.15).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>饥饿度 hunger (0=饱 ~ 1=饿)</label><input class="px-inp" type="number" id="wm-hunger" min="0" max="1" step="0.05" value="' + esc(Number(aut.hunger ?? 0.30).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>好奇心 curiosity (0–1)</label><input class="px-inp" type="number" id="wm-curiosity" min="0" max="1" step="0.05" value="' + esc(Number(aut.curiosity ?? 0.55).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>当前目标 current_goal</label><input class="px-inp" id="wm-goal" maxlength="40" value="' + esc(aut.current_goal || "") + '"></div>'
+    + '<div class="field full"><label>此刻内心想法 last_thought</label><input class="px-inp" id="wm-thought" maxlength="60" value="' + esc(aut.last_thought || "") + '"></div>'
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "保存本世界心情",
+        cls: "primary",
+        onClick: (btn) => {
+          btn.disabled = true;
+          runAction("set_world_actor_mood", {
+            actor_id: act.actor_id,
+            space_id: curSid,
+            energy: Number(el("wm-energy").value || 0.72),
+            sleep_pressure: Number(el("wm-sleep").value || 0.30),
+            mood_v: Number(el("wm-mood").value || 0.15),
+            hunger: Number(el("wm-hunger").value || 0.30),
+            curiosity: Number(el("wm-curiosity").value || 0.55),
+            current_goal: el("wm-goal").value.trim(),
+            last_thought: el("wm-thought").value.trim(),
+          })
+            .then(() => { closeModal(); toast("已保存「" + spName + "」的角色心情参数"); })
+            .catch((e) => { btn.disabled = false; toast(e.message, true); });
+        },
+      },
+    ], true);
+}
+
+function openWorldRelationModal(rel, act) {
+  const snap = state.snap || {};
+  const curSid = (act && act.space_id) || snap.active_space_id || "room_default";
+  const spName = ((snap.spaces || []).find((s) => s.space_id === curSid) || {}).name || curSid;
+  const subj = (act && (act.host_character || act.name)) || rel.subject || "";
+  const tgtName = rel.target_name || rel.target_key;
+  const stageOpts = [
+    ["stranger", "不认识"],
+    ["acquainted", "刚认识"],
+    ["friend", "同伴"],
+    ["close", "挚友"],
+    ["rival", "对手"],
+    ["guarded", "戒备"],
+    ["hostile", "敌对"],
+  ].map(([k, lb]) => '<option value="' + k + '"' + ((rel.rel_stage || "stranger") === k ? " selected" : "") + ">" + lb + "</option>").join("");
+  const stanceOpts = [
+    ["neutral", "平常"],
+    ["open", "温和开放"],
+    ["warm", "亲近热情"],
+    ["shy", "害羞拘谨"],
+    ["guarded", "疏离戒备"],
+    ["cold", "冷淡"],
+  ].map(([k, lb]) => '<option value="' + k + '"' + ((rel.attitude_stance || "neutral") === k ? " selected" : "") + ">" + lb + "</option>").join("");
+
+  showModal("💞 编辑本世界社交指针：" + subj + " → " + tgtName,
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">仅保存在世界「' + esc(spName) + '」中，与其他世界完全隔离。</div>'
+    + '<div class="form-grid">'
+    + '<div class="field"><label>是否认识</label><select class="px-sel" id="wr-known"><option value="1"' + (rel.known ? " selected" : "") + '>已相识</option><option value="0"' + (!rel.known ? " selected" : "") + '>尚不认识</option></select></div>'
+    + '<div class="field"><label>关系阶段</label><select class="px-sel" id="wr-stage">' + stageOpts + "</select></div>"
+    + '<div class="field"><label>互动姿态</label><select class="px-sel" id="wr-stance">' + stanceOpts + "</select></div>"
+    + '<div class="field"><label>对TA的称呼</label><input class="px-inp" id="wr-call" maxlength="16" value="' + esc(rel.call_name || "") + '"></div>'
+    + '<div class="field"><label>关系标签</label><input class="px-inp" id="wr-tag" maxlength="20" value="' + esc(rel.relation_tag || "") + '"></div>'
+    + '<div class="field"><label>好感度 (-1 ~ +1)</label><input class="px-inp" type="number" id="wr-val" min="-1" max="1" step="0.05" value="' + esc(Number(rel.affective_valence ?? 0).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>信任度 (0–1)</label><input class="px-inp" type="number" id="wr-trust" min="0" max="1" step="0.05" value="' + esc(Number(rel.trust ?? 0.55).toFixed(2)) + '"></div>'
+    + '<div class="field"><label>社交意愿 (0–1)</label><input class="px-inp" type="number" id="wr-will" min="0" max="1" step="0.05" value="' + esc(Number(rel.social_willingness ?? 0.5).toFixed(2)) + '"></div>'
+    + '<div class="field full"><label>共同经历 / 印象记忆</label><textarea class="px-txt" id="wr-mem" rows="2" maxlength="120">' + esc(rel.shared_memories || "") + "</textarea></div>"
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "保存本世界社交指针",
+        cls: "primary",
+        onClick: (btn) => {
+          btn.disabled = true;
+          runAction("save_world_relation", {
+            space_id: curSid,
+            actor_id: act ? act.actor_id : "",
+            subject_character: subj,
+            target_key: rel.target_key,
+            known: el("wr-known").value === "1",
+            rel_stage: el("wr-stage").value,
+            attitude_stance: el("wr-stance").value,
+            call_name: el("wr-call").value.trim(),
+            relation_tag: el("wr-tag").value.trim(),
+            affective_valence: Number(el("wr-val").value || 0),
+            trust: Number(el("wr-trust").value || 0.55),
+            social_willingness: Number(el("wr-will").value || 0.5),
+            shared_memories: el("wr-mem").value.trim(),
+          })
+            .then(() => { closeModal(); toast("已保存「" + spName + "」对「" + tgtName + "」的社交指针"); })
+            .catch((e) => { btn.disabled = false; toast(e.message, true); });
+        },
+      },
+    ], true);
 }
 
 function openCreateSpaceModal(enterAfterCreate) {
@@ -2860,11 +2983,16 @@ function init() {
   };
   el("dock-portrait-card").onclick = openCurExpr;
   el("btn-open-expr").onclick = openCurExpr;
+  el("btn-edit-world-mood").onclick = () => {
+    const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+    openWorldMoodModal(act);
+  };
 
   el("btn-chat-clear").onclick = () => {
     const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
     if (!act) return toast("当前没有活动角色", true);
-    openConfirm("确定清空与「" + act.name + "」的当前世界对话记录吗？", () => runAction("clear_world_chat", { actor_id: act.actor_id }).then(() => toast("已清空对话记录")));
+    const curSid = act.space_id || (state.snap && state.snap.active_space_id) || "";
+    openConfirm("确定清空与「" + act.name + "」的当前世界对话记录吗？", () => runAction("clear_world_chat", { actor_id: act.actor_id, space_id: curSid }).then(() => toast("已清空对话记录")));
   };
 
   const sendWorldChat = () => {
@@ -2872,11 +3000,13 @@ function init() {
     const btn = el("btn-chat-send");
     const text = inp.value.trim();
     if (!text) return toast("先输入想对她说的话", true);
-    const aid = (state.snap && state.snap.active_actor_id) || "";
+    const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+    const aid = (act && act.actor_id) || (state.snap && state.snap.active_actor_id) || "";
+    const curSid = (act && act.space_id) || (state.snap && state.snap.active_space_id) || "";
     inp.disabled = true;
     btn.disabled = true;
     btn.textContent = "回应中";
-    runAction("chat_in_world", { actor_id: aid, text })
+    runAction("chat_in_world", { actor_id: aid, space_id: curSid, text })
       .then((res) => {
         inp.value = "";
         const actions = (res.chat_result && res.chat_result.actions_executed) || [];
