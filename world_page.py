@@ -440,8 +440,10 @@ def register_pages(
         # 1. 优先尝试检索弹丸论破原版像素小人（auto 或 official）
         if gen_mode in ("auto", "official") and (use_web or gen_mode == "official"):
             en_hint = ""
+            reason: dict[str, Any] = {}
             if gen_mode == "official" or use_web:
-                off = text_compiler.search_official_pixel_sprite(host_name or act["name"], en_hint)
+                off = text_compiler.search_official_pixel_sprite(
+                    host_name or act["name"], en_hint, reason_out=reason)
                 if off is not None:
                     return {
                         "ok": True,
@@ -451,6 +453,11 @@ def register_pages(
                         "english_name": off["english_name"],
                     }
             if gen_mode == "official":
+                if reason.get("network_error"):
+                    detail = "；".join(reason.get("errors") or [])[:220]
+                    raise ValueError(
+                        f"访问弹丸论破 Wiki 失败，没能取到「{host_name or act['name']}」的原版像素小人（{detail}）。"
+                        "请检查网络或代理，也可改用 PixelLab 或手动导入图片。")
                 raise ValueError(f"未在弹丸论破 Wiki 找到「{host_name or act['name']}」的原版像素小人，可尝试改用 PixelLab 或手动导入图片。")
 
         # 2. PixelLab 云端 4 向生成（作为备用 / 或显式选择 pixellab）

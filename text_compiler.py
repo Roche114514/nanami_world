@@ -806,7 +806,8 @@ def search_official_pixel_sprite(
     name: str,
     english_name: str = "",
     *,
-    timeout_sec: float = 5.0,
+    timeout_sec: float = 20.0,
+    reason_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """检索弹丸论破 Wiki 原版 8-bit 像素小人图（如 75x84 @ 3x），返回原生 data URL。"""
     q_name = str(english_name or "").strip()
@@ -817,6 +818,8 @@ def search_official_pixel_sprite(
         return None
 
     api = "https://danganronpa.fandom.com/api.php"
+    # 走代理访问 fandom 时 TLS 握手常常 5 秒以上，原来写死 5.0 会直接超时被当成"没找到"
+    errors: list[str] = []
     for term in (f"{q_name} Pixel Sprites", f"{q_name} Pixel"):
         try:
             q = urllib.parse.urlencode({
@@ -856,8 +859,12 @@ def search_official_pixel_sprite(
                     "height": h,
                     "english_name": q_name,
                 }
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
             continue
+    if reason_out is not None:
+        reason_out["errors"] = errors[-2:]
+        reason_out["network_error"] = bool(errors)
     return None
 
 
