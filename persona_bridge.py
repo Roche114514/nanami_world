@@ -856,3 +856,120 @@ def update_and_project_world_perception(
         "initial_caution": caution,
     }
 
+
+_STAGE_LABELS: dict[str, str] = {
+    "unfamiliar": "初入陌生期（刚到此处，还在谨慎打量环境）",
+    "exploring": "试探适应期（逐步熟悉中，开始尝试感兴趣的物件）",
+    "familiar": "熟悉放松期（对屋里比较习惯，按日常习惯行动）",
+    "settled": "归属稳态期（安全基地，非常自在）",
+}
+
+
+def _sensory_item_desc(ent: Mapping[str, Any], actors_map: Mapping[str, Mapping[str, Any]] | None = None) -> str:
+    """把客观实体转换为无系统遥测（无 ID / 无进度局数）的纯粹感官白描。"""
+    name = str(ent.get("name") or "物品").strip()
+    traits = ent.get("traits") or {}
+    cues: list[str] = []
+    if "restable" in traits:
+        occ = traits["restable"].get("occupied_by")
+        if occ and isinstance(actors_map, Mapping):
+            occ_a = actors_map.get(str(occ))
+            occ_nm = str(occ_a.get("name") or "").strip() if isinstance(occ_a, Mapping) else ""
+            cues.append(f"{occ_nm}正在上面睡觉" if occ_nm else "有人正在上面休息")
+        elif occ:
+            cues.append("有人在上面休息")
+        else:
+            cues.append("空着可歇息")
+    if "consumable" in traits:
+        left = int(traits["consumable"].get("uses_left") or 0)
+        verb = str(traits["consumable"].get("consume_verb") or "吃").strip()
+        if left > 0:
+            temp = str((traits.get("thermal") or {}).get("temp") or "").strip()
+            t_cn = "温热" if temp == "hot" else ("凉了" if temp == "cold" else "")
+            cues.append(f"{t_cn + '、' if t_cn else ''}还能{verb}")
+        else:
+            cues.append("已经空了")
+    if "activity" in traits:
+        dom = str(traits["activity"].get("domain") or "").strip()
+        cues.append({"game": "可以玩", "music": "可放音乐", "reading": "可翻阅"}.get(dom, "可互动"))
+    if "switchable" in traits:
+        cues.append("亮着" if traits["switchable"].get("is_on") else "关着")
+    if "container" in traits:
+        ct = traits["container"]
+        cues.append("上了锁" if ct.get("is_locked") else ("开着" if ct.get("is_open") else "合着"))
+    if "portal" in traits:
+        cues.append("门开着" if traits["portal"].get("is_open") else "门关着")
+    return f"{name}（{'，'.join(cues)}）" if cues else name
+
+
+def build_percept_frame(
+    world_data_root: Path,
+    project_root: Path,
+    space_meta: Mapping[str, Any],
+    lighting: Mapping[str, Any],
+    actor: Mapping[str, Any],
+    entities: Sequence[Mapping[str, Any]],
+    *,
+    actors_map: Mapping[str, Mapping[str, Any]] | None = None,
+    custom_persona_dir: str = "",
+    peer_known: bool = False,
+    look_eid: str = "",
+    touched_eid: str = "",
+    advance_exposure: float = 0.0,
+) -> dict[str, Any]:
+    """统一输入层（Input）：客观世界刺激 → L0 主观感知帧（PerceptFrame，供思考层 Brain 消费）。"""
+    sid = str(space_meta.get("space_id") or actor.get("space_id") or "room_default").strip() or "room_default"
+    sp_name = str(space_meta.get("name") or sid).strip()
+    host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
+    cfg = read_world_perception_config(project_root, host_char, custom_persona_dir=custom_persona_dir)
+    l0 = update_and_project_world_perception(
+        world_data_root,
+        sid,
+        actor,
+        entities,
+        cfg,
+        peer_known=peer_known,
+        look_eid=look_eid,
+        touched_eid=touched_eid,
+        advance_exposure=advance_exposure,
+    )
+
+    hour = float(lighting.get("hour", 12))
+    chrono = float(l0.get("chronotype_offset") or 0.0) if l0.get("enabled") else 0.0
+    bio_hour = (hour - chrono) % 24.0
+    circ_phase = "deep_night" if (bio_hour >= 23.0 or bio_hour < 6.0) else ("evening" if bio_hour >= 21.0 else "daytime")
+    period_cn = {"dawn": "清晨", "day": "白天", "dusk": "傍晚", "night": "夜晚"}.get(str(lighting.get("period") or "day"), "白天")
+    light_desc = "屋里暗着" if lighting.get("is_dark") else "室内光线明亮"
+
+    focused = l0.get("focused_entities") or []
+    focused_names = [str(e.get("name") or "").strip() for e in focused if str(e.get("name") or "").strip()]
+    focused_sensory = [_sensory_item_desc(e, actors_map=actors_map) for e in focused]
+    stage = str(l0.get("stage") or "settled")
+    stage_cn = _STAGE_LABELS.get(stage, stage)
+
+    if l0.get("enabled"):
+        prompt_block = (
+            f"【{actor.get('name') or host_char} · L0 主观感知输入】\n"
+            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}\n"
+            f"- 适应阶段：{stage_cn}（熟悉度={l0['familiarity']:.2f}，已记住物件={l0['mental_map_count']}件）\n"
+            f"- 此刻注意力焦点（按显著度过滤）：{'；'.join(focused_sensory) if focused_sensory else '周围空荡荡的'}"
+        )
+    else:
+        all_sensory = [_sensory_item_desc(e, actors_map=actors_map) for e in entities[:12]]
+        prompt_block = (
+            f"【{actor.get('name') or host_char} · 环境输入（L0 已关闭）】\n"
+            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}\n"
+            f"- 周围物件：{'；'.join(all_sensory) if all_sensory else '周围空荡荡的'}"
+        )
+
+    return {
+        **l0,
+        "space_name": sp_name,
+        "stage_cn": stage_cn,
+        "bio_hour": round(bio_hour, 2),
+        "circadian_phase": circ_phase,
+        "focused_names": focused_names,
+        "focused_sensory": focused_sensory,
+        "prompt_block": prompt_block,
+    }
+

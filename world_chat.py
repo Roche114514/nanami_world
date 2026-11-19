@@ -742,24 +742,19 @@ class WorldChatService:
         else:
             u_rel_line = "尚不熟悉（礼貌自然交流）"
         vis_ents = self._engine.visible_entities(actor_id)
-        l0_cfg = persona_bridge.read_world_perception_config(self._project_root, host_char, custom_persona_dir=custom_pdir)
-        l0_frame = persona_bridge.update_and_project_world_perception(
+        sp_snap_chat = self._engine.snapshot_for_ui(eff_sid)
+        l0_frame = persona_bridge.build_percept_frame(
             self._engine.data_root,
-            eff_sid,
+            self._project_root,
+            sp_snap_chat.get("space") or {"space_id": eff_sid},
+            sp_snap_chat.get("lighting") or {},
             actor,
             vis_ents,
-            l0_cfg,
-            advance_exposure=0.05 if l0_cfg.get("enabled") else 0.0,
+            actors_map={a["actor_id"]: a for a in (sp_snap_chat.get("actors") or [])},
+            custom_persona_dir=custom_pdir,
+            advance_exposure=0.05,
         )
-        _stage_labels = {"unfamiliar": "初入陌生期（谨慎打量中）", "exploring": "试探适应期", "familiar": "熟悉期", "settled": "归属稳态期"}
-        l0_block = ""
-        if l0_frame.get("enabled"):
-            focus_names = "、".join(e["name"] for e in (l0_frame.get("focused_entities") or [])) or "无"
-            l0_block = (
-                f"【L0 环境感知与适应状态】阶段={_stage_labels.get(l0_frame['stage'], l0_frame['stage'])}"
-                f"（熟悉度={l0_frame['familiarity']:.2f}）｜此刻注意力焦点={focus_names}"
-                f"｜已记住物件数={l0_frame['mental_map_count']}\n\n"
-            )
+        l0_block = l0_frame["prompt_block"] + "\n\n" if l0_frame.get("enabled") else ""
 
         history = [
             m for m in self.get_history(actor_id, space_id=eff_sid)[:-1]
@@ -806,7 +801,7 @@ class WorldChatService:
 
         action_logs = self._execute_world_actions(actor_id, parsed.get("world_actions"))
         if used_llm:
-            vis_names = "、".join(e["name"] for e in self._engine.visible_entities(actor_id)[:20])
+            vis_names = "、".join(l0_frame.get("focused_names") or [e["name"] for e in vis_ents[:12]])
             reply = self._mouth_speak(
                 actor["name"],
                 pctx,
@@ -901,20 +896,40 @@ class WorldChatService:
         sp_meta = sp_snap.get("space") or {}
         light_meta = sp_snap.get("lighting") or {}
         vis_a = self._engine.visible_entities(initiator_id)
-        room_items_desc = "、".join(
-            f"[{e['entity_id']}]{e['name']}"
-            + (f"({','.join(self._engine.entity_state_tags(e))})" if self._engine.entity_state_tags(e) else "")
-            for e in vis_a[:24]
-        ) or "（房间里暂时没有摆放物品）"
-        room_facts = f"空间「{sp_meta.get('name') or sid}」｜时间 {int(light_meta.get('hour', 12)):02d}:{int(light_meta.get('minute', 0)):02d}｜真实物件：{room_items_desc}"
-
+        actors_map_now = {a["actor_id"]: a for a in actors if a.get("space_id") == sid}
+        vis_b = self._engine.visible_entities(target_actor_id)
+        l0_a = persona_bridge.build_percept_frame(
+            self._engine.data_root,
+            self._project_root,
+            sp_meta or {"space_id": sid},
+            light_meta,
+            actor_a,
+            vis_a,
+            actors_map=actors_map_now,
+            custom_persona_dir=custom_pdir,
+            peer_known=not first_meet,
+            advance_exposure=0.12,
+        )
+        l0_b = persona_bridge.build_percept_frame(
+            self._engine.data_root,
+            self._project_root,
+            sp_meta or {"space_id": sid},
+            light_meta,
+            actor_b,
+            vis_b,
+            actors_map=actors_map_now,
+            custom_persona_dir=custom_pdir,
+            peer_known=not first_meet,
+            advance_exposure=0.12,
+        )
+        action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in vis_a[:16]) or "无"
+        room_clean_nouns = "、".join(dict.fromkeys((l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]])) or "空房间"
         pctx_a = self._persona_full_context_for(a_host, corpus_limit=7)
         pctx_b = self._persona_full_context_for(b_host, corpus_limit=7)
         mind_a = self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--his", reason or "看到同伴想聊几句", space_id=sid) or {}
         mind_b = self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--his", reason or "同伴走近搭话", space_id=sid) or {}
         card_a = str(mind_a.get("card") or "")[:360]
         card_b = str(mind_b.get("card") or "")[:360]
-        room_clean_nouns = "、".join(e["name"] for e in vis_a[:20]) or "空房间"
         setting_a = (pctx_a.get("soul_text") or self._character_setting_of(actor_a))[:650]
         setting_b = (pctx_b.get("soul_text") or self._character_setting_of(actor_b))[:650]
         corpus_a = pctx_a.get("corpus_examples") or ""
@@ -1037,7 +1052,9 @@ class WorldChatService:
                 '{"intent_a":"发起方这轮想表达的具体语义意图","emotion_a":"开心|好奇|平静|害羞|温柔|兴奋|冷漠|困倦","intent_b":"回应方这轮想表达的具体语义意图","emotion_b":"...","keep_facts":["本轮涉及的真实物件名"],"end_chat":false,"ended_by":"a|b|","end_reason":"若结束写简短原因(<=16字)","follow_up_a":null,"follow_up_b":null,"memory_note":"一句话总结目前聊的内容(<=40字)"}'
             )
             user_prompt = (
-                f"【当前世界真实物件】{room_facts}\n"
+                f"{l0_a['prompt_block']}\n"
+                f"{l0_b['prompt_block']}\n"
+                f"【可执行动作物件ID（仅填 follow_up 时使用，绝不写进对话）】{action_id_ref}\n"
                 f"【{a_name}底色】{setting_a}\n"
                 + (f"【{a_name}心理状态卡】{card_a}\n" if card_a else "")
                 + f"【{b_name}底色】{setting_b}\n"
@@ -1048,8 +1065,7 @@ class WorldChatService:
                 + f"【两人此前刚说过的话（禁止重复）】\n{prior_social_block}\n"
                 + f"【触发原因】{reason or '在屋里看到对方，想过来聊聊'}\n"
                 + f"【对话进程】{pace_hint}\n"
-                + f"【本轮已聊内容】\n{transcript_text}\n"
-                + f"【房间详情】\n{view_a[:750]}"
+                + f"【本轮已聊内容】\n{transcript_text}"
             )
             parsed = text_compiler._ask_llm_json(
                 sys_prompt,

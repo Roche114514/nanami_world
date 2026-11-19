@@ -595,6 +595,7 @@
           <div class="sec-title"><span>角色状态监控（本世界独立）</span><div style="display:flex;align-items:center;gap:6px;"><span id="vital-source">builtin</span><button class="px-btn" id="btn-edit-appearance" style="padding:1px 6px;font-size:10px;">🎨 外观</button><button class="px-btn" id="btn-edit-world-mood" style="padding:1px 6px;font-size:10px;">🎛 心情参数</button></div></div>
           <div id="actor-status-name" style="font-weight:700;">未导入角色</div>
           <div id="actor-status-pos" style="font-size:11px;color:var(--muted);font-family:var(--px-font);">坐标：—</div>
+          <div id="actor-status-l0" style="font-size:11px;color:var(--accent-2);font-family:var(--px-font);margin-top:2px;">L0 感知：—</div>
           <div class="vitals-row">
             <div class="vital-cell"><b id="v-energy">—</b><span>精力</span></div>
             <div class="vital-cell"><b id="v-sleep">—</b><span>困意</span></div>
@@ -2816,6 +2817,7 @@ function renderStatusPanel() {
   if (!act) {
     el("actor-status-name").textContent = "尚未导入角色";
     el("actor-status-pos").textContent = "坐标：—";
+    if (el("actor-status-l0")) el("actor-status-l0").textContent = "L0 感知：—";
     el("v-energy").textContent = "—";
     el("v-sleep").textContent = "—";
     el("v-mood").textContent = "—";
@@ -2831,6 +2833,15 @@ function renderStatusPanel() {
     el("vital-source").textContent = vit.source || "builtin";
     el("actor-status-name").textContent = act.name + (vit.disengaged ? "（沉默离开中）" : "");
     el("actor-status-pos").textContent = spName + " (" + act.x + ", " + act.y + ") · " + (act.posture === "resting" ? "休息中" : "站立");
+    if (el("actor-status-l0")) {
+      const l0 = snap.active_l0 || {};
+      if (!l0.enabled) {
+        el("actor-status-l0").textContent = "L0 感知：已关闭";
+      } else {
+        const foc = (l0.focused_names || []).join("、") || "无";
+        el("actor-status-l0").textContent = "L0：" + (l0.stage || "unfamiliar") + "(" + Number(l0.familiarity || 0).toFixed(2) + ") · 焦点：" + foc;
+      }
+    }
     el("v-energy").textContent = Number(vit.energy || 0).toFixed(2);
     el("v-sleep").textContent = Number(vit.sleep_pressure || 0).toFixed(2);
     el("v-mood").textContent = Number(vit.mood_v || 0).toFixed(2);

@@ -437,6 +437,18 @@ class WorldHeartbeat:
         vit = actor.get("vitals") or {}
         aut = normalize_autonomy(actor.get("autonomy"))
         view_txt = projector.project_view(self._engine, aid, consume_diffs=False)
+        settings_now = self._settings_provider()
+        l0_llm = persona_bridge.build_percept_frame(
+            self._engine.data_root,
+            self._project_root,
+            sp_snap["space"],
+            sp_snap["lighting"],
+            actor,
+            vis,
+            actors_map={a["actor_id"]: a for a in (sp_snap.get("actors") or [])},
+            custom_persona_dir=settings_now.persona_data_dir,
+            advance_exposure=0.0,
+        )
         sys_prompt = (
             f"你是{actor['name']}。此刻你在自己的像素世界里自由活动。\n"
             "请根据视野里的真实物品、同屋的其他角色及态度与情感指针、精力困意、饱腹感、好奇心，决定接下来想做的一件小事。\n"
@@ -448,6 +460,7 @@ class WorldHeartbeat:
             '"actions":[{"tool":"world_act|world_move|world_write|world_talk","entity_id":"...","action":"turn_on|turn_off|rest|leave_rest|consume|interact|open|unlock|take|look|enter","target_actor_id":"同屋角色actor_id","x":0,"y":0,"text":"..."}]}'
         )
         user_prompt = (
+            f"{l0_llm['prompt_block']}\n\n"
             f"{view_txt}\n"
             f"- 体内状态：精力={vit.get('energy')}, 困意={vit.get('sleep_pressure')}, 心情={vit.get('mood_v')}, "
             f"饥饿={aut['hunger']}, 好奇={aut['curiosity']}, 偏好领域={vit.get('preferred_domains')}\n"
@@ -521,11 +534,6 @@ class WorldHeartbeat:
         holding_id = actor.get("holding_id")
         host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
         sid = str(space.get("space_id") or actor.get("space_id") or "room_default")
-        l0_cfg = persona_bridge.read_world_perception_config(
-            self._project_root,
-            host_char,
-            custom_persona_dir=settings.persona_data_dir,
-        )
         peer_known = False
         other_actors = [a for a in (sp_snap.get("actors") or []) if a.get("actor_id") != aid]
         if other_actors:
@@ -538,12 +546,15 @@ class WorldHeartbeat:
                 known_actors=[str(a.get("host_character") or a.get("name") or "") for a in other_actors],
             )
             peer_known = any(bool(v.get("known")) for k, v in rels_chk.items() if k.startswith("char:"))
-        l0_frame = persona_bridge.update_and_project_world_perception(
+        l0_frame = persona_bridge.build_percept_frame(
             self._engine.data_root,
-            sid,
+            self._project_root,
+            space,
+            lighting,
             actor,
             vis,
-            l0_cfg,
+            actors_map={a["actor_id"]: a for a in (sp_snap.get("actors") or [])},
+            custom_persona_dir=settings.persona_data_dir,
             peer_known=peer_known,
             advance_exposure=0.18 if vis else 0.10,
         )
@@ -644,9 +655,9 @@ class WorldHeartbeat:
             }
 
         # 4.5 L0 陌生环境适应期：初入陌生空间时（familiarity < 0.25）优先环顾/确认身边物件，不立刻自来熟玩乐
-        if l0_frame.get("enabled") and l0_frame.get("stage") == "unfamiliar" and not force_autonomy:
+        if l0_frame.get("enabled") and l0_frame.get("stage") == "unfamiliar":
             look_cand = next(
-                (e for e in (l0_frame.get("focused_entities") or vis) if e["entity_id"] not in recent[:3]),
+                (e for e in (l0_frame.get("focused_entities") or vis) if e["entity_id"] not in recent[:2]),
                 None,
             )
             if look_cand:

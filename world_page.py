@@ -54,10 +54,35 @@ def _ok_with_snap(
                 custom_persona_dir=custom_persona_dir,
                 known_actors=all_names,
             )
+            try:
+                vis_l0 = engine.visible_entities(aid)
+                l0_now = persona_bridge.build_percept_frame(
+                    engine.data_root,
+                    engine.project_root,
+                    snap.get("space") or {"space_id": eff_sid},
+                    snap.get("lighting") or {},
+                    act,
+                    vis_l0,
+                    actors_map={a["actor_id"]: a for a in (snap.get("actors") or [])},
+                    custom_persona_dir=custom_persona_dir,
+                    advance_exposure=0.0,
+                )
+                snap["active_l0"] = {
+                    "enabled": bool(l0_now.get("enabled")),
+                    "familiarity": float(l0_now.get("familiarity") or 0.0),
+                    "stage": str(l0_now.get("stage") or ""),
+                    "stage_cn": str(l0_now.get("stage_cn") or ""),
+                    "focused_names": list(l0_now.get("focused_names") or []),
+                    "mental_map_count": int(l0_now.get("mental_map_count") or 0),
+                }
+            except Exception:
+                snap["active_l0"] = {}
         else:
             snap["actor_relations"] = {}
+            snap["active_l0"] = {}
     else:
         snap["actor_relations"] = {}
+        snap["active_l0"] = {}
 
     terminal = projector.project_terminal_data(engine, aid, consume_diffs=False) if aid else {"text": "（尚未导入角色）", "anchors": []}
     chat_history = world_chat.get_history(aid, space_id=eff_sid) if (world_chat is not None and aid) else []
