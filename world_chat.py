@@ -194,15 +194,16 @@ class WorldChatService:
         profile_dir: Path | None,
         base_dir: Path | None,
         *,
-        limit: int = 5,
+        limit: int = 7,
     ) -> str:
-        """从角色专属 corpus.tsv（或全局语料）抽样几组真实口癖对话范例。"""
+        """从角色专属 corpus.tsv（或全局语料）优先抽取 casual/curious 原声口癖范例。"""
         cands: list[Path] = []
         if profile_dir is not None:
             cands.append(profile_dir / "corpus.tsv")
         if base_dir is not None:
             cands.append(base_dir / "corpus" / "acg_corpus.tsv")
-        rows: list[tuple[str, str]] = []
+        primary: list[tuple[str, str]] = []
+        others: list[tuple[str, str]] = []
         for path in cands:
             if not path.is_file():
                 continue
@@ -213,20 +214,26 @@ class WorldChatService:
                         continue
                     parts = s.split("\t")
                     if len(parts) >= 3:
-                        u, a = parts[1].strip(), parts[2].strip()
+                        bkt, u, a = parts[0].strip().lower(), parts[1].strip(), parts[2].strip()
                     elif len(parts) == 2:
-                        u, a = parts[0].strip(), parts[1].strip()
+                        bkt, u, a = "casual", parts[0].strip(), parts[1].strip()
                     else:
                         continue
                     if u and a:
-                        rows.append((u[:50], a[:80]))
+                        pair = (u[:50], a[:80])
+                        if bkt in ("casual", "curious", "repair_afterglow"):
+                            primary.append(pair)
+                        else:
+                            others.append(pair)
             except OSError:
                 continue
-            if rows:
+            if primary or others:
                 break
-        if not rows:
+        if not primary and not others:
             return ""
-        picked = random.sample(rows, min(limit, len(rows)))
+        picked = random.sample(primary, min(limit, len(primary)))
+        if len(picked) < limit and others:
+            picked.extend(random.sample(others, min(limit - len(picked), len(others))))
         return "\n".join(f"对方：{u}\n你：{a}" for u, a in picked)
 
     def _read_off_voice_ban(self, profile_dir: Path | None) -> list[str]:
@@ -387,6 +394,7 @@ class WorldChatService:
         text: str,
         recent_replies: list[str],
         off_voice_words: list[str],
+        heard_line: str = "",
     ) -> float:
         t = str(text or "").strip()
         if not t:
@@ -402,6 +410,14 @@ class WorldChatService:
             if w and w in t:
                 score -= 6.0
         score -= cls._repetition_penalty(t, recent_replies)
+        if heard_line:
+            hb = _BARE_CHARS_RE.sub("", heard_line)
+            tb = _BARE_CHARS_RE.sub("", t)
+            if len(hb) >= 4 and len(tb) >= 4:
+                h3 = {hb[i : i + 3] for i in range(len(hb) - 2)}
+                t3 = {tb[i : i + 3] for i in range(len(tb) - 2)}
+                if h3 & t3:
+                    score -= min(5.0, 2.2 * len(h3 & t3))
         if 3 <= len(t) <= 28:
             score += 2.5
         elif len(t) > 45:
@@ -422,7 +438,7 @@ class WorldChatService:
         world_facts: str = "",
     ) -> str:
         """嘴巴层（Mouth）：隔离复杂规则与长历史，仅看 soul + corpus + 大脑意图，一次产出 6 个口语候选并过防重复门控与守卫。"""
-        soul = (pctx.get("soul_text") or setting_fallback or actor_name)[:900]
+        soul = (pctx.get("soul_text") or setting_fallback or actor_name)[:550]
         corpus = pctx.get("corpus_examples") or ""
         ban = pctx.get("off_voice_words") or []
         recent_block = "\n".join(f"- {r}" for r in recent_replies[-5:]) if recent_replies else "（无）"
@@ -430,19 +446,19 @@ class WorldChatService:
         mouth_sys = (
             f"你是「{actor_name}」的发声嘴巴（只负责把大脑意图转成真人张嘴说的话，不要做说教或内心汇报）。\n"
             "必须严格遵守：\n"
-            "1. 死守【角色说话底色】与【原声语料】的语气词、短句节奏与性格（通常 1 句话说完，4–26 字）；\n"
-            "2. 严禁把内心活动念成台词，严禁「先复述关键词加问号 + 再解释」的 AI 两段式，严禁括号动作描写；\n"
-            "3. 严禁虚构当前房间里不存在的店铺、餐厅、外出买饭或未提及的食物/物品；只能用【世界真实物件】里的名词；\n"
+            "1. **优先模仿【原声语料范例】的真实说话节奏、停顿和口吻**（通常 1 句短话，4–24 字，像真人脱口而出）；\n"
+            "2. 严禁把内心活动或系统数值（如“打了六局”“进度多少”）念成台词，严禁鹦鹉学舌复读对方刚说过的词（如对方刚说“坐过去吧”，你就别再说“坐过去吧”）；\n"
+            "3. 严禁虚构当前房间里不存在的店铺、餐厅或物品；只能用【世界真实物件】里的名词；\n"
             "4. 严禁与【近期已说过的话】重复开头（如连续用“嗯～”“那个…”）或重复同一句式；\n"
             '5. 一次给出 6 个句式拉开差异的口语候选短句，只输出合法 JSON：{"candidates":["说法1","说法2","说法3","说法4","说法5","说法6"]}'
         )
         mouth_user = (
-            f"【{actor_name}说话底色】\n{soul}\n\n"
-            + (f"【原声语料范例】\n{corpus}\n\n" if corpus else "")
+            (f"【{actor_name}原声语料范例（最重要！严格模仿这种短句口吻）】\n{corpus}\n\n" if corpus else "")
+            + f"【{actor_name}性格底色】\n{soul}\n\n"
             + (f"【禁说离声词】{'、'.join(ban)}\n\n" if ban else "")
             + (f"【世界真实物件（禁止编造除此之外的物品或店铺）】\n{world_facts}\n\n" if world_facts else "")
             + f"【近期已说过的话（避开重复开头与句式）】\n{recent_block}\n\n"
-            + (f"【{listener_name}刚说】{heard_line}\n" if heard_line else "")
+            + (f"【{listener_name}刚说（严禁复读对方用词）】{heard_line}\n" if heard_line else "")
             + f"【大脑这轮要表达的意图】{intent}"
         )
         parsed = text_compiler._ask_llm_json(
@@ -461,7 +477,7 @@ class WorldChatService:
                 if str(c or "").strip()
             ]
             if cleaned:
-                chosen = max(cleaned, key=lambda c: self._score_mouth_candidate(c, recent_replies, ban))
+                chosen = max(cleaned, key=lambda c: self._score_mouth_candidate(c, recent_replies, ban, heard_line=heard_line))
         if not chosen:
             chosen = clip_text(_STAGE_DIR_RE.sub("", fallback_line or intent).strip(), 140, "……嗯。")
         return self._run_guard_bridge(pctx.get("guard_mjs"), pctx.get("toolkit_dir"), [chosen])[0]
@@ -892,8 +908,13 @@ class WorldChatService:
         ) or "（房间里暂时没有摆放物品）"
         room_facts = f"空间「{sp_meta.get('name') or sid}」｜时间 {int(light_meta.get('hour', 12)):02d}:{int(light_meta.get('minute', 0)):02d}｜真实物件：{room_items_desc}"
 
-        pctx_a = self._persona_full_context_for(a_host, corpus_limit=3)
-        pctx_b = self._persona_full_context_for(b_host, corpus_limit=3)
+        pctx_a = self._persona_full_context_for(a_host, corpus_limit=7)
+        pctx_b = self._persona_full_context_for(b_host, corpus_limit=7)
+        mind_a = self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--his", reason or "看到同伴想聊几句", space_id=sid) or {}
+        mind_b = self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--his", reason or "同伴走近搭话", space_id=sid) or {}
+        card_a = str(mind_a.get("card") or "")[:360]
+        card_b = str(mind_b.get("card") or "")[:360]
+        room_clean_nouns = "、".join(e["name"] for e in vis_a[:20]) or "空房间"
         setting_a = (pctx_a.get("soul_text") or self._character_setting_of(actor_a))[:650]
         setting_b = (pctx_b.get("soul_text") or self._character_setting_of(actor_b))[:650]
         corpus_a = pctx_a.get("corpus_examples") or ""
@@ -1018,7 +1039,9 @@ class WorldChatService:
             user_prompt = (
                 f"【当前世界真实物件】{room_facts}\n"
                 f"【{a_name}底色】{setting_a}\n"
-                f"【{b_name}底色】{setting_b}\n"
+                + (f"【{a_name}心理状态卡】{card_a}\n" if card_a else "")
+                + f"【{b_name}底色】{setting_b}\n"
+                + (f"【{b_name}心理状态卡】{card_b}\n" if card_b else "")
                 + f"【指针1】{_rel_desc(a_name, b_name, edge_ab)}\n"
                 + f"【指针2】{_rel_desc(b_name, a_name, edge_ba)}\n"
                 + f"【实时状态】{state_brief}\n"
@@ -1042,7 +1065,7 @@ class WorldChatService:
 
             used_llm = True
             facts_list = parsed.get("keep_facts") if isinstance(parsed.get("keep_facts"), list) else []
-            facts_str = "、".join(str(x).strip() for x in facts_list if str(x).strip()) or room_items_desc[:160]
+            facts_str = "、".join(str(x).strip() for x in facts_list if str(x).strip()) or room_clean_nouns
             prev_b = turns[-1]["line_b"] if turns else ""
             la = self._mouth_speak(
                 a_name,
