@@ -865,6 +865,18 @@ def register_pages(
         },
     ]
 
+    settings_html = code_dir / "web" / "settings.html"
+    if settings_html.is_file() and hasattr(register, "register_frontend_page"):
+        register.register_frontend_page(
+            FrontendPageContribution(
+                page_id=SETTINGS_PAGE_ID,
+                title="文字世界设置",
+                entry=str(settings_html),
+                kind="settings",
+                description="配置文字世界视野注入、受控交互工具、离线心跳与人格插件文件桥路径。",
+                order=65.0,
+            )
+        )
     register.register_frontend_config_page(
         FrontendConfigContribution(
             page_id=SETTINGS_PAGE_ID,
