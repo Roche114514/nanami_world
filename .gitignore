@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 运行时与测试产物（插件状态数据写到 data/plugins/community.nanami.world/）
+*.log
+tmp/
+dist/

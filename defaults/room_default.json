@@ -1,0 +1,56 @@
+{
+  "default_space": {
+    "space_id": "room_default",
+    "name": "默认房间",
+    "width": 12,
+    "height": 9,
+    "wall_rows": 1,
+    "ambient_phrase": "一间安静的小房间，木地板微暖，墙边开着一扇窗。",
+    "palette_id": "warm_stardew",
+    "ambient_light": "auto"
+  },
+  "starter_pack": [
+    {
+      "blueprint_id": "default_desk",
+      "x": 4,
+      "y": 3,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_lamp",
+      "x": 2,
+      "y": 1,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_sofa",
+      "x": 9,
+      "y": 6,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_hot_drink",
+      "x": 4,
+      "y": 3,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_handheld",
+      "x": 5,
+      "y": 3,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_notebook",
+      "x": 7,
+      "y": 2,
+      "delivery_mode": "silent"
+    },
+    {
+      "blueprint_id": "default_box",
+      "x": 1,
+      "y": 5,
+      "delivery_mode": "silent"
+    }
+  ]
+}

@@ -1,0 +1,2182 @@
+[
+  {
+    "blueprint_id": "default_desk",
+    "name": "旧木桌",
+    "brief": "一张结实的宽面旧木桌",
+    "detail": "桌面木纹温润，边角稍微磨圆了，足够摆下几样常用小物件。",
+    "tags": ["furniture", "desk", "wood"],
+    "footprint": [2, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "surface": { "capacity": 4 }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.0,
+      "satisfies": [],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 32,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#9e6b43",
+        "2": "#c99364",
+        "3": "#6d4528",
+        "a": "#b58052",
+        "b": "#52321b"
+      },
+      "frames": {
+        "default": [
+          "................................",
+          "................................",
+          ".oooooooooooooooooooooooooooooo.",
+          ".o2222222222222222222222222222o.",
+          ".o111111a1111111111a1111111111o.",
+          ".o1111111111111111111111a11111o.",
+          ".o3333333333333333333333333333o.",
+          ".oooooooooooooooooooooooooooooo.",
+          "..o33oobbbbbbbbbbbbbbbbbbboo33o.",
+          "..o33o.oooooooooooooooooooo.33o.",
+          "..o33o......................33o.",
+          "..o3bo......................b3o.",
+          "..o3bo......................b3o.",
+          "..o3bo......................b3o.",
+          "..oooo......................ooo.",
+          "................................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_box",
+    "name": "储物抽屉箱",
+    "brief": "一只带盖子的木质储物箱",
+    "detail": "合上时看不到里面装了什么，打开后可以把手头小东西收进去。",
+    "tags": ["storage", "container"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "container": { "capacity": 6, "key_tag": "", "is_open": false, "is_locked": false }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.0,
+      "satisfies": ["order"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f6240",
+        "2": "#bd8c64",
+        "3": "#5c3b24",
+        "a": "#d9b466",
+        "b": "#2d1f18"
+      },
+      "frames": {
+        "closed": [
+          "................",
+          "................",
+          "..oooooooooooo..",
+          ".o222222222222o.",
+          ".o111111111111o.",
+          ".o33333aa33333o.",
+          ".ooooooaaoooooo.",
+          ".o111111111111o.",
+          ".o111111111111o.",
+          ".o333333333333o.",
+          ".o11111aa11111o.",
+          ".o111111111111o.",
+          ".o333333333333o.",
+          ".oooooooooooooo.",
+          "................",
+          "................"
+        ],
+        "open": [
+          "................",
+          "..oooooooooooo..",
+          ".o222222222222o.",
+          ".obbbbbbbbbbbbo.",
+          ".obbbbbbbbbbbbo.",
+          ".ooooooaaoooooo.",
+          ".o111111111111o.",
+          ".o111111111111o.",
+          ".o333333333333o.",
+          ".o11111aa11111o.",
+          ".o111111111111o.",
+          ".o333333333333o.",
+          ".oooooooooooooo.",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_lamp",
+    "name": "暖黄台灯",
+    "brief": "一盏小巧的圆罩台灯",
+    "detail": "铜色灯柱很稳，灯罩是淡米黄布面的，亮起来时能照亮半间屋子。",
+    "tags": ["light", "cozy"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "switchable": {
+        "provides_light": true,
+        "is_on": false,
+        "on_brief": "亮着暖黄微光的圆罩台灯",
+        "off_brief": "关着灯罩的圆罩台灯"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.04,
+      "satisfies": ["safety", "cozy"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#b8b09c",
+        "2": "#e6dfc8",
+        "3": "#7a705c",
+        "a": "#ffd76e",
+        "b": "#99733f"
+      },
+      "frames": {
+        "off": [
+          "................",
+          ".....oooooo.....",
+          "....o222111o....",
+          "...o22111133o...",
+          "..o2211111333o..",
+          "..oooooooooooo..",
+          "......o33o......",
+          ".......oo.......",
+          ".......ob.......",
+          ".......ob.......",
+          ".......ob.......",
+          "......o33o......",
+          "....oobbbboo....",
+          "...oooooooooo...",
+          "................",
+          "................"
+        ],
+        "on": [
+          "................",
+          ".....oooooo.....",
+          "....oaaaaaaao...",
+          "...o2aaaaaaaao..",
+          "..o22aaaaaaaaao.",
+          "..oooooooooooo..",
+          "......oaaao.....",
+          ".......oo.......",
+          ".......ob.......",
+          ".......ob.......",
+          ".......ob.......",
+          "......o33o......",
+          "....oobbbboo....",
+          "...oooooooooo...",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_sofa",
+    "name": "懒人沙发",
+    "brief": "一张软绵绵的灰蓝懒人沙发",
+    "detail": "靠垫陷下去一块，刚好够一个人窝着打盹或抱着掌机休息。",
+    "tags": ["furniture", "rest", "cozy"],
+    "footprint": [2, 2],
+    "placement": "floor",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "restable": {
+        "energy_regen_per_min": 0.015,
+        "comfort": 0.85,
+        "occupied_by": null
+      }
+    },
+    "effects": {
+      "energy_delta": 0.12,
+      "sleep_pressure_delta": -0.15,
+      "mood_v_delta": 0.05,
+      "satisfies": ["rest", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 32,
+      "h": 32,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#6b829e",
+        "2": "#92abc9",
+        "3": "#475970",
+        "a": "#e6b89c",
+        "b": "#b8d0eb"
+      },
+      "frames": {
+        "idle": [
+          "................................",
+          "................................",
+          ".....oooooooooooooooooooooo.....",
+          "...oo2222222222222222222222oo...",
+          "..o22111111111111111111111122o..",
+          ".o2111111111111111111111111112o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111333333331111111111o.",
+          ".o1111111133bbbbbbbb3311111111o.",
+          ".o1111111o222222222222o1111111o.",
+          ".o111111o22111111111122o111111o.",
+          ".o11111o2111111111111112o11111o.",
+          ".o11111o1111111111111111o11111o.",
+          ".o33111o1111111111111111o11133o.",
+          ".o33311o1111111111111111o11333o.",
+          "..o3331o3333333333333333o1333o..",
+          "..o3333oooooooooooooooooo3333o..",
+          "..o33333333333333333333333333o..",
+          "...o333333333333333333333333o...",
+          "...oooooooooooooooooooooooooo...",
+          "....ooo..................ooo....",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................"
+        ],
+        "occupied": [
+          "................................",
+          "................................",
+          ".....oooooooooooooooooooooo.....",
+          "...oo2222222222222222222222oo...",
+          "..o22111111111111111111111122o..",
+          ".o2111111111111111111111111112o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111111111111111111111o.",
+          ".o1111111111333333331111111111o.",
+          ".o1111111133aaaaaaaa3311111111o.",
+          ".o1111111o222222222222o1111111o.",
+          ".o111111o22111111111122o111111o.",
+          ".o11111o2111111111111112o11111o.",
+          ".o11111o1111111111111111o11111o.",
+          ".o33111o1111111111111111o11133o.",
+          ".o33311o1111111111111111o11333o.",
+          "..o3331o3333333333333333o1333o..",
+          "..o3333oooooooooooooooooo3333o..",
+          "..o33333333333333333333333333o..",
+          "...o333333333333333333333333o...",
+          "...oooooooooooooooooooooooooo...",
+          "....ooo..................ooo....",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................",
+          "................................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_hot_drink",
+    "name": "热饮杯",
+    "brief": "一只白陶瓷杯，装着热可可",
+    "detail": "杯身画着小猫爪印，放久了可可会慢慢变凉。",
+    "tags": ["drink", "cozy", "sweet"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "consumable": {
+        "max_uses": 2,
+        "uses_left": 2,
+        "consume_verb": "喝",
+        "on_empty": "keep_empty",
+        "empty_brief": "一只喝空的白陶瓷杯"
+      },
+      "thermal": {
+        "cool_minutes": 45,
+        "temp": "hot"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.06,
+      "sleep_pressure_delta": -0.04,
+      "mood_v_delta": 0.08,
+      "satisfies": ["warmth", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#ebe6df",
+        "2": "#ffffff",
+        "3": "#b8b0a4",
+        "a": "#7c472c",
+        "b": "#e6f2ff"
+      },
+      "frames": {
+        "hot": [
+          ".....b....b.....",
+          "....b....b......",
+          ".....b....b.....",
+          "................",
+          "...ooooooooo....",
+          "..o2aaaaaaa1o...",
+          "..o1ooooooo1oo..",
+          "..o111111111o1o.",
+          "..o111aa1111o.o.",
+          "..o11aaaa111o1o.",
+          "..o111111111oo..",
+          "..o311111133o...",
+          "...o3333333o....",
+          "....ooooooo.....",
+          "................",
+          "................"
+        ],
+        "empty": [
+          "................",
+          "................",
+          "................",
+          "................",
+          "...ooooooooo....",
+          "..o233333331o...",
+          "..o1ooooooo1oo..",
+          "..o111111111o1o.",
+          "..o111aa1111o.o.",
+          "..o11aaaa111o1o.",
+          "..o111111111oo..",
+          "..o311111133o...",
+          "...o3333333o....",
+          "....ooooooo.....",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_snack",
+    "name": "草莓小点心",
+    "brief": "一块带草莓的小奶油蛋糕",
+    "detail": "放在浅白瓷碟上，甜度正好，吃光后碟子也会收走。",
+    "tags": ["food", "sweet", "cozy"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "consumable": {
+        "max_uses": 2,
+        "uses_left": 2,
+        "consume_verb": "吃",
+        "on_empty": "vanish",
+        "empty_brief": "空掉的蛋糕纸碟"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.08,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.10,
+      "satisfies": ["hunger", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#f7ebd9",
+        "2": "#ffffff",
+        "3": "#e3ba78",
+        "a": "#e6556e",
+        "b": "#69ad5f"
+      },
+      "frames": {
+        "full": [
+          "................",
+          "......oooo......",
+          ".....obbbbo.....",
+          "....oaaaaaaao...",
+          "....oaaaaaaao...",
+          "...oo222222oo...",
+          "..o2111111112o..",
+          "..o1111111111o..",
+          "..o333aaaa333o..",
+          "..o3333333333o..",
+          "..o1111111111o..",
+          "..o3333333333o..",
+          ".oooooooooooooo.",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................"
+        ],
+        "half": [
+          "................",
+          "................",
+          "................",
+          "................",
+          ".......oooo.....",
+          "......o2222o....",
+          "......o11111o...",
+          "......o33aa3o...",
+          "......o33333o...",
+          "......o11111o...",
+          "......o33333o...",
+          ".ooooooooooooooo",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_handheld",
+    "name": "复古掌机",
+    "brief": "一台双色复古便携掌机",
+    "detail": "十字键磨得有些发亮，里面插着一盘没打完的像素冒险卡带。",
+    "tags": ["game", "device"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "switchable": {
+        "provides_light": false,
+        "is_on": false,
+        "on_brief": "屏幕微亮的复古掌机",
+        "off_brief": "关着屏幕的复古掌机"
+      },
+      "activity": {
+        "domain": "game",
+        "progress_unit": "关",
+        "progress": 0,
+        "battery": 80,
+        "battery_cost": 10
+      }
+    },
+    "effects": {
+      "energy_delta": -0.04,
+      "sleep_pressure_delta": 0.03,
+      "mood_v_delta": 0.12,
+      "satisfies": ["fun", "competence"],
+      "domain": "game"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#c9c4d1",
+        "2": "#ece8f2",
+        "3": "#8e8799",
+        "a": "#73d68f",
+        "b": "#d65c78"
+      },
+      "frames": {
+        "off": [
+          "................",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2oooooooo2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2oooooooo2o..",
+          "..o1111111111o..",
+          "..o1o11111111o..",
+          "..o1oo1111b11o..",
+          "..o1o1111b111o..",
+          "..o3111111113o..",
+          "..o3333oo3333o..",
+          "...oooooooooo...",
+          "................"
+        ],
+        "on": [
+          "................",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2oooooooo2o..",
+          "..o2oaaaaaao2o..",
+          "..o2oa2aa2ao2o..",
+          "..o2oaaaaaao2o..",
+          "..o2oooooooo2o..",
+          "..o1111111111o..",
+          "..o1o11111111o..",
+          "..o1oo1111b11o..",
+          "..o1o1111b111o..",
+          "..o3111111113o..",
+          "..o3333oo3333o..",
+          "...oooooooooo...",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_notebook",
+    "name": "空白笔记本",
+    "brief": "一本浅米色封面的随身笔记",
+    "detail": "纸页还很新，里面可以真的写下字留作备忘或随笔。",
+    "tags": ["paper", "personal", "record"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "inscribable": {
+        "writable_by_ai": true,
+        "max_entries": 16,
+        "entries": []
+      }
+    },
+    "effects": {
+      "energy_delta": -0.01,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.04,
+      "satisfies": ["expression"],
+      "domain": "writing"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#dfd3be",
+        "2": "#faf5eb",
+        "3": "#9c8b75",
+        "a": "#d46a7e",
+        "b": "#556880"
+      },
+      "frames": {
+        "blank": [
+          "................",
+          "...oooooooooo...",
+          "..o3o22222222o..",
+          "..o3o11111111o..",
+          "..o3o11111111o..",
+          "..o3o111aa111o..",
+          "..o3o111aa111o..",
+          "..o3o11111111o..",
+          "..o3o11111111o..",
+          "..o3o11111111o..",
+          "..o3o11111111o..",
+          "..o3o11111111o..",
+          "..o3o33333333o..",
+          "...oooooooooo...",
+          "................",
+          "................"
+        ],
+        "written": [
+          "................",
+          "..oooooooooooo..",
+          ".o22222oo22222o.",
+          ".o2bbb2oo22222o.",
+          ".o22222oo2bbb2o.",
+          ".o2bbbb2o22222o.",
+          ".o22222oo2bbb2o.",
+          ".o2bbb2oo22a22o.",
+          ".o22222oo22222o.",
+          ".o11111oo11111o.",
+          ".o33333oo33333o.",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_sticky_note",
+    "name": "黄色便利贴",
+    "brief": "一张淡黄色的方形便利贴",
+    "detail": "背面带一点粘性，可以贴在桌角或墙上留几句短话。",
+    "tags": ["paper", "note"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "inscribable": {
+        "writable_by_ai": false,
+        "max_entries": 4,
+        "entries": []
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.03,
+      "satisfies": ["relatedness"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#ffe07d",
+        "2": "#fff3b8",
+        "3": "#d4ad42",
+        "a": "#e06c75",
+        "b": "#4b5b70"
+      },
+      "frames": {
+        "note": [
+          "................",
+          "................",
+          "...oooooooooo...",
+          "..o2222aa2222o..",
+          "..o1111111111o..",
+          "..o1bbbbbb111o..",
+          "..o1111111111o..",
+          "..o1bbbbbbbb1o..",
+          "..o1111111111o..",
+          "..o1bbbb11111o..",
+          "..o1111111133o..",
+          "..o33333333oo...",
+          "...oooooooo.....",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_door",
+    "name": "实木房门",
+    "brief": "一扇连接外部空间的实木门",
+    "detail": "带黄铜圆把手，绑定目标空间后推开门就能走过去。",
+    "tags": ["portal", "door"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "portal": {
+        "target_space_id": "",
+        "target_x": 5,
+        "target_y": 2,
+        "is_open": false
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.02,
+      "satisfies": ["explore"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5b38",
+        "2": "#bd8255",
+        "3": "#5c361e",
+        "a": "#f0c869",
+        "b": "#1a2236"
+      },
+      "frames": {
+        "open": [
+          "................",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2oooooooo2o..",
+          "..o2o111111o2o..",
+          "..o2o133331o2o..",
+          "..o2o111111o2o..",
+          "..o2o1111a1o2o..",
+          "..o2o111111o2o..",
+          "..o2o133331o2o..",
+          "..o2o133331o2o..",
+          "..o2o111111o2o..",
+          "..o2o111111o2o..",
+          "..o3o111111o3o..",
+          "..oooooooooooo..",
+          "................"
+        ],
+        "closed": [
+          "................",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2oooooooo2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o3333a3o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o2o333333o2o..",
+          "..o3o333333o3o..",
+          "..oooooooooooo..",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_bed",
+    "name": "柔软单人床",
+    "brief": "铺着碎花被子的松软单人床",
+    "detail": "木床头稳当靠墙，鹅黄小被褥蓬松暖和，看了就想钻进去打盹。",
+    "tags": ["furniture", "rest", "bedroom"],
+    "footprint": [2, 2],
+    "placement": "floor",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "restable": {
+        "energy_regen_per_min": 0.022,
+        "comfort": 0.92,
+        "occupied_by": null
+      }
+    },
+    "effects": {
+      "energy_delta": 0.18,
+      "sleep_pressure_delta": -0.22,
+      "mood_v_delta": 0.08,
+      "satisfies": ["rest", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 32,
+      "h": 32,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#9e6b43",
+        "2": "#fff3e6",
+        "3": "#6b4328",
+        "a": "#f09cb8",
+        "b": "#ffe08a"
+      },
+      "frames": {
+        "idle": [
+          "................................",
+          "....oooooooooooooooooooooooo....",
+          "...o111111111111111111111111o...",
+          "...o1bbbbbbbbbbbbbbbbbbbbbb1o...",
+          "...o111111111111111111111111o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3o222222o2222o22222222o3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaabbbbaaaaaaaabbbbaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaabbbbaaaaaaaabbbbaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaabbbbaaaaaaaabbbbaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o333333333333333333333333o...",
+          "...oooooooooooooooooooooooooo...",
+          "....ooo..................ooo....",
+          "....ooo..................ooo....",
+          "................................",
+          "................................",
+          "................................",
+          "................................"
+        ],
+        "occupied": [
+          "................................",
+          "....oooooooooooooooooooooooo....",
+          "...o111111111111111111111111o...",
+          "...o1bbbbbbbbbbbbbbbbbbbbbb1o...",
+          "...o111111111111111111111111o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3o22222bb222222bb22222o3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o3oaaaa2222aaaa2222aaaao3o...",
+          "...o3oaaa2aaaa2aa2aaaa2aaao3o...",
+          "...o3oaaa2aaaa2aa2aaaa2aaao3o...",
+          "...o3oaaaa2222aaaa2222aaaao3o...",
+          "...o3oaabbbbaaaaaaaabbbbaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaabbbbaaaaaaaabbbbaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3oaaaaaaaaaaaaaaaaaaaao3o...",
+          "...o3o22222222222222222222o3o...",
+          "...o3oooooooooooooooooooooo3o...",
+          "...o333333333333333333333333o...",
+          "...oooooooooooooooooooooooooo...",
+          "....ooo..................ooo....",
+          "....ooo..................ooo....",
+          "................................",
+          "................................",
+          "................................",
+          "................................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_bookshelf",
+    "name": "满载书架",
+    "brief": "摆满彩脊书本的实木书架",
+    "detail": "各色精装书、攻略本与小摆件塞得满满当当，顶层还能放东西。",
+    "tags": ["furniture", "reading", "study"],
+    "footprint": [2, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "surface": { "capacity": 2 },
+      "activity": {
+        "domain": "reading",
+        "progress_unit": "页",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": -0.02,
+      "sleep_pressure_delta": 0.02,
+      "mood_v_delta": 0.06,
+      "satisfies": ["curiosity", "calm"],
+      "domain": "reading"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 32,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5b38",
+        "2": "#bd8255",
+        "3": "#5c361e",
+        "a": "#e06c75",
+        "b": "#61afef"
+      },
+      "frames": {
+        "default": [
+          ".oooooooooooooooooooooooooooooo.",
+          ".o2222222222222222222222222222o.",
+          ".o1oaaboabbo11oaabbo11oobbao11o.",
+          ".o1oaaboabbo11oaabbo11oobbao11o.",
+          ".o1oaaboabbo11oaabbo11oobbao11o.",
+          ".o3oooooooooooooooooooooooooo3o.",
+          ".o1222222222222222222222222221o.",
+          ".o1obbao11oabbo11oabbao11oabboo.",
+          ".o1obbao11oabbo11oabbao11oabboo.",
+          ".o1obbao11oabbo11oabbao11oabboo.",
+          ".o3oooooooooooooooooooooooooo3o.",
+          ".o1222222222222222222222222221o.",
+          ".o3oaabbao11oabbao11oobbaao113o.",
+          ".o3333333333333333333333333333o.",
+          "..oooooooooooooooooooooooooooo..",
+          "................................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_arcade",
+    "name": "复古街机",
+    "brief": "一台老式直立霓虹街机箱",
+    "detail": "彩绘灯箱配合清脆摇杆，投币后屏幕立刻闪烁复古像素弹幕。",
+    "tags": ["furniture", "game", "entertainment"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "switchable": {
+        "provides_light": true,
+        "is_on": false,
+        "on_brief": "屏幕闪着光的游戏街机",
+        "off_brief": "黑屏待机的复古街机"
+      },
+      "activity": {
+        "domain": "game",
+        "progress_unit": "局",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": -0.05,
+      "sleep_pressure_delta": 0.02,
+      "mood_v_delta": 0.12,
+      "satisfies": ["fun", "flow"],
+      "domain": "game"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1c1524",
+        "1": "#4c5c8a",
+        "2": "#7b91cc",
+        "3": "#2d3552",
+        "a": "#ff6b9e",
+        "b": "#63e2ff"
+      },
+      "frames": {
+        "off": [
+          "...oooooooooo...",
+          "..o2aaaaaaaa2o..",
+          "..o2oooooooo2o..",
+          "..o1o333333o1o..",
+          "..o1o333333o1o..",
+          "..o1o333333o1o..",
+          "..o1oooooooo1o..",
+          "..o2a2b222222o..",
+          ".oooooooooooooo.",
+          "..o3111111113o..",
+          "..o3111aa1113o..",
+          "..o3111111113o..",
+          "..o3333333333o..",
+          "..oooooooooooo..",
+          "................",
+          "................"
+        ],
+        "on": [
+          "...oooooooooo...",
+          "..o2aaaaaaaa2o..",
+          "..o2oooooooo2o..",
+          "..o1obbbbbbo1o..",
+          "..o1obbaaabo1o..",
+          "..o1obbbbbbo1o..",
+          "..o1oooooooo1o..",
+          "..o2a2b222222o..",
+          ".oooooooooooooo.",
+          "..o3111111113o..",
+          "..o3111aa1113o..",
+          "..o3111111113o..",
+          "..o3333333333o..",
+          "..oooooooooooo..",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_pc",
+    "name": "游戏电脑",
+    "brief": "一台放在桌上的双屏台式电脑",
+    "detail": "键盘贴着柔和霓虹背光，既能码字也能推剧情或联机打游戏。",
+    "tags": ["entertainment", "game", "tech"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "switchable": {
+        "provides_light": true,
+        "is_on": false,
+        "on_brief": "屏幕亮着桌面壁纸的电脑",
+        "off_brief": "黑屏休眠的桌面电脑"
+      },
+      "activity": {
+        "domain": "game",
+        "progress_unit": "小时",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": -0.04,
+      "sleep_pressure_delta": 0.03,
+      "mood_v_delta": 0.09,
+      "satisfies": ["fun", "curiosity"],
+      "domain": "game"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1a1822",
+        "1": "#586073",
+        "2": "#8d96ad",
+        "3": "#353945",
+        "a": "#84f2b6",
+        "b": "#7cd4ff"
+      },
+      "frames": {
+        "off": [
+          "................",
+          "..oooooooooooo..",
+          ".o211111111112o.",
+          ".o1o33333333o1o.",
+          ".o1o33333333o1o.",
+          ".o1o33333333o1o.",
+          ".o1o33333333o1o.",
+          ".o1oooooooooo1o.",
+          "..oooo3333oooo..",
+          "......o33o......",
+          "...oooooooooo...",
+          "..o2211111122o..",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................"
+        ],
+        "on": [
+          "................",
+          "..oooooooooooo..",
+          ".o211111111112o.",
+          ".o1obbbbbbbbo1o.",
+          ".o1obbbaaaabo1o.",
+          ".o1obbbaaaabo1o.",
+          ".o1obbbbbbbbo1o.",
+          ".o1oooooooooo1o.",
+          "..oooo3333oooo..",
+          "......o33o......",
+          "...oooooooooo...",
+          "..o2a1a1a1a12o..",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_gramophone",
+    "name": "黑胶留声机",
+    "brief": "带黄铜大喇叭的老式黑胶唱机",
+    "detail": "唱针落下时黑胶缓缓旋转，室内流淌起温柔轻快的小夜曲。",
+    "tags": ["entertainment", "music", "cozy"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "switchable": {
+        "provides_light": false,
+        "is_on": false,
+        "on_brief": "正悠扬放着音乐的黑胶唱机",
+        "off_brief": "停着唱针的老式黑胶唱机"
+      },
+      "activity": {
+        "domain": "music",
+        "progress_unit": "首",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": 0.02,
+      "sleep_pressure_delta": -0.02,
+      "mood_v_delta": 0.1,
+      "satisfies": ["calm", "comfort"],
+      "domain": "music"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5434",
+        "2": "#e6b85c",
+        "3": "#4f2c1a",
+        "a": "#ffd97d",
+        "b": "#88d4f5"
+      },
+      "frames": {
+        "off": [
+          "......oooooo....",
+          "....oo222aa2o...",
+          "...o22aaaaaa2o..",
+          "...o22aaaaaa2o..",
+          "....oo22222oo...",
+          ".......oo2o.....",
+          "........oo......",
+          "..oooooooooooo..",
+          ".o11oooooooo11o.",
+          ".o1o33333333o1o.",
+          ".o111111111111o.",
+          ".o333333a33333o.",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................"
+        ],
+        "on": [
+          "..b...oooooo..b.",
+          "....oo222aa2o...",
+          "...o22aaaaaa2o..",
+          "...o22aaaaaa2o..",
+          "....oo22222oo...",
+          ".......oo2o.....",
+          "........oo......",
+          "..oooooooooooo..",
+          ".o11oooooooo11o.",
+          ".o1obbbbbbbbo1o.",
+          ".o111111111111o.",
+          ".o33333aa33333o.",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_fridge",
+    "name": "复古小冰箱",
+    "brief": "奶油薄荷绿双门圆角小冰箱",
+    "detail": "拉开门会亮起冷白小灯，里面可以冰镇草莓蛋糕、果汁和布丁。",
+    "tags": ["furniture", "storage", "food"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "container": {
+        "capacity": 8,
+        "key_tag": "",
+        "is_open": false,
+        "is_locked": false
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.02,
+      "satisfies": ["order"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1d2624",
+        "1": "#7cb8a6",
+        "2": "#aee0d0",
+        "3": "#4c7d6e",
+        "a": "#e8eff2",
+        "b": "#b8f2ff"
+      },
+      "frames": {
+        "closed": [
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2111111111o..",
+          "..o11111111a1o..",
+          "..o11111111a1o..",
+          "..oooooooooooo..",
+          "..o2111111111o..",
+          "..o11111111a1o..",
+          "..o11111111a1o..",
+          "..o1111111111o..",
+          "..o1111111111o..",
+          "..o3333333333o..",
+          "..oooooooooooo..",
+          "...oo......oo...",
+          "................",
+          "................"
+        ],
+        "open": [
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o1obbbbbbo1o..",
+          "..o1obbbbbbo1o..",
+          "..o1oooooooo1o..",
+          "..oooooooooooo..",
+          "..o1obbbbbbo1o..",
+          "..o1obaaaaao1o..",
+          "..o1obbbbbbo1o..",
+          "..o1obaaaaao1o..",
+          "..o1obbbbbbo1o..",
+          "..o3oooooooo3o..",
+          "..oooooooooooo..",
+          "...oo......oo...",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_coffee_maker",
+    "name": "意式咖啡机",
+    "brief": "随时能萃出香浓咖啡的吧台机",
+    "detail": "萃取口亮着橙色指示灯，能现磨出提神的热拿铁。",
+    "tags": ["food", "drink", "cozy"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "consumable": {
+        "max_uses": 4,
+        "uses_left": 4,
+        "consume_verb": "喝",
+        "on_empty": "keep_empty",
+        "empty_brief": "咖啡豆盒空了的咖啡机"
+      },
+      "thermal": {
+        "cool_minutes": 90,
+        "temp": "hot"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.14,
+      "sleep_pressure_delta": -0.14,
+      "mood_v_delta": 0.07,
+      "satisfies": ["warmth", "energy"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1e1a1f",
+        "1": "#9e4444",
+        "2": "#cf7474",
+        "3": "#5e2525",
+        "a": "#f0a254",
+        "b": "#fff4e6"
+      },
+      "frames": {
+        "hot": [
+          "...oooooooooo...",
+          "..o2111111112o..",
+          "..o1111aa1111o..",
+          "..o11oooooo11o..",
+          "..o11o....o11o..",
+          "..o11o.bb.o11o..",
+          "..o11obbbbo11o..",
+          "..o11ob33bo11o..",
+          "..o33oooooo33o..",
+          "..o3333333333o..",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "empty": [
+          "...oooooooooo...",
+          "..o2111111112o..",
+          "..o1111331111o..",
+          "..o11oooooo11o..",
+          "..o11o....o11o..",
+          "..o11o....o11o..",
+          "..o11o....o11o..",
+          "..o11o....o11o..",
+          "..o33oooooo33o..",
+          "..o3333333333o..",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_cake",
+    "name": "草莓奶油蛋糕",
+    "brief": "缀着鲜草莓的精致四寸奶油蛋糕",
+    "detail": "松软戚风夹着香草淡奶油，上面整整齐齐摆着红草莓。",
+    "tags": ["food", "sweet", "gift"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "consumable": {
+        "max_uses": 3,
+        "uses_left": 3,
+        "consume_verb": "吃",
+        "on_empty": "vanish",
+        "empty_brief": "吃得一干二净的蛋糕盘"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.1,
+      "sleep_pressure_delta": -0.02,
+      "mood_v_delta": 0.14,
+      "satisfies": ["comfort", "pleasure"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#291820",
+        "1": "#fff5eb",
+        "2": "#ffffff",
+        "3": "#e8cbb1",
+        "a": "#e64e6c",
+        "b": "#85cf88"
+      },
+      "frames": {
+        "full": [
+          "................",
+          "......b..b......",
+          ".....oaooao.....",
+          "....o222222o....",
+          "...o22111122o...",
+          "...o11aaaa11o...",
+          "...o11111111o...",
+          "...o33333333o...",
+          "..oo33333333oo..",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "half": [
+          "................",
+          "......b.........",
+          ".....oao........",
+          "....o2222o......",
+          "...o22111o......",
+          "...o11aaao......",
+          "...o11111o......",
+          "...o33333o......",
+          "..oo33333333oo..",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "empty": [
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "..oooooooooooo..",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_ramen",
+    "name": "豚骨拉面碗",
+    "brief": "冒着热气的日式叉烧温泉蛋拉面",
+    "detail": "浓白高汤上浮着半熟溏心蛋、笋干和海苔片，香气扑鼻。",
+    "tags": ["food", "drink", "warmth"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "consumable": {
+        "max_uses": 2,
+        "uses_left": 2,
+        "consume_verb": "吃",
+        "on_empty": "keep_empty",
+        "empty_brief": "见底的青花大拉面碗"
+      },
+      "thermal": {
+        "cool_minutes": 35,
+        "temp": "hot"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.16,
+      "sleep_pressure_delta": 0.04,
+      "mood_v_delta": 0.12,
+      "satisfies": ["warmth", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1e1a24",
+        "1": "#5878a8",
+        "2": "#f7e09c",
+        "3": "#354c70",
+        "a": "#f08c4a",
+        "b": "#ffffff"
+      },
+      "frames": {
+        "hot": [
+          "....b....b......",
+          "...b....b.......",
+          "..oooooooooooo..",
+          ".obbaab22222bbo.",
+          ".o222222222222o.",
+          "..o1111111111o..",
+          "..o11bbbbbb11o..",
+          "...o31111113o...",
+          "....o333333o....",
+          ".....oooooo.....",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "empty": [
+          "................",
+          "................",
+          "..oooooooooooo..",
+          ".o333333333333o.",
+          ".o111111111111o.",
+          "..o1111111111o..",
+          "..o11bbbbbb11o..",
+          "...o31111113o...",
+          "....o333333o....",
+          ".....oooooo.....",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_plant",
+    "name": "龟背竹盆栽",
+    "brief": "生机勃勃的陶盆龟背竹绿植",
+    "detail": "宽大舒展的翠绿裂叶，每次路过浇一点水就会显得更精神。",
+    "tags": ["decor", "outdoor", "plant"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "heavy" },
+      "activity": {
+        "domain": "hobby",
+        "progress_unit": "次照料",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": 0.01,
+      "sleep_pressure_delta": -0.02,
+      "mood_v_delta": 0.07,
+      "satisfies": ["calm", "nature"],
+      "domain": "hobby"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1b241c",
+        "1": "#48964e",
+        "2": "#7bd17b",
+        "3": "#2a5e32",
+        "a": "#b56945",
+        "b": "#7a4026"
+      },
+      "frames": {
+        "default": [
+          "...ooo....ooo...",
+          "..o221o..o122o..",
+          ".o21.1o..o1.12o.",
+          ".o1111o..o1111o.",
+          "..o33oo..oo33o..",
+          "....oo3oo3oo....",
+          ".....o3333o.....",
+          "....oooooooo....",
+          "....oaaaaaaao...",
+          "....oaaaaabbo...",
+          ".....obbbbbo....",
+          "......ooooo.....",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_easel",
+    "name": "木质画架",
+    "brief": "支着白色画布的写生木画架",
+    "detail": "木托槽放着排笔与颜料盘，可以在画布上随手记下当下的涂鸦或灵感。",
+    "tags": ["decor", "hobby", "art"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "inscribable": {
+        "writable_by_ai": true,
+        "max_entries": 10,
+        "entries": []
+      },
+      "activity": {
+        "domain": "hobby",
+        "progress_unit": "幅",
+        "progress": 0,
+        "battery": null,
+        "battery_cost": 0
+      }
+    },
+    "effects": {
+      "energy_delta": -0.02,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.09,
+      "satisfies": ["flow", "expression"],
+      "domain": "hobby"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#9e6b43",
+        "2": "#f7f3eb",
+        "3": "#694324",
+        "a": "#ff789e",
+        "b": "#6ec8ff"
+      },
+      "frames": {
+        "blank": [
+          ".......oo.......",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o2222222222o..",
+          "..o2222222222o..",
+          "..o2222222222o..",
+          "..o2222222222o..",
+          "..o2222222222o..",
+          "..oooooooooooo..",
+          "..o1111111111o..",
+          "...o3o....o3o...",
+          "..o3o......o3o..",
+          ".o3o........o3o.",
+          ".oo..........oo.",
+          "................",
+          "................"
+        ],
+        "written": [
+          ".......oo.......",
+          "...oooooooooo...",
+          "..o2222222222o..",
+          "..o22bbbbbb22o..",
+          "..o22baaaab22o..",
+          "..o22baaaab22o..",
+          "..o2211111122o..",
+          "..o2222222222o..",
+          "..oooooooooooo..",
+          "..o1111111111o..",
+          "...o3o....o3o...",
+          "..o3o......o3o..",
+          ".o3o........o3o.",
+          ".oo..........oo.",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_wall_clock",
+    "name": "像素挂钟",
+    "brief": "滴答走动的圆木框挂墙时钟",
+    "detail": "挂在墙面上的奶油表盘圆挂钟，指针清清楚楚地指着此刻的钟点。",
+    "tags": ["decor", "wall"],
+    "footprint": [1, 1],
+    "placement": "wall",
+    "solid": false,
+    "builtin": true,
+    "traits": {},
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.01,
+      "satisfies": ["order"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5b38",
+        "2": "#fff8eb",
+        "3": "#5c361e",
+        "a": "#d95b5b",
+        "b": "#3b4252"
+      },
+      "frames": {
+        "default": [
+          "....oooooooo....",
+          "...o11111111o...",
+          "..o1o222222o1o..",
+          ".o1o222bb222o1o.",
+          ".o1o222bb222o1o.",
+          ".o1o222bbaa2o1o.",
+          ".o1o22222222o1o.",
+          "..o1o222222o1o..",
+          "...o31111113o...",
+          "....oooooooo....",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_window_poster",
+    "name": "星海游戏海报",
+    "brief": "挂在墙上的像素星际飞船海报",
+    "detail": "限量特典丝网印刷海报，边角还留着可以补充感想的空白小边条。",
+    "tags": ["decor", "wall", "game"],
+    "footprint": [1, 1],
+    "placement": "wall",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "inscribable": {
+        "writable_by_ai": true,
+        "max_entries": 6,
+        "entries": []
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.05,
+      "satisfies": ["cozy", "fun"],
+      "domain": "game"
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#1c1826",
+        "1": "#2e3561",
+        "2": "#ff9dbb",
+        "3": "#1d2240",
+        "a": "#ffd166",
+        "b": "#7cd4ff"
+      },
+      "frames": {
+        "default": [
+          "...oooooooooo...",
+          "..o11a1111b11o..",
+          "..o1111bb1111o..",
+          "..o111b22b111o..",
+          "..o11b2222b11o..",
+          "..o1111aa1111o..",
+          "..o31a1111b13o..",
+          "..o3333333333o..",
+          "..o2222222222o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_campfire",
+    "name": "露营篝火",
+    "brief": "石头围圈架着柴火的小篝火",
+    "detail": "橘色火苗舔着干燥木柴，劈啪作响的同时照暖周围几格夜色。",
+    "tags": ["outdoor", "light", "warmth"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "switchable": {
+        "provides_light": true,
+        "is_on": true,
+        "on_brief": "跳动着温暖火光的篝火堆",
+        "off_brief": "只剩焦炭灰的熄灭篝火"
+      },
+      "thermal": {
+        "cool_minutes": 180,
+        "temp": "hot"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.03,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.08,
+      "satisfies": ["warmth", "safety", "cozy"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5638",
+        "2": "#ffd166",
+        "3": "#5e5c64",
+        "a": "#ff6d3a",
+        "b": "#9294a1"
+      },
+      "frames": {
+        "on": [
+          ".......oo.......",
+          "......oaao......",
+          ".....o2aa2o.....",
+          "....o2aaaa2o....",
+          "....o22aa22o....",
+          ".....oooooo.....",
+          "...oo111111oo...",
+          "..obb331133bbo..",
+          "..obb333333bbo..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "off": [
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          ".....oooooo.....",
+          "...oo333333oo...",
+          "..obb333333bbo..",
+          "..obb333333bbo..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_street_lamp",
+    "name": "庭院铸铁街灯",
+    "brief": "复古黑铸铁立式玻璃灯柱",
+    "detail": "天色暗下来后拨动开关就能在庭院里洒下一片温柔暖黄灯光。",
+    "tags": ["outdoor", "light", "decor"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "switchable": {
+        "provides_light": true,
+        "is_on": false,
+        "on_brief": "亮着温暖灯火的铸铁街灯",
+        "off_brief": "还没点亮的铸铁庭院街灯"
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.05,
+      "satisfies": ["safety", "cozy"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#18181f",
+        "1": "#484d5e",
+        "2": "#868ea8",
+        "3": "#2a2d38",
+        "a": "#ffdc73",
+        "b": "#fff5c2"
+      },
+      "frames": {
+        "off": [
+          "......oooo......",
+          "....oo2112oo....",
+          "....o133331o....",
+          "....o133331o....",
+          ".....oooooo.....",
+          ".......11.......",
+          ".......11.......",
+          ".......11.......",
+          ".......11.......",
+          "......o11o......",
+          ".....o3333o.....",
+          ".....oooooo.....",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "on": [
+          "......oooo......",
+          "....oo2112oo....",
+          "....o1abbba1o...",
+          "....o1aaaa1o....",
+          ".....oooooo.....",
+          ".......11.......",
+          ".......11.......",
+          ".......11.......",
+          ".......11.......",
+          "......o11o......",
+          ".....o3333o.....",
+          ".....oooooo.....",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_wooden_chest",
+    "name": "带锁木宝箱",
+    "brief": "扣着黄铜锁扣的铁箍木宝箱",
+    "detail": "合上时挂着铜锁，需要用带 brass_key 标签的钥匙才能咔哒打开。",
+    "tags": ["storage", "container", "decor"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": true,
+    "builtin": true,
+    "traits": {
+      "container": {
+        "capacity": 8,
+        "key_tag": "brass_key",
+        "is_open": false,
+        "is_locked": true
+      }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.03,
+      "satisfies": ["curiosity", "order"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5432",
+        "2": "#c47d4d",
+        "3": "#593018",
+        "a": "#f5cc5d",
+        "b": "#2d2529"
+      },
+      "frames": {
+        "closed": [
+          "..oooooooooooo..",
+          ".o22222aa22222o.",
+          ".o11111aa11111o.",
+          ".o111111111111o.",
+          ".oooooooaoooooo.",
+          ".o31111aa11113o.",
+          ".o311111111113o.",
+          ".o311111111113o.",
+          ".o333333333333o.",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "open": [
+          "..oooooooooooo..",
+          ".o22222aa22222o.",
+          ".oobbbbbbbbbboo.",
+          ".oobbbbbbbbbboo.",
+          ".oooooooooooooo.",
+          ".o31111aa11113o.",
+          ".o311111111113o.",
+          ".o311111111113o.",
+          ".o333333333333o.",
+          "..oooooooooooo..",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_brass_key",
+    "name": "黄铜旧钥匙",
+    "brief": "一枚沉甸甸的老式黄铜钥匙",
+    "detail": "齿纹雕刻细致，拿在手里就能打开贴有 brass_key 的带锁箱子。",
+    "tags": ["key", "brass_key"],
+    "footprint": [1, 1],
+    "placement": "any",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" }
+    },
+    "effects": {
+      "energy_delta": 0.0,
+      "sleep_pressure_delta": 0.0,
+      "mood_v_delta": 0.02,
+      "satisfies": ["curiosity"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#e0b34c",
+        "2": "#ffe68a",
+        "3": "#997024",
+        "a": "#fff8d6",
+        "b": "#997024"
+      },
+      "frames": {
+        "default": [
+          "................",
+          "...ooooo........",
+          "..o21111o.......",
+          "..o1oo11o.......",
+          "..o1oo11oooooooo",
+          "..o311111111122o",
+          "...ooooo1o3o13o.",
+          "........oo.oo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  },
+  {
+    "blueprint_id": "default_cat_cushion",
+    "name": "猫咪坐垫",
+    "brief": "一只毛茸茸的奶白猫咪圆坐垫",
+    "detail": "印着粉色小肉垫图案，抱起来软乎乎的，铺在地上可以随时坐着歇息。",
+    "tags": ["rest", "decor", "cozy"],
+    "footprint": [1, 1],
+    "placement": "floor",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portable": { "weight": "light" },
+      "restable": {
+        "energy_regen_per_min": 0.012,
+        "comfort": 0.78,
+        "occupied_by": null
+      }
+    },
+    "effects": {
+      "energy_delta": 0.09,
+      "sleep_pressure_delta": -0.08,
+      "mood_v_delta": 0.08,
+      "satisfies": ["rest", "comfort"],
+      "domain": null
+    },
+    "combine_rules": [],
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#291e24",
+        "1": "#f5ebe0",
+        "2": "#ffffff",
+        "3": "#d4c3b4",
+        "a": "#ff9dbb",
+        "b": "#ffd6e3"
+      },
+      "frames": {
+        "idle": [
+          "................",
+          "...oo......oo...",
+          "..o22o....o22o..",
+          "..o2aooooooa2o..",
+          ".o211111111112o.",
+          ".o1111aa11aa11o.",
+          ".o111aaaaaaaa1o.",
+          ".o1111aaaaaa11o.",
+          ".o31111aaaa113o.",
+          "..o3333333333o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ],
+        "occupied": [
+          "................",
+          "...oo......oo...",
+          "..o22o....o22o..",
+          "..o2aooooooa2o..",
+          ".o211111111112o.",
+          ".o1111aa11aa11o.",
+          ".o111aaaaaaaa1o.",
+          ".o311111111113o.",
+          "..o3333333333o..",
+          "...oooooooooo...",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................",
+          "................"
+        ]
+      }
+    }
+  }
+]

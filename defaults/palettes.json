@@ -1,0 +1,132 @@
+[
+  {
+    "palette_id": "warm_stardew",
+    "name": "暖木星露谷",
+    "builtin": true,
+    "room": {
+      "wall_base": "#4a3b32",
+      "wall_trim": "#2e231d",
+      "floor_a": "#8b5e3c",
+      "floor_b": "#7d5333",
+      "night_mask": "rgba(14, 18, 42, 0.50)",
+      "lamp_glow": "rgba(255, 214, 130, 0.36)"
+    },
+    "sprite_base": {
+      "outline": "#21181b",
+      "wood_main": "#9e6b43",
+      "wood_hi": "#c99364",
+      "wood_lo": "#6d4528"
+    },
+    "terminal": {
+      "bg": "#111418",
+      "fg": "#d7e0ea",
+      "accent": "#ff9dbb",
+      "muted": "#728096",
+      "border": "#2d3542"
+    }
+  },
+  {
+    "palette_id": "midnight_handheld",
+    "name": "深夜掌机",
+    "builtin": true,
+    "room": {
+      "wall_base": "#20283d",
+      "wall_trim": "#141928",
+      "floor_a": "#2c3652",
+      "floor_b": "#262f47",
+      "night_mask": "rgba(6, 10, 26, 0.52)",
+      "lamp_glow": "rgba(130, 218, 255, 0.30)"
+    },
+    "sprite_base": {
+      "outline": "#0f1320",
+      "wood_main": "#4f5f82",
+      "wood_hi": "#7286b0",
+      "wood_lo": "#35415c"
+    },
+    "terminal": {
+      "bg": "#0b0f19",
+      "fg": "#d5e4ff",
+      "accent": "#7cd4ff",
+      "muted": "#677a9e",
+      "border": "#26324d"
+    }
+  },
+  {
+    "palette_id": "cyber_pastel",
+    "name": "赛博柔粉",
+    "builtin": true,
+    "room": {
+      "wall_base": "#36273d",
+      "wall_trim": "#231929",
+      "floor_a": "#4a3854",
+      "floor_b": "#42314b",
+      "night_mask": "rgba(18, 10, 34, 0.48)",
+      "lamp_glow": "rgba(255, 168, 204, 0.34)"
+    },
+    "sprite_base": {
+      "outline": "#1c1324",
+      "wood_main": "#7a5b82",
+      "wood_hi": "#a580ad",
+      "wood_lo": "#533b59"
+    },
+    "terminal": {
+      "bg": "#15101a",
+      "fg": "#f2e5f5",
+      "accent": "#ff97c2",
+      "muted": "#927c9c",
+      "border": "#3c2c47"
+    }
+  },
+  {
+    "palette_id": "gameboy_pocket",
+    "name": "Game Boy 复古绿",
+    "builtin": true,
+    "room": {
+      "wall_base": "#306230",
+      "wall_trim": "#0f380f",
+      "floor_a": "#8bac0f",
+      "floor_b": "#7fa00d",
+      "night_mask": "rgba(15, 56, 15, 0.42)",
+      "lamp_glow": "rgba(155, 188, 15, 0.38)"
+    },
+    "sprite_base": {
+      "outline": "#0f380f",
+      "wood_main": "#306230",
+      "wood_hi": "#9bbc0f",
+      "wood_lo": "#0f380f"
+    },
+    "terminal": {
+      "bg": "#0f380f",
+      "fg": "#9bbc0f",
+      "accent": "#c8e06c",
+      "muted": "#5c8824",
+      "border": "#306230"
+    }
+  },
+  {
+    "palette_id": "ink_terminal",
+    "name": "纸墨极简终端",
+    "builtin": true,
+    "room": {
+      "wall_base": "#d8d1c5",
+      "wall_trim": "#9f978b",
+      "floor_a": "#ebe5da",
+      "floor_b": "#e2dbce",
+      "night_mask": "rgba(32, 34, 42, 0.42)",
+      "lamp_glow": "rgba(255, 224, 150, 0.38)"
+    },
+    "sprite_base": {
+      "outline": "#262320",
+      "wood_main": "#a89882",
+      "wood_hi": "#cbbda8",
+      "wood_lo": "#786b59"
+    },
+    "terminal": {
+      "bg": "#f5f1e8",
+      "fg": "#24211e",
+      "accent": "#b84a62",
+      "muted": "#7a7267",
+      "border": "#c9c0b1"
+    }
+  }
+]

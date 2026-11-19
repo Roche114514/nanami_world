@@ -1,0 +1,2911 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>七海千秋 · 文字世界</title>
+<style>
+  :root {
+    --bg: #121017;
+    --panel: #1b1822;
+    --panel-2: #242030;
+    --border: #3d354f;
+    --border-hi: #645880;
+    --text: #eee9f5;
+    --muted: #9a91ad;
+    --accent: #ff8fb1;
+    --accent-2: #7cd4ff;
+    --ok: #78d69a;
+    --warn: #f0b866;
+    --danger: #f07a7a;
+    --px-font: "Consolas", "Courier New", "Microsoft YaHei", monospace;
+    --ui-font: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 13px/1.45 var(--ui-font); overflow: hidden; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+
+  .app { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+
+  /* 顶部像素风工具栏 */
+  header.topbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px;
+    background: var(--panel);
+    border-bottom: 2px solid var(--border);
+    min-height: 46px;
+  }
+  .brand { font-family: var(--px-font); font-weight: 700; font-size: 14px; color: var(--accent); letter-spacing: 0.5px; margin-right: 4px; white-space: nowrap; }
+  .space-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .tab-btn {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--muted);
+    padding: 3px 9px; font-size: 12px; cursor: pointer; font-family: var(--px-font);
+  }
+  .tab-btn.active { border-color: var(--accent); color: var(--text); background: #2d243b; }
+  .tab-btn:hover { border-color: var(--border-hi); color: var(--text); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border: 2px solid var(--border); background: var(--panel-2);
+    font-family: var(--px-font); font-size: 11px; color: var(--muted); white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; background: var(--ok); display: inline-block; }
+  .dot.dark { background: var(--accent-2); }
+
+  .spacer { flex: 1 1 auto; }
+
+  button.px-btn, select.px-sel, input.px-inp, textarea.px-txt {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 4px 9px; font-size: 12px; font-family: var(--ui-font);
+    outline: none;
+  }
+  button.px-btn { cursor: pointer; font-weight: 600; white-space: nowrap; }
+  button.px-btn:hover { border-color: var(--border-hi); background: #2c273a; }
+  button.px-btn.primary { border-color: var(--accent); background: #3b2333; color: #ffd9e6; }
+  button.px-btn.primary:hover { background: #4c2a40; }
+  button.px-btn.eye-on { border-color: var(--accent-2); background: #1c3142; color: #cceeff; }
+  button.px-btn.danger { border-color: #9e4747; color: #ffb3b3; }
+  button.px-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  input.px-inp:focus, textarea.px-txt:focus, select.px-sel:focus { border-color: var(--accent); }
+
+  /* 主体双栏区 */
+  .main { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .stage-col {
+    flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column;
+    padding: 10px 12px; gap: 8px; overflow: hidden; position: relative;
+  }
+  .build-bar {
+    border: 2px solid var(--border); background: var(--panel); padding: 5px 8px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 5px; flex: 0 0 auto;
+  }
+  .tool-btn.active { border-color: var(--ok); background: #1d3326; color: #ccffe0; }
+  .build-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+
+  .stage-shell {
+    flex: 1 1 auto; min-height: 0; display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) 28px;
+    grid-template-rows: 24px minmax(0, 1fr) 24px;
+    grid-template-areas:
+      ". north ."
+      "west center east"
+      ". south .";
+    gap: 4px;
+  }
+  .expand-edge-btn {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+    font-size: 10px; font-family: var(--px-font); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .expand-edge-btn:hover { border-color: var(--accent); color: var(--text); background: #2d243b; }
+  .expand-n { grid-area: north; }
+  .expand-s { grid-area: south; }
+  .expand-w { grid-area: west; writing-mode: vertical-rl; letter-spacing: 1px; }
+  .expand-e { grid-area: east; writing-mode: vertical-rl; letter-spacing: 1px; }
+
+  .stage-wrap {
+    grid-area: center; min-width: 0; min-height: 0; display: flex;
+    background: #0c0b10; border: 2px solid var(--border); position: relative; overflow: auto; padding: 12px;
+  }
+  #world-canvas {
+    border: 2px solid var(--border-hi);
+    box-shadow: 0 0 0 4px #09080d;
+    cursor: crosshair;
+    margin: auto;
+    flex: 0 0 auto;
+  }
+
+  /* 她的视角（复古像素终端） */
+  #terminal-view {
+    width: 100%; height: 100%; overflow: auto; padding: 16px 18px;
+    border: 2px solid var(--border-hi);
+    font-family: var(--px-font); font-size: 13px; line-height: 1.7;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .term-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px dashed currentColor; opacity: 0.9; }
+  .term-anchor {
+    display: inline-block; padding: 0 4px; margin: 0 1px; cursor: pointer;
+    border-bottom: 1px dashed currentColor; font-weight: 700;
+  }
+  .term-anchor:hover { filter: brightness(1.25); }
+
+  /* 物体检查器条 */
+  .inspector {
+    border: 2px solid var(--border); background: var(--panel); padding: 8px 12px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 42px;
+  }
+  .inspector .meta { flex: 1 1 260px; min-width: 0; }
+  .inspector .title { font-weight: 700; font-size: 13px; color: var(--accent); }
+  .inspector .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .inspector .acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+  /* 角色实时心情立绘 + 世界对话框 */
+  .dialogue-dock {
+    border: 2px solid var(--border); background: var(--panel);
+    display: flex; gap: 10px; padding: 8px;
+    height: clamp(148px, 23vh, 196px); flex: 0 0 auto; min-height: 144px;
+  }
+  .portrait-card {
+    width: 118px; flex: 0 0 118px; display: flex; flex-direction: column;
+    border: 2px solid var(--border-hi); background: #14121b;
+    cursor: pointer; position: relative; overflow: hidden;
+  }
+  .portrait-card:hover { border-color: var(--accent); }
+  .portrait-frame {
+    flex: 1 1 auto; min-height: 0; position: relative; overflow: hidden;
+    background: radial-gradient(circle at 50% 35%, #2a2238, #121018);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .portrait-frame img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 20%; display: block; }
+  .portrait-fallback { font-family: var(--px-font); font-size: 26px; font-weight: 700; color: var(--accent); }
+  .portrait-mode-pill {
+    position: absolute; top: 4px; right: 4px; padding: 1px 5px;
+    font-size: 10px; font-family: var(--px-font);
+    background: rgba(15, 13, 20, 0.85); border: 1px solid var(--border-hi); color: var(--accent-2);
+  }
+  .portrait-mode-pill.manual { color: var(--warn); border-color: var(--warn); }
+  .portrait-tag {
+    padding: 3px 6px; font-size: 10px; font-family: var(--px-font);
+    background: var(--panel-2); border-top: 1px solid var(--border);
+    color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
+  }
+
+  .chat-box { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .chat-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .chat-head b { color: var(--accent); }
+  .chat-mood-badge {
+    font-size: 10px; font-family: var(--px-font); color: var(--muted);
+    padding: 1px 6px; border: 1px solid var(--border); background: var(--panel-2);
+  }
+  .chat-log {
+    flex: 1 1 auto; min-height: 0; overflow: auto;
+    border: 1px solid var(--border); background: #14121a;
+    padding: 6px 8px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .chat-msg { font-size: 12px; line-height: 1.45; word-break: break-word; }
+  .chat-msg.user { color: #b9e4ff; }
+  .chat-msg.assistant { color: var(--text); }
+  .chat-msg.action { color: var(--ok); font-size: 11px; font-family: var(--px-font); }
+  .chat-msg .who { font-weight: 700; margin-right: 4px; }
+  .chat-msg .emo-chip {
+    display: inline-block; margin-left: 6px; padding: 0 5px;
+    font-size: 10px; font-family: var(--px-font); color: var(--accent);
+    border: 1px solid var(--border); background: var(--panel-2);
+  }
+  .chat-input-row { display: flex; gap: 6px; }
+  .chat-input-row input { flex: 1 1 auto; min-width: 0; }
+
+  .expr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+  .expr-card {
+    border: 2px solid var(--border); background: var(--panel-2); padding: 6px;
+    cursor: pointer; display: flex; flex-direction: column; gap: 4px; align-items: center;
+  }
+  .expr-card:hover { border-color: var(--border-hi); }
+  .expr-card.active { border-color: var(--accent); background: #362231; }
+  .expr-card img { width: 88px; height: 106px; object-fit: cover; object-position: 50% 18%; background: #100e16; }
+  .expr-card .expr-lbl { font-size: 11px; text-align: center; color: var(--text); word-break: break-word; }
+  .expr-card .expr-idx { font-size: 10px; font-family: var(--px-font); color: var(--muted); }
+
+  /* 右侧工作台 */
+  .side-col {
+    width: 340px; flex: 0 0 340px; border-left: 2px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+  }
+  .side-tabs { display: flex; border-bottom: 2px solid var(--border); }
+  .side-tab {
+    flex: 1 1 50%; text-align: center; padding: 8px 6px; cursor: pointer;
+    font-weight: 700; font-size: 12px; color: var(--muted); background: var(--panel);
+    border: none; border-bottom: 2px solid transparent;
+  }
+  .side-tab.active { color: var(--text); background: var(--panel-2); border-bottom-color: var(--accent); }
+  .side-body { flex: 1 1 auto; overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+
+  .sec-box { border: 2px solid var(--border); background: #16141d; padding: 8px; }
+  .sec-title { font-size: 11px; color: var(--muted); font-family: var(--px-font); margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+
+  .delivery-toggle { display: flex; gap: 6px; }
+  .delivery-toggle button { flex: 1 1 50%; font-size: 11px; padding: 5px 6px; }
+  .delivery-toggle button.active { border-color: var(--accent); background: #362231; color: #ffd9e6; }
+
+  .forge-row { display: flex; gap: 6px; }
+  .forge-row input { flex: 1 1 auto; min-width: 0; }
+
+  .bp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .bp-card {
+    border: 2px solid var(--border); background: var(--panel-2); padding: 6px;
+    cursor: pointer; display: flex; gap: 7px; align-items: center; position: relative;
+  }
+  .bp-card:hover { border-color: var(--border-hi); }
+  .bp-card.selected { border-color: var(--ok); background: #1d2e24; }
+  .bp-thumb { width: 32px; height: 32px; flex: 0 0 32px; background: #111016; border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
+  .bp-info { min-width: 0; flex: 1 1 auto; }
+  .bp-name { font-size: 12px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bp-sub { font-size: 10px; color: var(--muted); font-family: var(--px-font); }
+  .bp-edit-mini { position: absolute; right: 3px; top: 3px; font-size: 10px; padding: 1px 4px; opacity: 0.75; }
+
+  .tile-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .tile-btn {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 4px 2px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 10px;
+  }
+  .tile-btn:hover { border-color: var(--border-hi); }
+  .tile-btn.selected { border-color: var(--ok); background: #1d2e24; }
+  .tile-btn span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .cat-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .cat-chip {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+    padding: 2px 6px; font-size: 10px; cursor: pointer;
+  }
+  .cat-chip.active { border-color: var(--accent); color: var(--text); background: #2d243b; }
+
+  .vitals-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
+  .vital-cell { border: 1px solid var(--border); background: var(--panel-2); padding: 5px; text-align: center; font-family: var(--px-font); }
+  .vital-cell b { display: block; font-size: 13px; color: var(--accent-2); }
+  .vital-cell span { font-size: 10px; color: var(--muted); }
+
+  .event-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .event-list li { border: 1px solid var(--border); background: var(--panel-2); padding: 5px 7px; font-size: 11px; font-family: var(--px-font); }
+  .event-list .ev-time { color: var(--muted); margin-right: 6px; }
+
+  /* 弹层（完全替代原生 alert / confirm / prompt） */
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(6, 5, 10, 0.76);
+    display: flex; align-items: center; justify-content: center; z-index: 90; padding: 14px;
+  }
+  .modal-card {
+    background: var(--panel); border: 2px solid var(--border-hi);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65);
+    width: min(680px, 100%); max-height: 90vh; display: flex; flex-direction: column;
+  }
+  .modal-card.narrow { width: min(440px, 100%); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 2px solid var(--border); font-weight: 700; color: var(--accent); }
+  .modal-body { padding: 12px 14px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+  .modal-foot { padding: 10px 14px; border-top: 2px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field.full { grid-column: 1 / -1; }
+  .field label { font-size: 11px; color: var(--muted); }
+  .traits-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+  .trait-chip {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px;
+    border: 1px solid var(--border); background: var(--panel-2); font-size: 11px; cursor: pointer;
+  }
+  .trait-chip input { margin: 0; }
+
+  /* 16x16 像素小画笔编辑器 */
+  .pixel-editor-wrap { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+  #pixel-brush-canvas { border: 2px solid var(--border-hi); background: repeating-conic-gradient(#1f1c28 0% 25%, #181620 0% 50%) 50% / 16px 16px; cursor: crosshair; }
+  .slot-bar { display: flex; flex-wrap: wrap; gap: 5px; }
+  .slot-btn {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px;
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--text); font-size: 11px; cursor: pointer;
+  }
+  .slot-btn.active { border-color: var(--accent); }
+  .swatch { width: 12px; height: 12px; border: 1px solid #000; display: inline-block; }
+
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: #241f30; border: 2px solid var(--accent); color: var(--text);
+    padding: 6px 14px; font-size: 12px; font-family: var(--px-font); z-index: 120;
+    opacity: 0; pointer-events: none; transition: opacity .15s;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--danger); color: #ffc6c6; }
+  .hidden { display: none !important; }
+
+  /* ── 顶栏模式切换与状态视角条 ── */
+  .mode-switch {
+    display: inline-flex; border: 2px solid var(--border); background: #131119; padding: 2px; gap: 2px;
+  }
+  .mode-pill {
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    padding: 3px 9px; font-size: 12px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }
+  .mode-pill:hover { color: var(--text); }
+  .mode-pill.active {
+    border-color: var(--accent); background: #362231; color: #ffd9e6;
+  }
+  .stage-shell.compact {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+    grid-template-rows: 0 minmax(0, 1fr) 0;
+    gap: 0;
+  }
+  .status-view-bar {
+    border: 2px solid var(--border); background: var(--panel); padding: 5px 8px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto;
+  }
+
+  /* ── 建造侧栏三合一子标签 ── */
+  .builder-subtabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .bsub-tab {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--muted);
+    padding: 5px 4px; font-size: 11px; font-weight: 700; cursor: pointer; text-align: center;
+  }
+  .bsub-tab:hover { border-color: var(--border-hi); color: var(--text); }
+  .bsub-tab.active { border-color: var(--accent); background: #2d243b; color: var(--text); }
+  .bsub-pane { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+
+  /* ── 世界选择大厅 (World Hub) ── */
+  .world-hub { display: flex; flex-direction: column; height: 100vh; width: 100vw; background: var(--bg); }
+  .hub-body { flex: 1 1 auto; overflow: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .hub-intro {
+    border: 2px solid var(--border); background: var(--panel); padding: 10px 14px;
+    font-size: 12px; color: var(--muted); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  }
+  .world-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px;
+  }
+  .world-card {
+    border: 2px solid var(--border); background: var(--panel); padding: 12px;
+    display: flex; flex-direction: column; gap: 8px; transition: border-color .12s;
+  }
+  .world-card:hover { border-color: var(--border-hi); }
+  .world-card.active-world { border-color: var(--accent); background: #221b2b; }
+  .world-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .world-card-title { font-weight: 700; font-size: 15px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .world-card-id { font-size: 10px; font-family: var(--px-font); color: var(--muted); }
+  .world-pal-bar { display: flex; height: 8px; border: 1px solid var(--border); overflow: hidden; }
+  .world-pal-swatch { flex: 1 1 25%; height: 100%; }
+  .world-card-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; font-family: var(--px-font); color: var(--muted); }
+  .world-card-desc {
+    font-size: 12px; color: #cfc7dc; line-height: 1.45; min-height: 34px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .world-card-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; border-top: 1px dashed var(--border); }
+
+  /* ── 世界菜单弹层按钮网格 ── */
+  .menu-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .menu-item-btn {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 9px 10px; text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 2px;
+  }
+  .menu-item-btn:hover { border-color: var(--border-hi); background: #2d273c; }
+  .menu-item-btn.primary { border-color: var(--accent); background: #362231; }
+  .menu-item-btn.danger { border-color: #9e4747; color: #ffc2c2; }
+  .menu-item-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .menu-item-btn b { font-size: 12px; }
+  .menu-item-btn span { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<!-- 1. 世界选择大厅 -->
+<div id="world-hub" class="world-hub hidden">
+  <header class="topbar">
+    <span class="brand">◈ NANAMI_WORLD · 世界大厅</span>
+    <span class="pill" id="hub-world-count">0 个世界</span>
+    <span class="pill" id="hub-light-pill"><span class="dot" id="hub-light-dot"></span><span id="hub-light-text">12:00 白天</span></span>
+    <div class="spacer"></div>
+    <button class="px-btn" id="btn-hub-import-actor">👤 导入角色</button>
+    <button class="px-btn" id="btn-hub-gen-world">🗺️ LLM 生成新世界</button>
+    <button class="px-btn primary" id="btn-hub-new-world">➕ 新建空白世界</button>
+    <button class="px-btn" id="btn-hub-refresh">🔄 刷新</button>
+  </header>
+  <div class="hub-body">
+    <div class="hub-intro">
+      <span>选择任一世界进入陪伴；也可点「↗ 独立窗口」为多个世界分别打开独立窗口，随时创建或清理世界。</span>
+      <span id="hub-actor-summary" style="font-family:var(--px-font);color:var(--accent-2);"></span>
+    </div>
+    <div id="world-card-grid" class="world-grid"></div>
+  </div>
+</div>
+
+<!-- 2. 独立世界窗口 -->
+<div id="world-window" class="app hidden">
+  <header class="topbar">
+    <button class="px-btn" id="btn-go-hub" title="返回世界选择大厅">🌍 世界列表</button>
+    <span class="brand" id="cur-world-title">◈ NANAMI_WORLD</span>
+    <span class="pill" id="pill-light"><span class="dot" id="light-dot"></span><span id="light-text">12:00 白天</span></span>
+    <button class="px-btn" id="btn-popout-world" title="在独立窗口中打开当前世界">↗ 独立窗口</button>
+
+    <div class="mode-switch" id="ui-mode-switch">
+      <button class="mode-pill active" data-uimode="play">💬 陪伴互动</button>
+      <button class="mode-pill" data-uimode="build">⛏ 建造装修</button>
+      <button class="mode-pill" data-uimode="status">👁 视角与状态</button>
+    </div>
+
+    <div class="spacer"></div>
+    <select id="actor-select" class="px-sel" title="当前观测角色"></select>
+    <button class="px-btn" id="btn-auto-step" title="立即推进一次心跳，让她按自己想法去行动">💓 自主行动</button>
+    <button class="px-btn" id="btn-auto-life" title="每 15 秒自动让角色按内心驱力生活">🤖 自动生活: 关</button>
+    <button class="px-btn" id="btn-world-menu" title="地图生成、导入角色、调色板、时间与管理菜单">⚙ 世界菜单</button>
+  </header>
+
+  <main class="main">
+    <section class="stage-col">
+      <div class="build-bar hidden" id="build-bar">
+        <button class="px-btn tool-btn active" data-tool="select" title="点击查看互动、放置家具或拖拽移动">🖐 互动/移动</button>
+        <button class="px-btn tool-btn" data-tool="paint_tile" title="左键按住拖动画地形或墙体方块">🧱 铺方块</button>
+        <button class="px-btn tool-btn" data-tool="rect_tile" title="拖拽拉出矩形铺满地形">📐 矩形铺地</button>
+        <button class="px-btn tool-btn" data-tool="hollow_wall" title="拖拽围出空心房间墙体">🏰 矩形围墙</button>
+        <button class="px-btn tool-btn" data-tool="pickaxe" title="点按或拖拽拆除物品/墙体恢复地面">⛏ 镐子拆除</button>
+        <span class="build-sep"></span>
+        <label class="trait-chip" title="铺设方块触及地图边缘时自动向外延展 4 格"><input type="checkbox" id="chk-auto-expand" checked> ⚡ 边缘扩图</label>
+        <div class="spacer"></div>
+        <span class="pill" id="space-size-pill">12×9</span>
+        <button class="px-btn" id="btn-zoom-out" style="padding:2px 6px;" title="缩小视野">🔍-</button>
+        <span id="zoom-val" style="font-size:11px;font-family:var(--px-font);color:var(--muted);min-width:34px;text-align:center;">100%</span>
+        <button class="px-btn" id="btn-zoom-in" style="padding:2px 6px;" title="放大视野">🔍+</button>
+        <button class="px-btn" id="btn-focus-actor" style="padding:2px 6px;" title="镜头居中角色">🎯</button>
+      </div>
+
+      <div class="status-view-bar hidden" id="status-view-bar">
+        <button class="px-btn" id="btn-eye">👁 她的文字视角</button>
+        <span style="font-size:11px;color:var(--muted);">开启后可直观看见 LLM 读取的世界文本与 [物品ID] 锚点；点击锚点可跳回像素定位。</span>
+        <div class="spacer"></div>
+        <button class="px-btn" id="btn-status-focus" style="padding:2px 7px;font-size:11px;">🎯 居中角色</button>
+      </div>
+
+      <div class="stage-shell compact" id="stage-shell">
+        <button class="expand-edge-btn expand-n hidden" data-expand="north" title="向北无限拓展地图边界 (+4 行)">⬆ 北扩 +4</button>
+        <button class="expand-edge-btn expand-w hidden" data-expand="west" title="向西无限拓展地图边界 (+4 列)">⬅ 西 +4</button>
+        <div class="stage-wrap" id="stage-wrap">
+          <canvas id="world-canvas" width="576" height="432"></canvas>
+          <div id="terminal-view" class="hidden"></div>
+        </div>
+        <button class="expand-edge-btn expand-e hidden" data-expand="east" title="向东无限拓展地图边界 (+4 列)">东 +4 ➡</button>
+        <button class="expand-edge-btn expand-s hidden" data-expand="south" title="向南无限拓展地图边界 (+4 行)">⬇ 南扩 +4</button>
+      </div>
+
+      <div class="inspector hidden" id="inspector">
+        <div class="meta">
+          <div class="title" id="insp-title">点击画布物品查看与互动</div>
+          <div class="sub" id="insp-sub">拖动物品或角色贴图可直接调整坐标。</div>
+        </div>
+        <div class="acts" id="insp-acts"></div>
+        <button class="px-btn" id="btn-unselect" style="padding:3px 7px;font-size:11px;" title="关闭选中栏">✕</button>
+      </div>
+
+      <div class="dialogue-dock" id="dialogue-dock">
+        <div class="portrait-card" id="dock-portrait-card" title="点击查看/切换角色包全部心情立绘">
+          <div class="portrait-frame" id="dock-portrait-frame">
+            <img id="dock-portrait-img" class="hidden" alt="角色立绘">
+            <span id="dock-portrait-fallback" class="portrait-fallback">?</span>
+            <span id="dock-portrait-mode" class="portrait-mode-pill">自动</span>
+          </div>
+          <div class="portrait-tag" id="dock-portrait-tag">未导入角色</div>
+        </div>
+        <div class="chat-box">
+          <div class="chat-head">
+            <span>💬 与 <b id="chat-actor-name">她</b> 对话</span>
+            <span class="chat-mood-badge" id="chat-mood-badge">待机</span>
+            <span class="chat-mood-badge" id="chat-goal-badge" style="color:var(--ok);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🎯 待机</span>
+            <div class="spacer"></div>
+            <button class="px-btn" id="btn-open-expr" style="padding:2px 7px;font-size:11px;">🖼 切换立绘</button>
+            <button class="px-btn" id="btn-chat-clear" style="padding:2px 7px;font-size:11px;">清空记录</button>
+          </div>
+          <div class="chat-log" id="chat-log"></div>
+          <div class="chat-input-row">
+            <input class="px-inp" id="chat-input" placeholder="对她说点什么（如：好累啊去沙发坐会儿吧 / 帮我开下台灯 / 尝尝桌上的茶）" maxlength="240">
+            <button class="px-btn primary" id="btn-chat-send">发送</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side-col hidden" id="side-col">
+      <div class="side-body" id="tab-assets">
+        <div class="sec-box">
+          <div class="sec-title">
+            <span>放置手势</span>
+            <span id="place-hint">未选中放置笔刷</span>
+            <button class="px-btn hidden" id="btn-cancel-brush" style="padding:1px 6px;font-size:10px;">取消放置</button>
+          </div>
+          <div class="delivery-toggle">
+            <button class="px-btn active" id="mode-silent" data-mode="silent">🤫 悄悄放在空间</button>
+            <button class="px-btn" id="mode-give" data-mode="give">🎁 直接递给她</button>
+          </div>
+        </div>
+
+        <div class="builder-subtabs" id="builder-subtabs">
+          <button class="bsub-tab active" data-bsub="furniture">🪑 家具 (<span id="builtin-bp-count">28</span>)</button>
+          <button class="bsub-tab" data-bsub="tiles">🧱 方块 (<span id="tile-count">16</span>)</button>
+          <button class="bsub-tab" data-bsub="forge">✨ 造物 (<span id="custom-bp-count">0</span>)</button>
+        </div>
+
+        <div class="bsub-pane" id="bsub-furniture">
+          <div class="sec-box">
+            <div class="cat-bar" id="bp-cat-bar">
+              <button class="cat-chip active" data-cat="all">全部</button>
+              <button class="cat-chip" data-cat="furniture">家具</button>
+              <button class="cat-chip" data-cat="food">餐饮</button>
+              <button class="cat-chip" data-cat="play">娱乐</button>
+              <button class="cat-chip" data-cat="decor">装饰/户外</button>
+            </div>
+            <div class="bp-grid" id="builtin-bp-grid"></div>
+          </div>
+        </div>
+
+        <div class="bsub-pane hidden" id="bsub-tiles">
+          <div class="sec-box">
+            <div class="sec-title"><span>🧱 MC 地形与墙体方块</span><span id="active-tile-label">暖木地板</span></div>
+            <div class="tile-grid" id="tile-grid"></div>
+            <div style="margin-top:8px;font-size:11px;color:var(--muted);line-height:1.45;">
+              点选方块后，用上方「🧱 铺方块」「📐 矩形铺地」或「🏰 矩形围墙」在画布直接搭建。
+            </div>
+          </div>
+        </div>
+
+        <div class="bsub-pane hidden" id="bsub-forge">
+          <div class="sec-box">
+            <div class="sec-title"><span>✨ 以文生像素造物</span><span>0 显存</span></div>
+            <div class="forge-row">
+              <input class="px-inp" id="forge-input" placeholder="如：桌角一杯冒着热气的抹茶" maxlength="180">
+              <button class="px-btn primary" id="btn-forge">生成</button>
+            </div>
+          </div>
+
+          <div class="sec-box">
+            <div class="sec-title"><span>我的自定义蓝图</span><span>点选即放</span></div>
+            <div class="bp-grid" id="custom-bp-grid"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="side-body hidden" id="tab-status">
+        <div class="sec-box">
+          <div class="sec-title"><span>角色状态监控</span><span id="vital-source">builtin</span></div>
+          <div id="actor-status-name" style="font-weight:700;">未导入角色</div>
+          <div id="actor-status-pos" style="font-size:11px;color:var(--muted);font-family:var(--px-font);">坐标：—</div>
+          <div class="vitals-row">
+            <div class="vital-cell"><b id="v-energy">—</b><span>精力</span></div>
+            <div class="vital-cell"><b id="v-sleep">—</b><span>困意</span></div>
+            <div class="vital-cell"><b id="v-mood">—</b><span>心情</span></div>
+          </div>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title"><span>当前心愿与内在驱力</span><span id="aut-drive" style="color:var(--accent-2);">curiosity</span></div>
+          <div id="aut-goal" style="font-size:12px;font-weight:700;color:var(--ok);margin-bottom:3px;">🎯 —</div>
+          <div id="aut-thought" style="font-size:11px;color:var(--text);font-family:var(--px-font);line-height:1.45;margin-bottom:6px;">💭 暂无碎碎念</div>
+          <div class="vitals-row" style="grid-template-columns:repeat(2,1fr);margin-bottom:6px;">
+            <div class="vital-cell"><b id="v-full">—</b><span>饱腹度</span></div>
+            <div class="vital-cell"><b id="v-curiosity">—</b><span>好奇心</span></div>
+          </div>
+          <button class="px-btn primary" id="btn-status-auto-step" style="width:100%;font-size:11px;">💓 让她立刻做件想做的事</button>
+        </div>
+
+        <div class="sec-box">
+          <div class="sec-title"><span>💞 态度与情感指针（用户 & 同伴）</span><span id="rel-count-label">0</span></div>
+          <div id="actor-relations-list" style="display:flex;flex-direction:column;gap:5px;max-height:210px;overflow:auto;"></div>
+        </div>
+
+        <div class="sec-box" style="flex:1 1 auto; display:flex; flex-direction:column; min-height:140px;">
+          <div class="sec-title"><span>不可篡改事件流（events.jsonl）</span><button class="px-btn" id="btn-refresh" style="padding:1px 6px;font-size:10px;">刷新</button></div>
+          <ul class="event-list" id="event-list" style="overflow:auto; flex:1 1 auto;"></ul>
+        </div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<!-- 通用页内弹层容器 -->
+<div id="modal-mask" class="modal-mask hidden">
+  <div id="modal-card" class="modal-card">
+    <div class="modal-head"><span id="modal-title">弹层</span><button class="px-btn" id="modal-close">✕</button></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.world";
+const PAGE = "world_canvas";
+const TILE = 48; // 16px * 3x 清晰整数像素倍率
+
+const state = {
+  token: "",
+  snap: null,
+  view: "hub",        // "hub" | "world"
+  uiMode: "play",     // "play" | "build" | "status"
+  builderSub: "furniture", // "furniture" | "tiles" | "forge"
+  windowSpaceId: "",
+  isPopout: false,
+  terminal: { text: "", anchors: [] },
+  chatHistory: [],
+  eyeMode: false,
+  deliveryMode: "silent",
+  tool: "select",
+  selectedTileId: "tatami",
+  bpCategory: "all",
+  autoExpand: true,
+  autoLife: false,
+  autoStepping: false,
+  zoom: 1.0,
+  tileMap: new Map(),
+  selectedBlueprintId: "",
+  selectedEntityId: "",
+  highlightPos: null,
+  hoverCell: null,
+  drag: null,
+  imageCache: new Map(),
+};
+
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("shinsekai_bridge_token") || params.get("token") || params.get("bridge_token") || "";
+}
+function withToken(url) {
+  if (!state.token) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token);
+}
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function toast(msg, isErr) {
+  const box = el("toast");
+  box.textContent = msg;
+  box.className = "toast show" + (isErr ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { box.className = "toast"; }, 2600);
+}
+
+async function runAction(actionId, values) {
+  const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/actions/" + encodeURIComponent(actionId));
+  const resp = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: values || {} }),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && (data.message || data.error)) || ("HTTP " + resp.status));
+  const res = (data && data.result) || {};
+  if (res.ok === false) throw new Error(res.error || "操作失败");
+  if (res.snapshot) applySnapshot(res.snapshot, res.terminal, res.chat_history);
+  return res;
+}
+
+function renderViewShell() {
+  const inWorld = state.view === "world";
+  el("world-hub").classList.toggle("hidden", inWorld);
+  el("world-window").classList.toggle("hidden", !inWorld);
+  if (state.snap && state.snap.space && inWorld) {
+    document.title = state.snap.space.name + " · 七海千秋";
+  } else {
+    document.title = "世界大厅 · 七海千秋";
+  }
+
+  const isBuild = state.uiMode === "build";
+  const isStatus = state.uiMode === "status";
+  el("build-bar").classList.toggle("hidden", !isBuild);
+  el("status-view-bar").classList.toggle("hidden", !isStatus);
+  el("side-col").classList.toggle("hidden", !(isBuild || isStatus));
+  el("tab-assets").classList.toggle("hidden", !isBuild);
+  el("tab-status").classList.toggle("hidden", !isStatus);
+  el("stage-shell").classList.toggle("compact", !isBuild);
+  document.querySelectorAll(".expand-edge-btn").forEach((b) => b.classList.toggle("hidden", !isBuild));
+
+  document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.uimode === state.uiMode);
+  });
+  document.querySelectorAll("#builder-subtabs .bsub-tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.bsub === state.builderSub);
+  });
+  el("bsub-furniture").classList.toggle("hidden", state.builderSub !== "furniture");
+  el("bsub-tiles").classList.toggle("hidden", state.builderSub !== "tiles");
+  el("bsub-forge").classList.toggle("hidden", state.builderSub !== "forge");
+}
+
+function setUiMode(mode) {
+  state.uiMode = (mode === "build" || mode === "status") ? mode : "play";
+  if (state.uiMode !== "build") {
+    state.selectedBlueprintId = "";
+    state.tool = "select";
+    const cancelBtn = el("btn-cancel-brush");
+    if (cancelBtn) cancelBtn.classList.add("hidden");
+    const hintEl = el("place-hint");
+    if (hintEl) hintEl.textContent = "未选中放置笔刷";
+    document.querySelectorAll(".tool-btn[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === "select"));
+  }
+  if (state.uiMode !== "status" && state.eyeMode) {
+    state.eyeMode = false;
+    if (el("btn-eye")) el("btn-eye").classList.remove("eye-on");
+  }
+  renderViewShell();
+  renderAssetsPanel();
+  renderInspector();
+  renderViewport();
+}
+
+function setBuilderSub(sub) {
+  state.builderSub = (sub === "tiles" || sub === "forge") ? sub : "furniture";
+  renderViewShell();
+}
+
+function openStandaloneWorld(spaceId) {
+  const url = withToken(window.location.pathname + "?space_id=" + encodeURIComponent(spaceId) + "&view=world");
+  const win = window.open(url, "nanami_world_" + String(spaceId || "main"), "width=1240,height=820,resizable=yes,scrollbars=yes");
+  if (!win) {
+    toast("浏览器拦截了独立窗口弹出，已切换为当前窗口进入", true);
+    enterWorld(spaceId);
+    return;
+  }
+  win.focus();
+}
+
+function enterWorld(spaceId) {
+  state.selectedEntityId = "";
+  state.selectedBlueprintId = "";
+  state.windowSpaceId = spaceId;
+  state.view = "world";
+  renderViewShell();
+  runAction("switch_space", { space_id: spaceId }).then(() => {
+    focusActiveActor();
+  }).catch((e) => toast(e.message, true));
+}
+
+function applySnapshot(snap, terminal, chatHistory) {
+  state.snap = snap;
+  if (terminal) state.terminal = terminal;
+  if (Array.isArray(chatHistory)) state.chatHistory = chatHistory;
+  if (state.view === "world" && snap && snap.space && snap.space.space_id) {
+    state.windowSpaceId = snap.space.space_id;
+  }
+  state.tileMap = new Map((snap.tile_catalog || []).map((t) => [t.tile_id, t]));
+  const sizePill = el("space-size-pill");
+  if (sizePill && snap.space) sizePill.textContent = snap.space.width + "×" + snap.space.height;
+  renderViewShell();
+  renderWorldHub();
+  renderTopbar();
+  renderTilePalette();
+  renderAssetsPanel();
+  renderStatusPanel();
+  renderInspector();
+  renderDialogueDock();
+  renderViewport();
+}
+
+function setBuilderTool(toolName) {
+  state.tool = toolName || "select";
+  const cancelBtn = el("btn-cancel-brush");
+  const hintEl = el("place-hint");
+  if (state.tool !== "select" && state.selectedBlueprintId) {
+    state.selectedBlueprintId = "";
+    if (cancelBtn) cancelBtn.classList.add("hidden");
+    if (hintEl) hintEl.textContent = "建造模式中";
+  } else if (state.tool === "select" && !state.selectedBlueprintId) {
+    if (hintEl) hintEl.textContent = "未选中放置笔刷";
+  }
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tool === state.tool);
+  });
+  renderViewport();
+}
+
+function resolveTileMeta(space, x, y) {
+  const tid = (space.tiles && space.tiles[x + "," + y]) || "";
+  if (tid && state.tileMap.has(tid)) return { tid, custom: true, meta: state.tileMap.get(tid) };
+  const wallRows = Number(space.wall_rows || 0);
+  const defTid = (y >= 0 && y < wallRows) ? "wood_wall" : "wood_floor";
+  return { tid: defTid, custom: false, meta: state.tileMap.get(defTid) || { tile_id: defTid, is_wall: defTid === "wood_wall", walkable: defTid !== "wood_wall", texture: defTid === "wood_wall" ? "wood_wall" : "planks", main: "#8b5e3c", alt: "#7d5333", accent: "#a3704c" } };
+}
+
+function drawCellTile(ctx, rawTid, x, y, wallRows, px, py, pal, tileSize) {
+  const S = tileSize || TILE;
+  const sc = S / 48;
+  const hasExplicit = Boolean(rawTid && state.tileMap.has(rawTid));
+  const tid = hasExplicit ? rawTid : ((y >= 0 && y < wallRows) ? "wood_wall" : "wood_floor");
+  const meta = state.tileMap.get(tid) || { texture: "planks", is_wall: false, main: pal.room.floor_a, alt: pal.room.floor_b, accent: "#a3704c" };
+
+  if (!hasExplicit) {
+    if (tid === "wood_wall") {
+      ctx.fillStyle = pal.room.wall_base;
+      ctx.fillRect(px, py, S, S);
+      ctx.fillStyle = pal.room.wall_trim;
+      ctx.fillRect(px, py + S - Math.max(2, Math.round(6 * sc)), S, Math.max(2, Math.round(6 * sc)));
+    } else {
+      ctx.fillStyle = (x + y) % 2 === 0 ? pal.room.floor_a : pal.room.floor_b;
+      ctx.fillRect(px, py, S, S);
+      ctx.fillStyle = "rgba(0,0,0,0.06)";
+      ctx.fillRect(px, py + S - 1, S, 1);
+      ctx.fillRect(px + S - 1, py, 1, S);
+    }
+    return;
+  }
+
+  ctx.fillStyle = (x + y) % 2 === 0 ? meta.main : (meta.is_wall ? meta.main : meta.alt);
+  ctx.fillRect(px, py, S, S);
+
+  const tex = meta.texture || "planks";
+  if (meta.is_wall) {
+    if (tex === "brick") {
+      ctx.fillStyle = meta.alt;
+      ctx.fillRect(px, py + Math.round(S * 0.33), S, Math.max(1, Math.round(2 * sc)));
+      ctx.fillRect(px, py + Math.round(S * 0.66), S, Math.max(1, Math.round(2 * sc)));
+      ctx.fillRect(px + Math.round(S * 0.5), py, Math.max(1, Math.round(2 * sc)), Math.round(S * 0.33));
+      ctx.fillRect(px + Math.round(S * 0.25), py + Math.round(S * 0.33), Math.max(1, Math.round(2 * sc)), Math.round(S * 0.33));
+      ctx.fillStyle = meta.accent;
+      ctx.fillRect(px + Math.round(4 * sc), py + Math.round(4 * sc), Math.round(10 * sc), Math.round(4 * sc));
+    } else if (tex === "glass") {
+      ctx.fillStyle = meta.accent;
+      ctx.fillRect(px + Math.round(6 * sc), py + Math.round(6 * sc), Math.round(8 * sc), Math.round(20 * sc));
+      ctx.fillRect(px + Math.round(16 * sc), py + Math.round(12 * sc), Math.round(4 * sc), Math.round(14 * sc));
+    }
+    ctx.fillStyle = meta.alt;
+    ctx.fillRect(px, py + S - Math.max(3, Math.round(7 * sc)), S, Math.max(3, Math.round(7 * sc)));
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.fillRect(px, py, S, Math.max(1, Math.round(2 * sc)));
+    return;
+  }
+
+  if (tex === "tatami") {
+    ctx.strokeStyle = meta.accent;
+    ctx.lineWidth = Math.max(1, Math.round(2 * sc));
+    ctx.strokeRect(px + 2, py + 2, S - 4, S - 4);
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.fillRect(px + Math.round(S * 0.2), py + Math.round(S * 0.5), Math.round(S * 0.6), 1);
+  } else if (tex === "grass" || tex === "flowers") {
+    ctx.fillStyle = meta.accent;
+    ctx.fillRect(px + Math.round(10 * sc), py + Math.round(14 * sc), Math.max(2, Math.round(3 * sc)), Math.max(2, Math.round(4 * sc)));
+    ctx.fillRect(px + Math.round(30 * sc), py + Math.round(28 * sc), Math.max(2, Math.round(3 * sc)), Math.max(2, Math.round(4 * sc)));
+    if (tex === "flowers") {
+      ctx.fillStyle = "#ffe680";
+      ctx.fillRect(px + Math.round(18 * sc), py + Math.round(22 * sc), Math.max(2, Math.round(4 * sc)), Math.max(2, Math.round(4 * sc)));
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(px + Math.round(32 * sc), py + Math.round(10 * sc), Math.max(2, Math.round(4 * sc)), Math.max(2, Math.round(4 * sc)));
+    }
+  } else if (tex === "water") {
+    ctx.fillStyle = meta.accent;
+    ctx.fillRect(px + Math.round(6 * sc), py + Math.round(14 * sc), Math.round(14 * sc), Math.max(2, Math.round(3 * sc)));
+    ctx.fillRect(px + Math.round(22 * sc), py + Math.round(30 * sc), Math.round(16 * sc), Math.max(2, Math.round(3 * sc)));
+  } else if (tex === "leaves") {
+    ctx.fillStyle = meta.accent;
+    ctx.fillRect(px + Math.round(6 * sc), py + Math.round(6 * sc), Math.round(12 * sc), Math.round(12 * sc));
+    ctx.fillRect(px + Math.round(24 * sc), py + Math.round(18 * sc), Math.round(14 * sc), Math.round(14 * sc));
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.fillRect(px, py + S - Math.max(2, Math.round(4 * sc)), S, Math.max(2, Math.round(4 * sc)));
+  } else if (tex === "stone" || tex === "cobble") {
+    ctx.strokeStyle = meta.accent;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px + 2, py + 2, S / 2 - 3, S / 2 - 3);
+    ctx.strokeRect(px + S / 2 + 1, py + S / 2 + 1, S / 2 - 3, S / 2 - 3);
+  } else if (tex === "carpet") {
+    ctx.fillStyle = meta.accent;
+    ctx.fillRect(px + 3, py + 3, S - 6, 2);
+    ctx.fillRect(px + 3, py + S - 5, S - 6, 2);
+  } else if (tex === "sand") {
+    ctx.fillStyle = meta.accent;
+    ctx.fillRect(px + Math.round(12 * sc), py + Math.round(16 * sc), 3, 2);
+    ctx.fillRect(px + Math.round(30 * sc), py + Math.round(34 * sc), 3, 2);
+  } else {
+    ctx.fillStyle = "rgba(0,0,0,0.1)";
+    ctx.fillRect(px, py + S - 1, S, 1);
+    ctx.fillRect(px + S - 1, py, 1, S);
+  }
+}
+
+/* ── 像素贴图渲染辅助 ── */
+function resolveSlotColor(slot, slotColors, palette) {
+  const sb = (palette && palette.sprite_base) || {};
+  const custom = (slotColors && slotColors[slot]) || "";
+  if (custom) return custom;
+  if (slot === "o") return sb.outline || "#21181b";
+  if (slot === "1") return sb.wood_main || "#9e6b43";
+  if (slot === "2") return sb.wood_hi || "#c99364";
+  if (slot === "3") return sb.wood_lo || "#6d4528";
+  if (slot === "a") return "#ffd166";
+  if (slot === "b") return "#88d4f5";
+  return null;
+}
+
+function chooseEntityFrame(ent) {
+  const sp = ent.sprite || {};
+  const frames = sp.frames || {};
+  const tr = ent.traits || {};
+  if (tr.switchable) {
+    const k = tr.switchable.is_on ? "on" : "off";
+    if (frames[k]) return frames[k];
+  }
+  if (tr.container) {
+    const k = tr.container.is_open ? "open" : "closed";
+    if (frames[k]) return frames[k];
+  }
+  if (tr.restable) {
+    const k = tr.restable.occupied_by ? "occupied" : "idle";
+    if (frames[k]) return frames[k];
+  }
+  if (tr.consumable) {
+    const left = Number(tr.consumable.uses_left || 0);
+    if (left <= 0 && frames.empty) return frames.empty;
+    if (left < Number(tr.consumable.max_uses || 2) && frames.half) return frames.half;
+    if (tr.thermal && tr.thermal.temp === "hot" && frames.hot) return frames.hot;
+    if (frames.full) return frames.full;
+  }
+  if (tr.inscribable) {
+    const has = (tr.inscribable.entries || []).length > 0;
+    if (has && frames.written) return frames.written;
+    if (!has && frames.blank) return frames.blank;
+    if (frames.note) return frames.note;
+  }
+  if (tr.portal) {
+    const k = tr.portal.is_open ? "open" : "closed";
+    if (frames[k]) return frames[k];
+  }
+  return frames.default || Object.values(frames)[0] || [];
+}
+
+function drawPixelGrid(ctx, rows, w, h, slotColors, palette, dx, dy, dw, dh) {
+  if (!rows || !rows.length) return;
+  const cw = dw / w;
+  const ch = dh / h;
+  for (let y = 0; y < h; y++) {
+    const row = rows[y] || "";
+    for (let x = 0; x < w; x++) {
+      const slot = row[x] || ".";
+      if (slot === ".") continue;
+      const color = resolveSlotColor(slot, slotColors, palette);
+      if (!color) continue;
+      ctx.fillStyle = color;
+      ctx.fillRect(Math.floor(dx + x * cw), Math.floor(dy + y * ch), Math.ceil(cw), Math.ceil(ch));
+    }
+  }
+}
+
+function loadCachedImage(dataUrl) {
+  if (!dataUrl) return null;
+  if (state.imageCache.has(dataUrl)) return state.imageCache.get(dataUrl);
+  const img = new Image();
+  img.onload = () => renderViewport();
+  img.src = dataUrl;
+  state.imageCache.set(dataUrl, img);
+  return img;
+}
+
+function drawSprite(ctx, sprite, frameRows, palette, dx, dy, dw, dh, fallbackLabel, accentColor) {
+  const mode = (sprite && sprite.mode) || "pixel_grid";
+  if (mode === "image" && sprite.image_data_url) {
+    const img = loadCachedImage(sprite.image_data_url);
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, dx, dy, dw, dh);
+      const snapRatio = Number(sprite.palette_snap || 0);
+      if (snapRatio > 0 && palette && palette.room) {
+        ctx.globalCompositeOperation = "source-atop";
+        ctx.globalAlpha = Math.min(0.45, snapRatio * 0.45);
+        ctx.fillStyle = palette.room.floor_a || "#8b5e3c";
+        ctx.fillRect(dx, dy, dw, dh);
+      }
+      ctx.restore();
+      return;
+    }
+  }
+  if (mode === "token") {
+    ctx.fillStyle = accentColor || "#e8a2b8";
+    ctx.fillRect(dx + 8, dy + 8, dw - 16, dh - 12);
+    ctx.strokeStyle = "#18141c";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dx + 8, dy + 8, dw - 16, dh - 12);
+    ctx.fillStyle = "#141118";
+    ctx.font = "bold 16px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText((fallbackLabel || "?").slice(0, 1), dx + dw / 2, dy + dh / 2 + 2);
+    return;
+  }
+  drawPixelGrid(
+    ctx,
+    frameRows,
+    Number(sprite.w || 16),
+    Number(sprite.h || 16),
+    sprite.slot_colors,
+    palette,
+    dx,
+    dy,
+    dw,
+    dh,
+  );
+}
+
+/* ── 主视区渲染：Canvas 像素小屋 vs 她的视角终端 ── */
+function renderViewport() {
+  const snap = state.snap;
+  if (!snap) return;
+  const canvas = el("world-canvas");
+  const term = el("terminal-view");
+
+  if (state.eyeMode) {
+    canvas.classList.add("hidden");
+    term.classList.remove("hidden");
+    renderTerminal();
+    return;
+  }
+  term.classList.add("hidden");
+  canvas.classList.remove("hidden");
+
+  const space = snap.space;
+  const pal = snap.palette;
+  const lighting = snap.lighting;
+  const cols = space.width;
+  const rows = space.height;
+  const wallRows = space.wall_rows || 1;
+  const W = cols * TILE;
+  const H = rows * TILE;
+  if (canvas.width !== W || canvas.height !== H) {
+    canvas.width = W;
+    canvas.height = H;
+  }
+  canvas.style.width = Math.round(W * state.zoom) + "px";
+  canvas.style.height = Math.round(H * state.zoom) + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+
+  // 1. MC 地形、墙体方块与木地板
+  const spaceTiles = space.tiles || {};
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const px = x * TILE;
+      const py = y * TILE;
+      const rawTid = spaceTiles[x + "," + y] || "";
+      drawCellTile(ctx, rawTid, x, y, wallRows, px, py, pal, TILE);
+    }
+  }
+
+  // 2. 墙面窗景（仅当该处为墙体方块时绘制）
+  const winCellX = Math.max(1, Math.min(cols - 3, Math.floor(cols / 2) - 1));
+  const winTileA = resolveTileMeta(space, winCellX, 0);
+  const winTileB = resolveTileMeta(space, winCellX + 1, 0);
+  if (winTileA.meta.is_wall && winTileB.meta.is_wall) {
+    const winX = winCellX * TILE;
+    const skyMap = { dawn: "#e89f8e", day: "#89cff0", dusk: "#c97968", night: "#1c2447" };
+    ctx.fillStyle = pal.sprite_base.outline || "#21181b";
+    ctx.fillRect(winX + 4, 4, TILE * 2 - 8, TILE - 10);
+    ctx.fillStyle = skyMap[lighting.period] || "#89cff0";
+    ctx.fillRect(winX + 8, 8, TILE * 2 - 16, TILE - 18);
+    if (lighting.period === "night") {
+      ctx.fillStyle = "#fff5b8";
+      ctx.fillRect(winX + 16, 14, 3, 3);
+      ctx.fillRect(winX + 44, 18, 3, 3);
+      ctx.fillRect(winX + 64, 12, 4, 4);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.65)";
+      ctx.fillRect(winX + 16, 13, 18, 5);
+      ctx.fillRect(winX + 48, 16, 14, 4);
+    }
+    ctx.fillStyle = pal.sprite_base.outline || "#21181b";
+    ctx.fillRect(winX + TILE - 2, 6, 4, TILE - 14);
+  }
+
+  // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色
+  const drawList = [];
+  for (const ent of snap.entities) {
+    if (Number(ent.z) < 0) continue;
+    const fw = (ent.footprint && ent.footprint[0]) || 1;
+    const fh = (ent.footprint && ent.footprint[1]) || 1;
+    const yBottom = ent.y + fh + (Number(ent.z) === 1 ? 0.25 : 0);
+    drawList.push({ kind: "entity", yBottom, ent, fw, fh });
+  }
+  for (const act of snap.actors) {
+    if (act.space_id !== space.space_id) continue;
+    drawList.push({ kind: "actor", yBottom: act.y + 1 + 0.12, act });
+  }
+  drawList.sort((a, b) => a.yBottom - b.yBottom);
+
+  for (const item of drawList) {
+    if (item.kind === "entity") {
+      const ent = item.ent;
+      const dx = ent.x * TILE;
+      const dy = ent.y * TILE - (Number(ent.z) === 1 ? 12 : 0);
+      const dw = item.fw * TILE;
+      const dh = item.fh * TILE;
+      // 地面/桌面小投影
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(dx + 6, dy + dh - 6, dw - 12, 4);
+      const frame = chooseEntityFrame(ent);
+      drawSprite(ctx, ent.sprite || {}, frame, pal, dx, dy, dw, dh, ent.name, pal.terminal.accent);
+      if (ent.entity_id === state.selectedEntityId) {
+        ctx.strokeStyle = "#78d69a";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(dx + 1, dy + 1, dw - 2, dh - 2);
+      }
+      // 笔记本新字小标
+      if (ent.traits && ent.traits.inscribable && (ent.traits.inscribable.entries || []).length > 0) {
+        ctx.fillStyle = "#ffe07d";
+        ctx.fillRect(dx + dw - 11, dy + 2, 8, 8);
+        ctx.fillStyle = "#21181b";
+        ctx.fillRect(dx + dw - 8, dy + 3, 2, 4);
+        ctx.fillRect(dx + dw - 8, dy + 8, 2, 1);
+      }
+    } else {
+      const act = item.act;
+      const sp = act.sprite || {};
+      const activeSp = act.active_sprite || {};
+      const standeeImg = activeSp.data_url ? loadCachedImage(activeSp.data_url) : null;
+      const useStandee = Boolean(standeeImg && standeeImg.complete && standeeImg.naturalWidth > 0);
+      let dw = TILE;
+      let dh = Math.round(TILE * 1.5);
+      let dx = act.x * TILE;
+      let dy = (act.y + 1) * TILE - dh;
+
+      if (useStandee) {
+        const ratio = standeeImg.naturalWidth / Math.max(1, standeeImg.naturalHeight);
+        dh = Math.round(TILE * 2.15);
+        dw = Math.max(Math.round(TILE * 0.95), Math.min(Math.round(TILE * 1.85), Math.round(dh * ratio)));
+        dx = Math.round((act.x + 0.5) * TILE - dw / 2);
+        dy = (act.y + 1) * TILE - dh - 2;
+        ctx.fillStyle = "rgba(0,0,0,0.3)";
+        ctx.fillRect(act.x * TILE + 8, (act.y + 1) * TILE - 7, TILE - 16, 5);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(standeeImg, dx, dy, dw, dh);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = "rgba(0,0,0,0.28)";
+        ctx.fillRect(dx + 10, (act.y + 1) * TILE - 7, TILE - 20, 5);
+        drawSprite(ctx, sp, sp.pixels || [], pal, dx, dy, dw, dh, act.name, sp.accent_color);
+      }
+
+      // 名字标与实时心情标签
+      const labelCx = act.x * TILE + TILE / 2;
+      const labelW = Math.max(TILE - 4, 58);
+      const labelX = Math.max(2, Math.min(W - labelW - 2, labelCx - labelW / 2));
+      const labelY = Math.max(16, dy - 14);
+      ctx.fillStyle = "rgba(12,10,16,0.82)";
+      ctx.fillRect(labelX, labelY, labelW, 13);
+      ctx.fillStyle = act.actor_id === snap.active_actor_id ? "#ff9dbb" : "#e2e6f0";
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const exprTag = String(activeSp.tag || (act.expression && act.expression.tag) || "").split(/[，,、\s]/)[0];
+      const badgeText = exprTag ? (act.name.slice(0, 3) + "·" + exprTag.slice(0, 3)) : act.name.slice(0, 4);
+      ctx.fillText(badgeText, labelX + labelW / 2, labelY + 6.5);
+
+      // 状态静态角标（休息 Zzz / 沉默 ... / 碎碎念气泡 / 手持）
+      const thoughtTxt = String((act.autonomy && act.autonomy.last_thought) || "").trim();
+      if (act.posture === "resting") {
+        ctx.fillStyle = "#181d2e";
+        ctx.fillRect(labelX + labelW - 22, Math.max(2, labelY - 12), 22, 12);
+        ctx.fillStyle = "#88d4f5";
+        ctx.font = "bold 10px monospace";
+        ctx.fillText("Zzz", labelX + labelW - 11, Math.max(8, labelY - 6));
+      } else if (act.vitals && act.vitals.disengaged) {
+        ctx.fillStyle = "#2b1b24";
+        ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 12), 20, 12);
+        ctx.fillStyle = "#ff9dbb";
+        ctx.fillText("...", labelX + labelW - 10, Math.max(8, labelY - 6));
+      } else if (thoughtTxt) {
+        const bubbleStr = "💭 " + (thoughtTxt.length > 12 ? (thoughtTxt.slice(0, 12) + "…") : thoughtTxt);
+        ctx.font = "10px sans-serif";
+        const bw = Math.min(180, Math.max(54, Math.ceil(ctx.measureText(bubbleStr).width) + 12));
+        const bx = Math.max(2, Math.min(W - bw - 2, labelCx - bw / 2));
+        const by = Math.max(2, labelY - 18);
+        ctx.fillStyle = "rgba(252, 248, 240, 0.94)";
+        ctx.fillRect(bx, by, bw, 15);
+        ctx.strokeStyle = "#3d354f";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, by, bw, 15);
+        ctx.fillStyle = "#1f1926";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(bubbleStr, bx + bw / 2, by + 7.5);
+      }
+      if (act.holding_id) {
+        ctx.fillStyle = "#ffd166";
+        ctx.fillRect(act.x * TILE + TILE - 12, (act.y + 1) * TILE - 14, 9, 9);
+        ctx.strokeStyle = "#141016";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(act.x * TILE + TILE - 12, (act.y + 1) * TILE - 14, 9, 9);
+      }
+    }
+  }
+
+  // 4. 夜晚光影暗罩与台灯暖光圈
+  if (lighting.is_dark) {
+    ctx.fillStyle = pal.room.night_mask || "rgba(14, 18, 42, 0.48)";
+    ctx.fillRect(0, 0, W, H);
+  } else if (lighting.has_lamp_on) {
+    for (const lp of lighting.lamp_positions || []) {
+      const cx = (lp.x + 0.5) * TILE;
+      const cy = (lp.y + 0.5) * TILE;
+      const grad = ctx.createRadialGradient(cx, cy, 8, cx, cy, TILE * 2.5);
+      grad.addColorStop(0, pal.room.lamp_glow || "rgba(255, 214, 130, 0.36)");
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  // 5. 放物预览、MC 搭建拖选框与反查高亮
+  if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe") && state.drag.cells) {
+    const isPick = state.drag.mode === "pickaxe";
+    ctx.fillStyle = isPick ? "rgba(240, 122, 122, 0.35)" : "rgba(124, 212, 255, 0.32)";
+    ctx.strokeStyle = isPick ? "#f07a7a" : "#7cd4ff";
+    ctx.lineWidth = 2;
+    for (const c of state.drag.cells.values()) {
+      ctx.fillRect(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4);
+      ctx.strokeRect(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4);
+    }
+  } else if (state.drag && state.drag.mode === "rect" && state.hoverCell) {
+    const x0 = Math.min(state.drag.start.x, state.hoverCell.x);
+    const x1 = Math.max(state.drag.start.x, state.hoverCell.x);
+    const y0 = Math.min(state.drag.start.y, state.hoverCell.y);
+    const y1 = Math.max(state.drag.start.y, state.hoverCell.y);
+    ctx.fillStyle = "rgba(120, 214, 154, 0.25)";
+    ctx.strokeStyle = "#78d69a";
+    ctx.lineWidth = 2;
+    for (let yy = y0; yy <= y1; yy++) {
+      for (let xx = x0; xx <= x1; xx++) {
+        if (state.drag.hollow && xx > x0 && xx < x1 && yy > y0 && yy < y1) continue;
+        ctx.fillRect(xx * TILE + 2, yy * TILE + 2, TILE - 4, TILE - 4);
+        ctx.strokeRect(xx * TILE + 2, yy * TILE + 2, TILE - 4, TILE - 4);
+      }
+    }
+  } else if (state.hoverCell && state.tool !== "select") {
+    const isPick = state.tool === "pickaxe";
+    ctx.strokeStyle = isPick ? "#f07a7a" : "#7cd4ff";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(state.hoverCell.x * TILE + 2, state.hoverCell.y * TILE + 2, TILE - 4, TILE - 4);
+  } else if (state.hoverCell && state.selectedBlueprintId) {
+    const bp = snap.blueprints.find((b) => b.blueprint_id === state.selectedBlueprintId);
+    const fw = (bp && bp.footprint && bp.footprint[0]) || 1;
+    const fh = (bp && bp.footprint && bp.footprint[1]) || 1;
+    ctx.strokeStyle = "#78d69a";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(state.hoverCell.x * TILE + 2, state.hoverCell.y * TILE + 2, fw * TILE - 4, fh * TILE - 4);
+  }
+  if (state.highlightPos) {
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(state.highlightPos.x * TILE + 2, state.highlightPos.y * TILE + 2, TILE - 4, TILE - 4);
+  }
+}
+
+function renderTerminal() {
+  const term = el("terminal-view");
+  const pal = (state.snap && state.snap.palette && state.snap.palette.terminal) || {};
+  term.style.background = pal.bg || "#111418";
+  term.style.color = pal.fg || "#d7e0ea";
+  term.style.borderColor = pal.border || "#2d3542";
+
+  const raw = (state.terminal && state.terminal.text) || "（暂无世界投影）";
+  const anchors = (state.terminal && state.terminal.anchors) || [];
+  const anchorMap = new Map(anchors.map((a) => [a.entity_id, a]));
+  const escaped = esc(raw).replace(/\[([a-zA-Z0-9_]+)\]/g, (full, eid) => {
+    const hit = anchorMap.get(eid);
+    if (!hit) return full;
+    return '<span class="term-anchor" data-eid="' + esc(eid) + '" data-x="' + hit.x + '" data-y="' + hit.y + '" style="color:' + esc(pal.accent || "#ff9dbb") + '">[' + esc(eid) + "]</span>";
+  });
+  term.innerHTML =
+    '<div class="term-head"><span>👁 她此刻眼中的文字世界（唯一物理真相）</span><span style="font-size:11px;color:' + esc(pal.muted || "#728096") + '">点击任意 [物品ID] 可跳回像素画布定位</span></div>'
+    + "<div>" + escaped + "</div>";
+
+  term.querySelectorAll(".term-anchor").forEach((node) => {
+    node.addEventListener("click", () => {
+      state.selectedEntityId = node.dataset.eid || "";
+      state.highlightPos = { x: Number(node.dataset.x || 0), y: Number(node.dataset.y || 1) };
+      state.eyeMode = false;
+      el("btn-eye").classList.remove("eye-on");
+      renderInspector();
+      renderViewport();
+      setTimeout(() => { state.highlightPos = null; renderViewport(); }, 1800);
+    });
+  });
+}
+
+/* ── 世界大厅、顶部栏、右侧面板与检查器 ── */
+function renderWorldHub() {
+  const snap = state.snap;
+  const grid = el("world-card-grid");
+  if (!grid || !snap) return;
+
+  const spaces = snap.spaces || [];
+  el("hub-world-count").textContent = spaces.length + " 个世界";
+
+  const lt = snap.lighting || {};
+  const pMap = { dawn: "清晨", day: "白天", dusk: "傍晚", night: "夜晚" };
+  el("hub-light-dot").className = "dot" + (lt.is_dark ? " dark" : "");
+  el("hub-light-text").textContent = (lt.clock || "12:00") + " " + (pMap[lt.period] || "白天");
+
+  const actors = snap.actors || [];
+  el("hub-actor-summary").textContent = actors.length
+    ? ("已导入角色：" + actors.map((a) => a.name).join("、"))
+    : "尚未导入角色（点击上方「导入角色」）";
+
+  const palMap = new Map((snap.palettes || []).map((p) => [p.palette_id, p]));
+  grid.innerHTML = "";
+
+  for (const sp of spaces) {
+    const isActive = sp.space_id === snap.active_space_id;
+    const pal = palMap.get(sp.palette_id) || snap.palette || {};
+    const px = pal.pixel || {};
+    const term = pal.terminal || {};
+    const sw1 = px.floor_a || "#4f465c";
+    const sw2 = px.wall_main || "#3b3248";
+    const sw3 = px.trim || "#8c7258";
+    const sw4 = term.accent || "#ff8fb1";
+
+    const card = document.createElement("div");
+    card.className = "world-card" + (isActive ? " active-world" : "");
+
+    const head = document.createElement("div");
+    head.className = "world-card-head";
+    head.innerHTML =
+      '<div class="world-card-title">' + esc(sp.name) + (isActive ? ' <span style="color:var(--accent);font-size:11px;">[当前]</span>' : "") + "</div>"
+      + '<span class="world-card-id">' + esc(sp.space_id) + "</span>";
+    card.appendChild(head);
+
+    const palBar = document.createElement("div");
+    palBar.className = "world-pal-bar";
+    palBar.innerHTML = [sw1, sw2, sw3, sw4].map((c) => '<span class="world-pal-swatch" style="background:' + esc(c) + '"></span>').join("");
+    card.appendChild(palBar);
+
+    const entCnt = Number(sp.entity_count != null ? sp.entity_count : 0);
+    const actNames = Array.isArray(sp.actor_names) && sp.actor_names.length ? sp.actor_names.join("、") : "暂无角色";
+    const meta = document.createElement("div");
+    meta.className = "world-card-meta";
+    meta.innerHTML =
+      '<span class="pill">' + Number(sp.width || 12) + "×" + Number(sp.height || 9) + "</span>"
+      + '<span class="pill">🪑 ' + entCnt + " 件物品</span>"
+      + '<span class="pill" style="color:' + (sp.actor_names && sp.actor_names.length ? "var(--ok)" : "var(--muted)") + '">👤 ' + esc(actNames) + "</span>";
+    card.appendChild(meta);
+
+    const desc = document.createElement("div");
+    desc.className = "world-card-desc";
+    desc.textContent = sp.ambient_phrase || "一个安静待布置的小世界。";
+    card.appendChild(desc);
+
+    const acts = document.createElement("div");
+    acts.className = "world-card-acts";
+
+    const btnEnter = document.createElement("button");
+    btnEnter.className = "px-btn primary";
+    btnEnter.textContent = "▶ 进入世界";
+    btnEnter.onclick = () => enterWorld(sp.space_id);
+    acts.appendChild(btnEnter);
+
+    const btnWin = document.createElement("button");
+    btnWin.className = "px-btn";
+    btnWin.textContent = "↗ 独立窗口";
+    btnWin.onclick = () => openStandaloneWorld(sp.space_id);
+    acts.appendChild(btnWin);
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "px-btn danger";
+    btnDel.textContent = "🗑 删除";
+    btnDel.style.marginLeft = "auto";
+    if (spaces.length <= 1) {
+      btnDel.disabled = true;
+      btnDel.title = "至少需要保留一个世界";
+    } else {
+      btnDel.onclick = () => openConfirm(
+        "确定要永久删除世界「" + sp.name + "」吗？（其中放置的家具和地形将被清理，角色会自动转移至其他世界。）",
+        () => runAction("delete_space", { space_id: sp.space_id }).then((res) => {
+          const del = res.deleted || {};
+          if (state.windowSpaceId === sp.space_id) {
+            state.windowSpaceId = del.active_space_id || "";
+          }
+          toast("已删除世界「" + (del.deleted_name || sp.name) + "」");
+        }),
+      );
+    }
+    acts.appendChild(btnDel);
+
+    card.appendChild(acts);
+    grid.appendChild(card);
+  }
+}
+
+function renderTopbar() {
+  const snap = state.snap;
+  if (!snap) return;
+
+  const sp = snap.space || {};
+  const titleEl = el("cur-world-title");
+  if (titleEl) titleEl.textContent = "◈ " + (sp.name || "文字世界") + " (" + Number(sp.width || 12) + "×" + Number(sp.height || 9) + ")";
+
+  const lt = snap.lighting || {};
+  const pMap = { dawn: "清晨", day: "白天", dusk: "傍晚", night: "夜晚" };
+  el("light-dot").className = "dot" + (lt.is_dark ? " dark" : "");
+  el("light-text").textContent = (lt.clock || "12:00") + " " + (pMap[lt.period] || "白天") + (lt.is_dark ? " · 暗" : "");
+
+  const sel = el("actor-select");
+  sel.innerHTML = "";
+  if (!snap.actors.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "（未导入角色）";
+    sel.appendChild(opt);
+  } else {
+    for (const act of snap.actors) {
+      const opt = document.createElement("option");
+      opt.value = act.actor_id;
+      opt.textContent = act.name + (act.space_id === snap.active_space_id ? "" : " (在别处)");
+      if (act.actor_id === snap.active_actor_id) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+}
+
+function makeThumbCanvas(bp, palette) {
+  const c = document.createElement("canvas");
+  c.width = 32;
+  c.height = 32;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  const sp = bp.sprite || {};
+  const firstFrame = (sp.frames && (sp.frames.default || sp.frames.off || sp.frames.closed || sp.frames.hot || sp.frames.full || sp.frames.idle || sp.frames.blank || sp.frames.note || sp.frames.open || Object.values(sp.frames)[0])) || [];
+  drawSprite(ctx, sp, firstFrame, palette, 2, 2, 28, 28, bp.name, palette.terminal.accent);
+  return c;
+}
+
+function makeTileThumb(tile, pal) {
+  const c = document.createElement("canvas");
+  c.width = 20;
+  c.height = 20;
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  drawCellTile(ctx, tile.tile_id, 0, 0, 0, 0, 0, pal, 20);
+  return c;
+}
+
+function renderTilePalette() {
+  const snap = state.snap;
+  const grid = el("tile-grid");
+  if (!grid || !snap) return;
+  const tiles = snap.tile_catalog || [];
+  el("tile-count").textContent = String(tiles.length);
+  const curMeta = state.tileMap.get(state.selectedTileId);
+  el("active-tile-label").textContent = curMeta ? curMeta.name : state.selectedTileId;
+  grid.innerHTML = "";
+  for (const t of tiles) {
+    const btn = document.createElement("button");
+    btn.className = "tile-btn" + (t.tile_id === state.selectedTileId ? " selected" : "");
+    btn.title = t.name + (t.is_wall ? "（墙体，可挂墙物）" : (t.walkable ? "（可走地面）" : "（不可踏障碍）"));
+    btn.appendChild(makeTileThumb(t, snap.palette));
+    const sp = document.createElement("span");
+    sp.textContent = t.name;
+    btn.appendChild(sp);
+    btn.onclick = () => {
+      state.selectedTileId = t.tile_id;
+      if (state.tool === "select" || state.tool === "pickaxe") setBuilderTool("paint_tile");
+      renderTilePalette();
+    };
+    grid.appendChild(btn);
+  }
+}
+
+function bpMatchesCategory(bp, cat) {
+  if (!cat || cat === "all") return true;
+  const tr = bp.traits || {};
+  const tags = new Set(bp.tags || []);
+  if (cat === "furniture") return Boolean(tr.surface || tr.restable || tr.container || tr.portal || tags.has("furniture") || tags.has("storage"));
+  if (cat === "food") return Boolean(tr.consumable || tags.has("food") || tags.has("drink") || tags.has("sweet"));
+  if (cat === "play") return Boolean((tr.activity && ["game", "music", "reading", "hobby"].includes(tr.activity.domain)) || tags.has("game") || tags.has("music") || tags.has("reading") || tags.has("art"));
+  if (cat === "decor") return Boolean(bp.placement === "wall" || tr.switchable || tags.has("decor") || tags.has("outdoor") || tags.has("light") || tags.has("plant") || tags.has("key"));
+  return true;
+}
+
+function renderAssetsPanel() {
+  const snap = state.snap;
+  const builtinGrid = el("builtin-bp-grid");
+  const customGrid = el("custom-bp-grid");
+  builtinGrid.innerHTML = "";
+  customGrid.innerHTML = "";
+  let builtinCount = 0;
+  let customCount = 0;
+
+  for (const bp of snap.blueprints) {
+    if (bp.builtin) builtinCount += 1;
+    if (bp.builtin && !bpMatchesCategory(bp, state.bpCategory)) continue;
+    const card = document.createElement("div");
+    card.className = "bp-card" + (bp.blueprint_id === state.selectedBlueprintId ? " selected" : "");
+    const thumb = document.createElement("div");
+    thumb.className = "bp-thumb";
+    thumb.appendChild(makeThumbCanvas(bp, snap.palette));
+    const info = document.createElement("div");
+    info.className = "bp-info";
+    const fp = bp.footprint || [1, 1];
+    info.innerHTML = '<div class="bp-name">' + esc(bp.name) + '</div><div class="bp-sub">' + fp[0] + "×" + fp[1] + (bp.placement === "wall" ? " · 墙" : "") + "</div>";
+    card.appendChild(thumb);
+    card.appendChild(info);
+
+    const editBtn = document.createElement("button");
+    editBtn.className = "px-btn bp-edit-mini";
+    editBtn.textContent = "✎";
+    editBtn.title = "编辑或画笔微调";
+    editBtn.onclick = (ev) => { ev.stopPropagation(); openBlueprintModal(bp, false); };
+    card.appendChild(editBtn);
+
+    card.onclick = () => {
+      state.selectedBlueprintId = state.selectedBlueprintId === bp.blueprint_id ? "" : bp.blueprint_id;
+      if (state.selectedBlueprintId && state.tool !== "select") setBuilderTool("select");
+      el("btn-cancel-brush").classList.toggle("hidden", !state.selectedBlueprintId);
+      el("place-hint").textContent = state.selectedBlueprintId ? ("点击画布放入「" + bp.name + "」") : "未选中放置笔刷";
+      renderAssetsPanel();
+      renderInspector();
+      renderViewport();
+    };
+
+    if (bp.builtin) builtinGrid.appendChild(card);
+    else { customGrid.appendChild(card); customCount += 1; }
+  }
+  const bCntEl = el("builtin-bp-count");
+  if (bCntEl) bCntEl.textContent = String(builtinCount);
+  el("custom-bp-count").textContent = String(customCount);
+  if (!customCount) {
+    customGrid.innerHTML = '<div style="grid-column:1/-1;font-size:11px;color:var(--muted);padding:6px;">还没有自定义蓝图。在上方输入一句话即可生成。</div>';
+  }
+}
+
+function renderDialogueDock() {
+  const snap = state.snap;
+  const act = snap && snap.actors.find((a) => a.actor_id === snap.active_actor_id);
+  const imgEl = el("dock-portrait-img");
+  const fbEl = el("dock-portrait-fallback");
+  const modeEl = el("dock-portrait-mode");
+  const tagEl = el("dock-portrait-tag");
+  const nameEl = el("chat-actor-name");
+  const moodEl = el("chat-mood-badge");
+  const logEl = el("chat-log");
+
+  if (!act) {
+    imgEl.classList.add("hidden");
+    imgEl.removeAttribute("src");
+    fbEl.classList.remove("hidden");
+    fbEl.textContent = "?";
+    modeEl.textContent = "自动";
+    modeEl.className = "portrait-mode-pill";
+    tagEl.textContent = "未导入角色";
+    nameEl.textContent = "她";
+    moodEl.textContent = "待机";
+    logEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">点击右上「+ 导入角色」后即可在这里直接与她对话并查看心情立绘。</div>';
+    return;
+  }
+
+  const activeSp = act.active_sprite || {};
+  const expr = act.expression || {};
+  const vit = act.vitals || {};
+  const sp = act.sprite || {};
+  nameEl.textContent = act.name;
+
+  if (activeSp.data_url) {
+    const crop = activeSp.portrait_crop || sp.portrait_crop || { x: 0.5, y: 0.2 };
+    imgEl.src = activeSp.data_url;
+    imgEl.style.objectPosition = (Number(crop.x ?? 0.5) * 100) + "% " + (Number(crop.y ?? 0.2) * 100) + "%";
+    imgEl.classList.remove("hidden");
+    fbEl.classList.add("hidden");
+  } else if (sp.image_data_url) {
+    imgEl.src = sp.image_data_url;
+    imgEl.style.objectPosition = "50% 50%";
+    imgEl.classList.remove("hidden");
+    fbEl.classList.add("hidden");
+  } else {
+    imgEl.classList.add("hidden");
+    imgEl.removeAttribute("src");
+    fbEl.classList.remove("hidden");
+    fbEl.textContent = (act.name || "?").slice(0, 1);
+  }
+
+  const isManual = Boolean(activeSp.manual || expr.manual);
+  modeEl.textContent = isManual ? "手动" : "自动";
+  modeEl.className = "portrait-mode-pill" + (isManual ? " manual" : "");
+  const idx = Number(activeSp.index || expr.index || 0);
+  const tagText = String(activeSp.tag || expr.tag || "像素立牌");
+  tagEl.textContent = idx > 0 ? ("#" + idx + " " + tagText) : tagText;
+  tagEl.title = tagEl.textContent;
+
+  const mv = Number(vit.mood_v || 0);
+  const moodWord = vit.disengaged ? "沉默疏离" : (act.posture === "resting" ? "休息中" : (mv >= 0.3 ? "心情不错" : (mv <= -0.3 ? "有些低落" : "平静")));
+  moodEl.textContent = moodWord + " · 精力 " + Math.round(Number(vit.energy || 0) * 100) + "%";
+  const goalBadge = el("chat-goal-badge");
+  if (goalBadge) {
+    const aut = act.autonomy || {};
+    goalBadge.textContent = "🎯 " + (aut.current_goal || "四处打量");
+    goalBadge.title = aut.last_thought ? ("心声：" + aut.last_thought) : goalBadge.textContent;
+  }
+
+  const hist = state.chatHistory || [];
+  if (!hist.length) {
+    logEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">房间安静下来了。对' + esc(act.name) + '说点什么吧，或把右侧物品「直接递给她」。</div>';
+    return;
+  }
+  const nearBottom = (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight) < 32;
+  logEl.innerHTML = hist.map((m) => {
+    const role = String(m.role || "assistant");
+    if (role === "user") {
+      return '<div class="chat-msg user"><span class="who">你：</span>' + esc(m.text) + "</div>";
+    }
+    if (role === "action") {
+      return '<div class="chat-msg action"><span class="who">⚡</span>' + esc(m.text) + "</div>";
+    }
+    const emo = m.emotion ? '<span class="emo-chip">' + esc(m.emotion) + "</span>" : "";
+    return '<div class="chat-msg assistant"><span class="who">' + esc(act.name) + "：</span>" + esc(m.text) + emo + "</div>";
+  }).join("");
+  if (nearBottom || hist.length <= 3) logEl.scrollTop = logEl.scrollHeight;
+}
+
+function openExpressionModal(act) {
+  if (!act) return toast("请先导入一个角色", true);
+  runAction("get_actor_expressions", { actor_id: act.actor_id }).then((res) => {
+    const gallery = res.gallery || [];
+    const curExpr = res.expression || act.expression || {};
+    if (!gallery.length) {
+      showModal("角色贴图说明：" + act.name,
+        '<div style="font-size:12px;color:var(--muted);line-height:1.6;">当前角色未绑定宿主角色包立绘（sprites）。请点击顶部「+ 导入角色」并选择「角色包自带动态心情立绘」重新导入，即可根据状态与心情自动切换多套表情立绘。</div>',
+        [{ label: "知道了", cls: "primary", onClick: closeModal }], true);
+      return;
+    }
+    const curIdx = Number(curExpr.index || 0);
+    const cardsHtml = gallery.map((item) => {
+      const isCur = Number(item.index) === curIdx;
+      return '<div class="expr-card' + (isCur ? " active" : "") + '" data-expr-idx="' + Number(item.index) + '">'
+        + (item.data_url ? '<img src="' + esc(item.data_url) + '" alt="' + esc(item.tag) + '">' : '<div style="width:88px;height:106px;display:flex;align-items:center;justify-content:center;color:var(--muted);">无图</div>')
+        + '<div class="expr-idx">#' + Number(item.index) + " · " + esc(item.bucket || "") + "</div>"
+        + '<div class="expr-lbl">' + esc(item.tag || "") + "</div>"
+        + "</div>";
+    }).join("");
+    showModal("切换「" + act.name + "」心情立绘（共 " + gallery.length + " 张）",
+      '<div style="font-size:11px;color:var(--muted);">平时会根据精力、困意、心情与对话情绪自动更换立绘；手动指定后可随时点「恢复自动切换」。</div>'
+      + '<div class="expr-grid">' + cardsHtml + "</div>",
+      [
+        {
+          label: "恢复自动切换",
+          cls: "primary",
+          onClick: () => runAction("set_actor_expression", { actor_id: act.actor_id, mode: "auto" })
+            .then(() => { closeModal(); toast("已恢复随状态自动切换立绘"); })
+            .catch((e) => toast(e.message, true)),
+        },
+        { label: "关闭", onClick: closeModal },
+      ]);
+    document.querySelectorAll(".expr-card[data-expr-idx]").forEach((card) => {
+      card.onclick = () => {
+        const idx = Number(card.dataset.exprIdx || 1);
+        runAction("set_actor_expression", { actor_id: act.actor_id, index: idx, mode: "manual" })
+          .then(() => { closeModal(); toast("已切换至立绘 #" + idx); })
+          .catch((e) => toast(e.message, true));
+      };
+    });
+  }).catch((e) => toast(e.message, true));
+}
+
+function renderStatusPanel() {
+  const snap = state.snap;
+  const act = snap.actors.find((a) => a.actor_id === snap.active_actor_id);
+  if (!act) {
+    el("actor-status-name").textContent = "尚未导入角色";
+    el("actor-status-pos").textContent = "坐标：—";
+    el("v-energy").textContent = "—";
+    el("v-sleep").textContent = "—";
+    el("v-mood").textContent = "—";
+    el("aut-drive").textContent = "—";
+    el("aut-goal").textContent = "🎯 尚未导入角色";
+    el("aut-thought").textContent = "💭 暂无碎碎念";
+    el("v-full").textContent = "—";
+    el("v-curiosity").textContent = "—";
+  } else {
+    const vit = act.vitals || {};
+    const aut = act.autonomy || {};
+    const spName = (snap.spaces.find((s) => s.space_id === act.space_id) || {}).name || act.space_id;
+    el("vital-source").textContent = vit.source || "builtin";
+    el("actor-status-name").textContent = act.name + (vit.disengaged ? "（沉默离开中）" : "");
+    el("actor-status-pos").textContent = spName + " (" + act.x + ", " + act.y + ") · " + (act.posture === "resting" ? "休息中" : "站立");
+    el("v-energy").textContent = Number(vit.energy || 0).toFixed(2);
+    el("v-sleep").textContent = Number(vit.sleep_pressure || 0).toFixed(2);
+    el("v-mood").textContent = Number(vit.mood_v || 0).toFixed(2);
+    el("aut-drive").textContent = aut.current_drive || "curiosity";
+    el("aut-goal").textContent = "🎯 " + (aut.current_goal || "四处打量");
+    el("aut-thought").textContent = aut.last_thought ? ("💭 " + aut.last_thought) : "💭 安静地待在房间里";
+    el("v-full").textContent = Math.max(0, Math.round((1 - Number(aut.hunger || 0)) * 100)) + "%";
+    el("v-curiosity").textContent = Math.round(Number(aut.curiosity || 0) * 100) + "%";
+  }
+
+  const relBox = el("actor-relations-list");
+  if (relBox) {
+    const relMap = snap.actor_relations || {};
+    const entries = Object.values(relMap);
+    const cntEl = el("rel-count-label");
+    if (cntEl) cntEl.textContent = String(entries.length);
+    relBox.innerHTML = "";
+    if (!entries.length) {
+      relBox.innerHTML = '<div style="font-size:11px;color:var(--muted);">暂无关系指针记录</div>';
+    } else {
+      const stageLabels = { stranger: "不认识", acquainted: "刚认识", friend: "同伴", close: "挚友", rival: "对手", guarded: "戒备", hostile: "敌对" };
+      const curSid = act ? act.space_id : snap.active_space_id;
+      for (const r of entries) {
+        const row = document.createElement("div");
+        row.style.cssText = "border:1px solid var(--border);background:var(--panel-2);padding:5px 7px;display:flex;flex-direction:column;gap:3px;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;gap:6px;font-size:11px;";
+        const isUser = r.target_type === "user";
+        const icon = isUser ? "👤 " : "🎭 ";
+        const stText = r.known ? (stageLabels[r.rel_stage] || r.rel_stage || "相识") : "不认识";
+        const stColor = r.known ? "var(--ok)" : "var(--warn)";
+        top.innerHTML = '<b style="color:var(--text);">' + icon + esc(r.target_name || r.target_key) + "</b>"
+          + '<span style="color:' + stColor + ';font-family:var(--px-font);">[' + esc(stText) + "]</span>"
+          + (r.call_name ? '<span style="color:var(--accent-2);">称:' + esc(r.call_name) + "</span>" : "");
+
+        const sameRoomPeer = (!isUser && act)
+          ? snap.actors.find((pa) => pa.actor_id !== act.actor_id && pa.space_id === curSid && (pa.host_character === r.target_name || pa.name === r.target_name))
+          : null;
+        if (sameRoomPeer) {
+          const talkBtn = document.createElement("button");
+          talkBtn.className = "px-btn";
+          talkBtn.textContent = "💬 交流";
+          talkBtn.style.cssText = "margin-left:auto;padding:1px 6px;font-size:10px;";
+          talkBtn.onclick = () => {
+            talkBtn.disabled = true;
+            runAction("trigger_social_talk", { initiator_id: act.actor_id, target_actor_id: sameRoomPeer.actor_id })
+              .then((res) => {
+                const ex = res.social_exchange || {};
+                toast(ex.summary || "她们聊了几句");
+              })
+              .catch((e) => toast(e.message, true))
+              .finally(() => { talkBtn.disabled = false; });
+          };
+          top.appendChild(talkBtn);
+        }
+        row.appendChild(top);
+
+        const sub = document.createElement("div");
+        sub.style.cssText = "font-size:10px;color:var(--muted);font-family:var(--px-font);";
+        const val = Number(r.affective_valence || 0);
+        sub.textContent = "好感 " + (val >= 0 ? "+" : "") + val.toFixed(2)
+          + " · 信任 " + Number(r.trust || 0.55).toFixed(2)
+          + " · 意愿 " + Number(r.social_willingness || 0.5).toFixed(2)
+          + (r.relation_tag ? (" · " + r.relation_tag) : "");
+        row.appendChild(sub);
+
+        const note = r.last_interaction || r.shared_memories || "";
+        if (note) {
+          const nEl = document.createElement("div");
+          nEl.style.cssText = "font-size:10px;color:#cbc3dc;line-height:1.35;";
+          nEl.textContent = note;
+          row.appendChild(nEl);
+        }
+        relBox.appendChild(row);
+      }
+    }
+  }
+
+  const list = el("event-list");
+  const events = snap.events || [];
+  if (!events.length) {
+    list.innerHTML = '<li style="color:var(--muted);">还没有世界事件记录。</li>';
+    return;
+  }
+  list.innerHTML = events.map((ev) => {
+    const t = new Date((ev.ts || 0) * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return '<li><span class="ev-time">' + esc(t) + "</span><b>" + esc(ev.kind) + "</b> " + esc(JSON.stringify(ev.payload || {})) + "</li>";
+  }).join("");
+}
+
+function renderInspector() {
+  const snap = state.snap;
+  const boxEl = el("inspector");
+  const titleEl = el("insp-title");
+  const subEl = el("insp-sub");
+  const actsEl = el("insp-acts");
+  actsEl.innerHTML = "";
+
+  const ent = snap && snap.entities.find((e) => e.entity_id === state.selectedEntityId);
+  if (!ent) {
+    if (state.selectedBlueprintId) {
+      const bp = snap && (snap.blueprints || []).find((b) => b.blueprint_id === state.selectedBlueprintId);
+      boxEl.classList.remove("hidden");
+      titleEl.textContent = "待放置：「" + (bp ? bp.name : state.selectedBlueprintId) + "」";
+      subEl.textContent = "点击画布空位放入空间，或拖放/放置到桌面上（z=1）。";
+    } else {
+      boxEl.classList.add("hidden");
+    }
+    return;
+  }
+  boxEl.classList.remove("hidden");
+
+  const tags = (ent.state_tags || []).join(" · ");
+  titleEl.textContent = "[" + ent.entity_id + "] " + ent.name + " (" + ent.x + "," + ent.y + " z=" + ent.z + ")" + (tags ? "｜" + tags : "");
+  subEl.textContent = ent.brief + " — " + ent.detail;
+
+  const tr = ent.traits || {};
+  const addAct = (label, fn, cls) => {
+    const b = document.createElement("button");
+    b.className = "px-btn" + (cls ? " " + cls : "");
+    b.textContent = label;
+    b.onclick = fn;
+    actsEl.appendChild(b);
+  };
+
+  if (tr.switchable) {
+    addAct(tr.switchable.is_on ? "关掉" : "打开", () => interactAndToast(ent.entity_id, tr.switchable.is_on ? "turn_off" : "turn_on"));
+  }
+  if (tr.container) {
+    if (tr.container.is_locked) addAct("开锁", () => interactAndToast(ent.entity_id, "unlock"));
+    else addAct(tr.container.is_open ? "合上箱子" : "打开箱子", () => interactAndToast(ent.entity_id, tr.container.is_open ? "close" : "open"));
+  }
+  if (tr.consumable && Number(tr.consumable.uses_left || 0) > 0) {
+    addAct(tr.consumable.consume_verb || "使用", () => interactAndToast(ent.entity_id, "consume"));
+  }
+  if (tr.restable) {
+    addAct(tr.restable.occupied_by ? "起身" : "休息", () => interactAndToast(ent.entity_id, tr.restable.occupied_by ? "leave_rest" : "rest"));
+  }
+  if (tr.inscribable) {
+    addAct("读/留字", () => openNoteModal(ent));
+  }
+  if (tr.portal) {
+    addAct(
+      tr.portal.is_open ? "🚪 关门（恢复碰撞）" : "🚪 开门（变为无碰撞）",
+      () => interactAndToast(ent.entity_id, tr.portal.is_open ? "close" : "open"),
+      "primary",
+    );
+    addAct("连接空间", () => openEntityEditModal(ent));
+    if (tr.portal.target_space_id) addAct("推门进入", () => interactAndToast(ent.entity_id, "enter"));
+  }
+  // 放入当前空间内已打开的容器
+  if (tr.portable) {
+    const openBox = snap.entities.find((c) => c.entity_id !== ent.entity_id && c.traits && c.traits.container && c.traits.container.is_open);
+    if (openBox) {
+      addAct("放进" + openBox.name, () => runAction("move_entity", { entity_id: ent.entity_id, x: openBox.x, y: openBox.y, target_parent_id: "entity:" + openBox.entity_id }).catch((e) => toast(e.message, true)));
+    }
+  }
+  addAct("改描述", () => openEntityEditModal(ent));
+  addAct("收走", () => openConfirm("确定从空间收走「" + ent.name + "」吗？", () => runAction("remove_entity", { entity_id: ent.entity_id }).then(() => { state.selectedEntityId = ""; })), "danger");
+}
+
+function interactAndToast(entityId, action) {
+  runAction("entity_ui_interact", { entity_id: entityId, action }).then((res) => {
+    if (res.feedback) toast(res.feedback);
+  }).catch((e) => toast(e.message, true));
+}
+
+/* ── 画布拖拽与点击交互 ── */
+function canvasCellFromEvent(ev) {
+  const canvas = el("world-canvas");
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const px = (ev.clientX - rect.left) * scaleX;
+  const py = (ev.clientY - rect.top) * scaleY;
+  return {
+    x: Math.max(0, Math.min(state.snap.space.width - 1, Math.floor(px / TILE))),
+    y: Math.max(0, Math.min(state.snap.space.height - 1, Math.floor(py / TILE))),
+  };
+}
+
+function hitTestCanvas(cx, cy) {
+  const snap = state.snap;
+  if (!snap) return null;
+  for (const act of snap.actors) {
+    if (act.space_id === snap.active_space_id && act.x === cx && act.y === cy) {
+      return { kind: "actor", id: act.actor_id };
+    }
+  }
+  // 优先命中 z=1 桌面上的小物体，再命中 z=0 家具
+  const z1 = snap.entities.filter((e) => Number(e.z) === 1);
+  const z0 = snap.entities.filter((e) => Number(e.z) === 0);
+  for (const ent of [...z1, ...z0]) {
+    const fw = (ent.footprint && ent.footprint[0]) || 1;
+    const fh = (ent.footprint && ent.footprint[1]) || 1;
+    if (cx >= ent.x && cx < ent.x + fw && cy >= ent.y && cy < ent.y + fh) {
+      return { kind: "entity", id: ent.entity_id };
+    }
+  }
+  return null;
+}
+
+function setupCanvasEvents() {
+  const canvas = el("world-canvas");
+
+  const commitTileStroke = (drag) => {
+    if (!state.snap || !drag) return;
+    if (drag.mode === "paint" && drag.cells && drag.cells.size > 0) {
+      runAction("paint_tiles", {
+        space_id: state.snap.active_space_id,
+        cells: Array.from(drag.cells.values()),
+        auto_expand: state.autoExpand,
+      }).then((res) => {
+        if (res.painted && res.painted.expanded && res.painted.expanded.length) {
+          toast("触及边缘，地图已自动拓展！");
+        }
+      }).catch((e) => toast(e.message, true));
+    } else if (drag.mode === "pickaxe" && drag.cells && drag.cells.size > 0) {
+      runAction("paint_tiles", {
+        space_id: state.snap.active_space_id,
+        cells: Array.from(drag.cells.values()),
+        demolish: true,
+      }).catch((e) => toast(e.message, true));
+    }
+  };
+
+  canvas.addEventListener("mousemove", (ev) => {
+    if (!state.snap) return;
+    const cell = canvasCellFromEvent(ev);
+    state.hoverCell = cell;
+    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe")) {
+      const k = cell.x + "," + cell.y;
+      if (!state.drag.cells.has(k)) {
+        state.drag.cells.set(k, {
+          x: cell.x,
+          y: cell.y,
+          tile_id: state.drag.mode === "paint" ? state.selectedTileId : "",
+        });
+        renderViewport();
+      }
+      return;
+    }
+    if ((state.drag && state.drag.mode === "rect") || state.selectedBlueprintId || state.tool !== "select") {
+      renderViewport();
+    }
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe")) {
+      const d = state.drag;
+      state.drag = null;
+      commitTileStroke(d);
+    }
+    state.hoverCell = null;
+    if (state.selectedBlueprintId || state.tool !== "select") renderViewport();
+  });
+
+  canvas.addEventListener("mousedown", (ev) => {
+    if (!state.snap) return;
+    const cell = canvasCellFromEvent(ev);
+    if (state.tool === "paint_tile") {
+      state.drag = {
+        mode: "paint",
+        cells: new Map([[cell.x + "," + cell.y, { x: cell.x, y: cell.y, tile_id: state.selectedTileId }]]),
+      };
+      renderViewport();
+      return;
+    }
+    if (state.tool === "rect_tile" || state.tool === "hollow_wall") {
+      state.drag = { mode: "rect", hollow: state.tool === "hollow_wall", start: cell };
+      state.hoverCell = cell;
+      renderViewport();
+      return;
+    }
+    if (state.tool === "pickaxe") {
+      state.drag = { mode: "pickaxe", cells: new Map([[cell.x + "," + cell.y, { x: cell.x, y: cell.y }]]) };
+      renderViewport();
+      return;
+    }
+    if (state.selectedBlueprintId) {
+      state.drag = { mode: "place", start: cell };
+      return;
+    }
+    const hit = hitTestCanvas(cell.x, cell.y);
+    if (hit) {
+      state.drag = { mode: "move", kind: hit.kind, id: hit.id, start: cell };
+    } else {
+      state.selectedEntityId = "";
+      renderInspector();
+      renderViewport();
+    }
+  });
+
+  canvas.addEventListener("mouseup", (ev) => {
+    if (!state.snap || !state.drag) return;
+    const drag = state.drag;
+    state.drag = null;
+    const cell = canvasCellFromEvent(ev);
+
+    if (drag.mode === "paint" || drag.mode === "pickaxe") {
+      commitTileStroke(drag);
+      return;
+    }
+    if (drag.mode === "rect") {
+      runAction("paint_tiles", {
+        space_id: state.snap.active_space_id,
+        rect: {
+          x0: drag.start.x,
+          y0: drag.start.y,
+          x1: cell.x,
+          y1: cell.y,
+          tile_id: state.selectedTileId,
+          hollow: Boolean(drag.hollow),
+        },
+        auto_expand: state.autoExpand,
+      }).then((res) => {
+        if (res.painted && res.painted.expanded && res.painted.expanded.length) {
+          toast("矩形搭建已自动拓展边界！");
+        }
+      }).catch((e) => toast(e.message, true));
+      return;
+    }
+
+    if (drag.mode === "place" && state.selectedBlueprintId) {
+      const bpId = state.selectedBlueprintId;
+      runAction("place_from_blueprint", {
+        blueprint_id: bpId,
+        space_id: state.snap.active_space_id,
+        x: cell.x,
+        y: cell.y,
+        delivery_mode: state.deliveryMode,
+      }).then((res) => {
+        if (res.entity) state.selectedEntityId = res.entity.entity_id;
+        renderInspector();
+        const chatReply = res.chat_result && res.chat_result.reply;
+        toast(state.deliveryMode === "give"
+          ? (chatReply ? "已递给她，她回应了你" : (res.submitted_chat ? "已递给她并触发对话" : "已放入并递给她"))
+          : "已悄悄放入空间");
+      }).catch((e) => toast(e.message, true));
+      return;
+    }
+
+    if (drag.mode === "move") {
+      if (cell.x === drag.start.x && cell.y === drag.start.y) {
+        if (drag.kind === "entity") {
+          state.selectedEntityId = drag.id;
+          renderInspector();
+          renderViewport();
+        } else if (drag.kind === "actor" && state.snap && drag.id !== state.snap.active_actor_id) {
+          runAction("set_active_actor", { actor_id: drag.id }).catch((e) => toast(e.message, true));
+        }
+        return;
+      }
+      if (drag.kind === "actor") {
+        runAction("place_actor", { actor_id: drag.id, space_id: state.snap.active_space_id, x: cell.x, y: cell.y })
+          .catch((e) => toast(e.message, true));
+      } else {
+        runAction("move_entity", { entity_id: drag.id, x: cell.x, y: cell.y })
+          .catch((e) => toast(e.message, true));
+      }
+    }
+  });
+}
+
+/* ── 页内像素弹层实现（禁止原生 alert / confirm / prompt）── */
+function showModal(title, bodyHtml, buttons, narrow) {
+  el("modal-title").textContent = title;
+  el("modal-card").className = "modal-card" + (narrow ? " narrow" : "");
+  el("modal-body").innerHTML = bodyHtml;
+  const foot = el("modal-foot");
+  foot.innerHTML = "";
+  for (const b of buttons || []) {
+    const btn = document.createElement("button");
+    btn.className = "px-btn" + (b.cls ? " " + b.cls : "");
+    btn.textContent = b.label;
+    btn.onclick = () => b.onClick(btn);
+    foot.appendChild(btn);
+  }
+  el("modal-mask").classList.remove("hidden");
+}
+function closeModal() {
+  el("modal-mask").classList.add("hidden");
+}
+
+function openConfirm(text, onYes) {
+  showModal("请确认", '<div style="padding:6px 0;">' + esc(text) + "</div>", [
+    { label: "取消", onClick: closeModal },
+    { label: "确定", cls: "danger", onClick: () => { closeModal(); Promise.resolve(onYes()).catch((e) => toast(e.message, true)); } },
+  ], true);
+}
+
+function openNoteModal(ent) {
+  const entries = (ent.traits && ent.traits.inscribable && ent.traits.inscribable.entries) || [];
+  const rows = entries.length
+    ? entries.map((e) => '<div style="padding:4px 6px;border:1px solid var(--border);background:var(--panel-2);margin-bottom:4px;"><b>[' + esc(e.by) + "]</b> " + esc(e.text) + "</div>").join("")
+    : '<div style="color:var(--muted);">这里目前是空白的。</div>';
+  showModal("[" + ent.name + "] 上面的字", '<div>' + rows + '</div><div class="field"><label>留下一句话</label><input class="px-inp" id="note-write-inp" maxlength="120" placeholder="写点什么..."></div>', [
+    { label: "关闭", onClick: closeModal },
+    {
+      label: "写上去",
+      cls: "primary",
+      onClick: () => {
+        const text = el("note-write-inp").value.trim();
+        if (!text) return toast("请输入内容", true);
+        runAction("entity_ui_interact", { entity_id: ent.entity_id, action: "write_user_note", text })
+          .then((res) => { closeModal(); if (res.feedback) toast(res.feedback); })
+          .catch((e) => toast(e.message, true));
+      },
+    },
+  ], true);
+}
+
+function openEntityEditModal(ent) {
+  const isPortal = Boolean(ent.traits && ent.traits.portal);
+  const spaceOpts = (state.snap.spaces || []).map((s) => '<option value="' + esc(s.space_id) + '"' + (isPortal && ent.traits.portal.target_space_id === s.space_id ? " selected" : "") + ">" + esc(s.name) + "</option>").join("");
+  showModal("编辑物品规范：" + ent.name,
+    '<div class="form-grid">'
+    + '<div class="field"><label>名称（2-12字）</label><input class="px-inp" id="ed-name" value="' + esc(ent.name) + '" maxlength="12"></div>'
+    + '<div class="field"><label>一眼白描（<=25字）</label><input class="px-inp" id="ed-brief" value="' + esc(ent.brief) + '" maxlength="25"></div>'
+    + '<div class="field full"><label>凑近细节（<=60字）</label><input class="px-inp" id="ed-detail" value="' + esc(ent.detail) + '" maxlength="60"></div>'
+    + (isPortal ? '<div class="field full"><label>门通往的空间</label><select class="px-sel" id="ed-portal"><option value="">（未连接）</option>' + spaceOpts + "</select></div>" : "")
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "保存修改",
+        cls: "primary",
+        onClick: () => {
+          const payload = {
+            entity_id: ent.entity_id,
+            name: el("ed-name").value,
+            brief: el("ed-brief").value,
+            detail: el("ed-detail").value,
+          };
+          if (isPortal) payload.portal_target_space_id = el("ed-portal").value;
+          runAction("update_entity_spec", payload).then(() => { closeModal(); toast("已更新物品规范"); }).catch((e) => toast(e.message, true));
+        },
+      },
+    ], true);
+}
+
+/* 造物与 16x16 像素画笔弹层 */
+function openBlueprintModal(rawBp, isNewCompile) {
+  const bp = JSON.parse(JSON.stringify(rawBp));
+  const traits = bp.traits || {};
+  const sp = bp.sprite || { mode: "pixel_grid", w: 16, h: 16, frames: { default: [] }, slot_colors: {} };
+  const frameNames = Object.keys(sp.frames || {});
+  if (!frameNames.length) sp.frames = { default: Array.from({ length: sp.h || 16 }, () => ".".repeat(sp.w || 16)) };
+  let curFrame = Object.keys(sp.frames)[0];
+  let curSlot = "1";
+  const slots = [".", "o", "1", "2", "3", "a", "b"];
+  const slotLabels = { ".": "擦除", o: "描边", 1: "主色", 2: "高光", 3: "阴影", a: "点缀A", b: "点缀B" };
+
+  const traitChoices = [
+    ["portable", "可拿起"],
+    ["surface", "桌面承载"],
+    ["container", "储物容器"],
+    ["consumable", "消耗品"],
+    ["thermal", "热饮降温"],
+    ["switchable", "开关/灯光"],
+    ["restable", "休息沙发"],
+    ["activity", "心流互动"],
+    ["inscribable", "可写字本"],
+  ];
+
+  const body =
+    '<div class="form-grid">'
+    + '<div class="field"><label>物品名称</label><input class="px-inp" id="bp-name" value="' + esc(bp.name) + '" maxlength="12"></div>'
+    + '<div class="field"><label>摆放区域</label><select class="px-sel" id="bp-place"><option value="any"' + (bp.placement === "any" ? " selected" : "") + '>地面或桌面</option><option value="floor"' + (bp.placement === "floor" ? " selected" : "") + '>仅地面</option><option value="wall"' + (bp.placement === "wall" ? " selected" : "") + '>墙面带(y=0)</option><option value="surface_only"' + (bp.placement === "surface_only" ? " selected" : "") + '>仅桌面</option></select></div>'
+    + '<div class="field full"><label>一眼白描（<=25字，喂进角色视野）</label><input class="px-inp" id="bp-brief" value="' + esc(bp.brief) + '" maxlength="25"></div>'
+    + '<div class="field full"><label>凑近细节（<=60字）</label><input class="px-inp" id="bp-detail" value="' + esc(bp.detail) + '" maxlength="60"></div>'
+    + '<div class="field full"><label>能力组件（Traits）</label><div class="traits-checks">'
+    + traitChoices.map(([k, lbl]) => '<label class="trait-chip"><input type="checkbox" class="bp-tr" value="' + k + '"' + (traits[k] ? " checked" : "") + "> " + lbl + "</label>").join("")
+    + "</div></div>"
+    + "</div>"
+    + '<div class="sec-box">'
+    + '<div class="sec-title"><span>16×16 像素画笔微调（左键上色）</span><select class="px-sel" id="bp-frame-sel">' + Object.keys(sp.frames).map((fn) => '<option value="' + esc(fn) + '">' + esc(fn) + "</option>").join("") + "</select></div>"
+    + '<div class="pixel-editor-wrap">'
+    + '<canvas id="pixel-brush-canvas" width="224" height="224"></canvas>'
+    + '<div style="flex:1 1 200px;display:flex;flex-direction:column;gap:8px;">'
+    + '<div class="slot-bar" id="bp-slot-bar"></div>'
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><label style="font-size:11px;color:var(--muted);">色槽1:</label><input type="color" id="sc-1" value="' + esc((sp.slot_colors && sp.slot_colors["1"]) || "#c97a4b") + '"><label style="font-size:11px;color:var(--muted);">A:</label><input type="color" id="sc-a" value="' + esc((sp.slot_colors && sp.slot_colors.a) || "#ffd166") + '"></div>'
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;"><label class="px-btn" style="display:inline-block;">🖼 覆盖静态PNG<input type="file" id="bp-img-file" accept="image/png,image/jpeg,image/webp" class="hidden"></label><button class="px-btn" id="bp-clear-img">切回像素矩阵</button></div>'
+    + "</div></div></div>";
+
+  showModal(isNewCompile ? "确认「以文生像素」造物结果" : "编辑素材蓝图：" + bp.name, body, [
+    ...(bp.builtin ? [] : [{ label: "删除蓝图", cls: "danger", onClick: () => openConfirm("删除自定义蓝图「" + bp.name + "」？", () => runAction("delete_blueprint", { blueprint_id: bp.blueprint_id }).then(() => toast("已删除"))) }]),
+    { label: "取消", onClick: closeModal },
+    {
+      label: "保存至素材箱",
+      cls: "primary",
+      onClick: () => {
+        bp.name = el("bp-name").value.trim() || bp.name;
+        bp.brief = el("bp-brief").value.trim() || bp.name;
+        bp.detail = el("bp-detail").value.trim() || bp.brief;
+        bp.placement = el("bp-place").value;
+        const checked = new Set(Array.from(document.querySelectorAll(".bp-tr:checked")).map((c) => c.value));
+        const nextTraits = {};
+        if (checked.has("portable")) nextTraits.portable = traits.portable || { weight: "light" };
+        if (checked.has("surface")) nextTraits.surface = traits.surface || { capacity: 4 };
+        if (checked.has("container")) nextTraits.container = traits.container || { capacity: 6, key_tag: "", is_open: false, is_locked: false };
+        if (checked.has("consumable")) nextTraits.consumable = traits.consumable || { max_uses: 2, uses_left: 2, consume_verb: "用", on_empty: "keep_empty", empty_brief: "已经空了" };
+        if (checked.has("thermal")) nextTraits.thermal = traits.thermal || { cool_minutes: 45, temp: "hot" };
+        if (checked.has("switchable")) nextTraits.switchable = traits.switchable || { provides_light: true, is_on: false, on_brief: "", off_brief: "" };
+        if (checked.has("restable")) nextTraits.restable = traits.restable || { energy_regen_per_min: 0.015, comfort: 0.8, occupied_by: null };
+        if (checked.has("activity")) nextTraits.activity = traits.activity || { domain: "hobby", progress_unit: "次", progress: 0, battery: null, battery_cost: 10 };
+        if (checked.has("inscribable")) nextTraits.inscribable = traits.inscribable || { writable_by_ai: true, max_entries: 12, entries: [] };
+        bp.traits = nextTraits;
+        sp.slot_colors = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
+        bp.sprite = sp;
+        if (bp.builtin) bp.blueprint_id = "";
+        runAction("save_blueprint", { blueprint: bp }).then((res) => {
+          closeModal();
+          if (res.blueprint) state.selectedBlueprintId = res.blueprint.blueprint_id;
+          el("btn-cancel-brush").classList.remove("hidden");
+          el("place-hint").textContent = "点击画布放入「" + bp.name + "」";
+          renderAssetsPanel();
+          toast("已存入「我的自定义蓝图」");
+        }).catch((e) => toast(e.message, true));
+      },
+    },
+  ]);
+
+  const drawBrush = () => {
+    const c = el("pixel-brush-canvas");
+    const ctx = c.getContext("2d");
+    const w = sp.w || 16;
+    const h = sp.h || 16;
+    c.width = w * 14;
+    c.height = h * 14;
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (sp.mode === "image" && sp.image_data_url) {
+      const img = loadCachedImage(sp.image_data_url);
+      if (img) ctx.drawImage(img, 0, 0, c.width, c.height);
+      return;
+    }
+    const rows = sp.frames[curFrame] || [];
+    const sc = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
+    drawPixelGrid(ctx, rows, w, h, sc, state.snap.palette, 0, 0, c.width, c.height);
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    for (let x = 0; x <= w; x++) { ctx.beginPath(); ctx.moveTo(x * 14, 0); ctx.lineTo(x * 14, c.height); ctx.stroke(); }
+    for (let y = 0; y <= h; y++) { ctx.beginPath(); ctx.moveTo(0, y * 14); ctx.lineTo(c.width, y * 14); ctx.stroke(); }
+  };
+
+  const buildSlots = () => {
+    const bar = el("bp-slot-bar");
+    bar.innerHTML = "";
+    const sc = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
+    for (const s of slots) {
+      const b = document.createElement("button");
+      b.className = "slot-btn" + (curSlot === s ? " active" : "");
+      const col = s === "." ? "transparent" : resolveSlotColor(s, sc, state.snap.palette);
+      b.innerHTML = '<span class="swatch" style="background:' + col + '"></span>' + slotLabels[s];
+      b.onclick = () => { curSlot = s; buildSlots(); };
+      bar.appendChild(b);
+    }
+  };
+  buildSlots();
+  drawBrush();
+
+  el("sc-1").addEventListener("input", () => { buildSlots(); drawBrush(); });
+  el("sc-a").addEventListener("input", () => { buildSlots(); drawBrush(); });
+  el("bp-frame-sel").addEventListener("change", (ev) => { curFrame = ev.target.value; drawBrush(); });
+  el("bp-clear-img").addEventListener("click", () => { sp.mode = "pixel_grid"; sp.image_path = ""; sp.image_data_url = ""; drawBrush(); });
+  el("bp-img-file").addEventListener("change", (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      runAction("upload_sprite", { image_data: String(reader.result || "") }).then((res) => {
+        sp.mode = "image";
+        sp.image_path = res.image_path;
+        sp.image_data_url = res.image_data_url;
+        drawBrush();
+        toast("已绑定外部静态贴图");
+      }).catch((e) => toast(e.message, true));
+    };
+    reader.readAsDataURL(file);
+  });
+
+  let painting = false;
+  const paintAt = (ev) => {
+    if (sp.mode !== "pixel_grid") return;
+    const c = el("pixel-brush-canvas");
+    const rect = c.getBoundingClientRect();
+    const gx = Math.floor(((ev.clientX - rect.left) / rect.width) * (sp.w || 16));
+    const gy = Math.floor(((ev.clientY - rect.top) / rect.height) * (sp.h || 16));
+    const rows = sp.frames[curFrame];
+    if (!rows || gy < 0 || gy >= rows.length || gx < 0 || gx >= (sp.w || 16)) return;
+    const arr = rows[gy].split("");
+    arr[gx] = curSlot;
+    rows[gy] = arr.join("");
+    drawBrush();
+  };
+  el("pixel-brush-canvas").addEventListener("mousedown", (ev) => { painting = true; paintAt(ev); });
+  el("pixel-brush-canvas").addEventListener("mousemove", (ev) => { if (painting) paintAt(ev); });
+  window.addEventListener("mouseup", () => { painting = false; }, { once: false });
+}
+
+/* 调色板高度自定义弹层 */
+function openPaletteModal() {
+  const snap = state.snap;
+  const cur = JSON.parse(JSON.stringify(snap.palette));
+  const presetOpts = snap.palettes.map((p) => '<option value="' + esc(p.palette_id) + '"' + (p.palette_id === cur.palette_id ? " selected" : "") + ">" + esc(p.name) + "</option>").join("");
+
+  showModal("🎨 高度自定义调色板",
+    '<div class="form-grid">'
+    + '<div class="field full"><label>切换预设 / 已存调色板</label><select class="px-sel" id="pal-preset">' + presetOpts + "</select></div>"
+    + '<div class="field"><label>新调色板名称</label><input class="px-inp" id="pal-name" value="' + esc(cur.name) + '" maxlength="20"></div>'
+    + '<div class="field"><label>墙面底色 / 装饰边</label><div style="display:flex;gap:6px;"><input type="color" id="pal-wall" value="' + esc(cur.room.wall_base) + '"><input type="color" id="pal-trim" value="' + esc(cur.room.wall_trim) + '"></div></div>'
+    + '<div class="field"><label>地板双色 (A / B)</label><div style="display:flex;gap:6px;"><input type="color" id="pal-fa" value="' + esc(cur.room.floor_a) + '"><input type="color" id="pal-fb" value="' + esc(cur.room.floor_b) + '"></div></div>'
+    + '<div class="field"><label>默认描边 / 木主色</label><div style="display:flex;gap:6px;"><input type="color" id="pal-out" value="' + esc(cur.sprite_base.outline) + '"><input type="color" id="pal-wood" value="' + esc(cur.sprite_base.wood_main) + '"></div></div>'
+    + '<div class="field"><label>文字终端 背景 / 文字 / 高亮</label><div style="display:flex;gap:6px;"><input type="color" id="pal-tbg" value="' + esc(cur.terminal.bg) + '"><input type="color" id="pal-tfg" value="' + esc(cur.terminal.fg) + '"><input type="color" id="pal-tacc" value="' + esc(cur.terminal.accent) + '"></div></div>'
+    + '<div class="field full"><label>快速导入 Hex 色板（逗号或空格分隔 4-6 个色码：墙,地板A,地板B,主色,终端背景）</label><div style="display:flex;gap:6px;"><input class="px-inp" id="pal-lospec" style="flex:1;" placeholder="#4a3b32,#8b5e3c,#7d5333,#9e6b43,#111418"><button class="px-btn" id="pal-apply-hex">填入</button></div></div>'
+    + "</div>",
+    [
+      { label: "关闭", onClick: closeModal },
+      {
+        label: "仅切换预设",
+        onClick: () => runAction("set_space_palette", { space_id: snap.active_space_id, palette_id: el("pal-preset").value }).then(() => { closeModal(); toast("已切换房间调色板"); }).catch((e) => toast(e.message, true)),
+      },
+      {
+        label: "保存为新调色板并应用",
+        cls: "primary",
+        onClick: () => {
+          cur.palette_id = "";
+          cur.name = el("pal-name").value.trim() || "自定义色板";
+          cur.room.wall_base = el("pal-wall").value;
+          cur.room.wall_trim = el("pal-trim").value;
+          cur.room.floor_a = el("pal-fa").value;
+          cur.room.floor_b = el("pal-fb").value;
+          cur.sprite_base.outline = el("pal-out").value;
+          cur.sprite_base.wood_main = el("pal-wood").value;
+          cur.terminal.bg = el("pal-tbg").value;
+          cur.terminal.fg = el("pal-tfg").value;
+          cur.terminal.accent = el("pal-tacc").value;
+          runAction("save_palette", { palette: cur, apply_to_space_id: snap.active_space_id }).then(() => { closeModal(); toast("已保存并应用自定义调色板"); }).catch((e) => toast(e.message, true));
+        },
+      },
+    ]);
+
+  el("pal-preset").addEventListener("change", (ev) => {
+    const picked = snap.palettes.find((p) => p.palette_id === ev.target.value);
+    if (!picked) return;
+    el("pal-name").value = picked.name;
+    el("pal-wall").value = picked.room.wall_base;
+    el("pal-trim").value = picked.room.wall_trim;
+    el("pal-fa").value = picked.room.floor_a;
+    el("pal-fb").value = picked.room.floor_b;
+    el("pal-out").value = picked.sprite_base.outline;
+    el("pal-wood").value = picked.sprite_base.wood_main;
+    el("pal-tbg").value = picked.terminal.bg;
+    el("pal-tfg").value = picked.terminal.fg;
+    el("pal-tacc").value = picked.terminal.accent;
+  });
+  el("pal-apply-hex").addEventListener("click", () => {
+    const hexes = (el("pal-lospec").value.match(/#[0-9a-fA-F]{6}/g) || []);
+    if (hexes[0]) el("pal-wall").value = hexes[0];
+    if (hexes[1]) el("pal-fa").value = hexes[1];
+    if (hexes[2]) el("pal-fb").value = hexes[2];
+    if (hexes[3]) el("pal-wood").value = hexes[3];
+    if (hexes[4]) el("pal-tbg").value = hexes[4];
+    toast("已导入 " + hexes.length + " 个色值");
+  });
+}
+
+/* 导入角色与角色包动态立绘弹层（支持多角色同台、召唤与移除） */
+function openImportActorModal() {
+  const snap = state.snap || {};
+  const hosts = snap.host_characters || [];
+  const actorsNow = snap.actors || [];
+  const spacesById = new Map((snap.spaces || []).map((s) => [s.space_id, s.name]));
+  const importedNames = new Set(actorsNow.map((a) => a.host_character || a.name));
+  const preferredHost = hosts.find((h) => !importedNames.has(h.name)) || hosts[0] || null;
+
+  const hostOpts = ['<option value="">（不绑定，新建独立角色）</option>'].concat(hosts.map((h) => {
+    const cnt = (h.pack_sprites || []).length;
+    return '<option value="' + esc(h.name) + '">' + esc(h.name) + (cnt > 0 ? ("（含 " + cnt + " 张心情立绘）") : "") + "</option>";
+  })).join("");
+  let imgData = "";
+
+  showModal("多角色导入与同台管理（当前世界）",
+    '<div style="display:flex;flex-direction:column;gap:10px;">'
+    + '<div style="border:1px solid var(--border);background:var(--panel-2);padding:8px;">'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">已在世界中的角色（可向同一世界添加多个同伴，或点击召唤到当前空间）：</div>'
+    + '<div id="existing-actors-box" style="display:flex;flex-direction:column;gap:5px;max-height:150px;overflow:auto;"></div>'
+    + "</div>"
+    + '<div class="form-grid">'
+    + '<div class="field full"><label>从宿主角色库新增/绑定（data/config/characters.yaml）</label><select class="px-sel" id="act-host">' + hostOpts + "</select></div>"
+    + '<div class="field"><label>世界显示名</label><input class="px-inp" id="act-name" value="' + esc(preferredHost ? preferredHost.name : "新同伴") + '" maxlength="20"></div>'
+    + '<div class="field"><label>人物贴图来源</label><select class="px-sel" id="act-sp-mode"><option value="host_pack">角色包自带动态心情立绘（推荐）</option><option value="pixel_grid">以文生静态像素小人（16×24）</option><option value="image">上传静态 PNG 立牌</option><option value="token">零成本像素棋子</option></select></div>'
+    + '<div class="field full" id="act-pack-hint" style="font-size:11px;color:var(--ok);border:1px solid var(--border);background:var(--panel-2);padding:6px 8px;">将自动使用角色包 sprites 立绘，并随精力、困意、心情与对话情绪自动切换。</div>'
+    + '<div class="field full hidden" id="act-prompt-wrap"><label>外貌关键词（可选，如：淡粉短发、绿色连帽外套、小飞船发卡）</label><input class="px-inp" id="act-prompt" placeholder="留空则按角色名与默认色调生成"></div>'
+    + '<div class="field full hidden" id="act-img-wrap"><label>选择静态图片</label><input type="file" id="act-img-file" accept="image/png,image/jpeg,image/webp"></div>'
+    + "</div>"
+    + "</div>",
+    [
+      { label: "关闭", onClick: closeModal },
+      {
+        label: "添加角色进当前世界",
+        cls: "primary",
+        onClick: (btn) => {
+          btn.disabled = true;
+          runAction("import_actor", {
+            host_character: el("act-host").value,
+            name: el("act-name").value.trim(),
+            sprite_mode: el("act-sp-mode").value,
+            sprite_prompt: el("act-prompt").value.trim(),
+            sprite_image_data: imgData,
+            space_id: state.snap.active_space_id,
+          }).then(() => { closeModal(); toast("角色已添加到当前世界"); }).catch((e) => { btn.disabled = false; toast(e.message, true); });
+        },
+      },
+    ], true);
+
+  const box = el("existing-actors-box");
+  if (!actorsNow.length) {
+    box.innerHTML = '<div style="font-size:11px;color:var(--muted);">当前还没有已导入的角色。</div>';
+  } else {
+    actorsNow.forEach((a) => {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);background:var(--panel);font-size:12px;";
+      const spName = spacesById.get(a.space_id) || a.space_id;
+      const inCur = a.space_id === snap.active_space_id;
+      const info = document.createElement("span");
+      info.style.cssText = "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      info.innerHTML = "<b>" + esc(a.name) + "</b> <span style='font-size:11px;color:var(--muted);'>@" + esc(spName) + " (" + a.x + "," + a.y + ")</span>";
+      row.appendChild(info);
+
+      if (!inCur) {
+        const bSummon = document.createElement("button");
+        bSummon.className = "px-btn primary";
+        bSummon.textContent = "📍 召唤至此";
+        bSummon.style.cssText = "padding:2px 7px;font-size:11px;";
+        bSummon.onclick = () => runAction("import_actor", {
+          actor_id: a.actor_id,
+          name: a.name,
+          host_character: a.host_character || a.name,
+          space_id: snap.active_space_id,
+        }).then(() => { closeModal(); toast("已将「" + a.name + "」召唤到当前世界"); }).catch((e) => toast(e.message, true));
+        row.appendChild(bSummon);
+      } else {
+        const bObs = document.createElement("button");
+        bObs.className = "px-btn";
+        bObs.textContent = a.actor_id === snap.active_actor_id ? "观察中" : "切换视角";
+        bObs.disabled = a.actor_id === snap.active_actor_id;
+        bObs.style.cssText = "padding:2px 7px;font-size:11px;";
+        bObs.onclick = () => runAction("set_active_actor", { actor_id: a.actor_id }).then(() => { closeModal(); }).catch((e) => toast(e.message, true));
+        row.appendChild(bObs);
+      }
+
+      const bRem = document.createElement("button");
+      bRem.className = "px-btn danger";
+      bRem.textContent = "移除";
+      bRem.disabled = actorsNow.length <= 1;
+      bRem.style.cssText = "padding:2px 7px;font-size:11px;";
+      bRem.onclick = () => openConfirm(
+        "确定要将「" + a.name + "」从文字世界移除吗？",
+        () => runAction("remove_actor", { actor_id: a.actor_id }).then(() => { openImportActorModal(); toast("已移除「" + a.name + "」"); }),
+      );
+      row.appendChild(bRem);
+      box.appendChild(row);
+    });
+  }
+
+  const syncModeUi = () => {
+    const m = el("act-sp-mode").value;
+    const h = hosts.find((row) => row.name === el("act-host").value);
+    const cnt = (h && h.pack_sprites && h.pack_sprites.length) || 0;
+    el("act-pack-hint").classList.toggle("hidden", m !== "host_pack");
+    el("act-pack-hint").textContent = cnt > 0
+      ? ("已检测到 " + cnt + " 张角色包表情立绘，将随状态、心情与对话自动更换。")
+      : "当前所选角色暂无角色包立绘，若无 sprites 将自动回退为像素小人。";
+    el("act-pack-hint").style.color = cnt > 0 ? "var(--ok)" : "var(--warn)";
+    el("act-prompt-wrap").classList.toggle("hidden", m !== "pixel_grid");
+    el("act-img-wrap").classList.toggle("hidden", m !== "image");
+  };
+
+  if (preferredHost) {
+    el("act-host").value = preferredHost.name;
+    const hasPack = Boolean(preferredHost.pack_sprites && preferredHost.pack_sprites.length);
+    el("act-sp-mode").value = hasPack ? "host_pack" : "pixel_grid";
+  } else {
+    el("act-sp-mode").value = "pixel_grid";
+  }
+  syncModeUi();
+
+  el("act-host").addEventListener("change", () => {
+    const val = el("act-host").value;
+    if (val) el("act-name").value = val;
+    const h = hosts.find((row) => row.name === val);
+    el("act-sp-mode").value = (h && h.pack_sprites && h.pack_sprites.length) ? "host_pack" : "pixel_grid";
+    syncModeUi();
+  });
+  el("act-sp-mode").addEventListener("change", syncModeUi);
+  el("act-img-file").addEventListener("change", (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { imgData = String(r.result || ""); };
+    r.readAsDataURL(f);
+  });
+}
+
+function openCreateSpaceModal(enterAfterCreate) {
+  const palOpts = (state.snap.palettes || []).map((p) => '<option value="' + esc(p.palette_id) + '">' + esc(p.name) + "</option>").join("");
+  showModal("新建空白世界",
+    '<div class="form-grid">'
+    + '<div class="field"><label>世界名称</label><input class="px-inp" id="sp-name" value="小阳台" maxlength="16"></div>'
+    + '<div class="field"><label>调色板</label><select class="px-sel" id="sp-pal">' + palOpts + "</select></div>"
+    + '<div class="field"><label>宽度（8–64 格）</label><input class="px-inp" type="number" id="sp-w" value="12" min="8" max="64"></div>'
+    + '<div class="field"><label>高度（6–64 格）</label><input class="px-inp" type="number" id="sp-h" value="9" min="6" max="64"></div>'
+    + '<div class="field full"><label>环境底色白描</label><input class="px-inp" id="sp-desc" value="一处吹得到微风的小阳台。" maxlength="60"></div>'
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: enterAfterCreate ? "创建并进入" : "创建世界",
+        cls: "primary",
+        onClick: () => runAction("create_space", {
+          name: el("sp-name").value,
+          width: Number(el("sp-w").value || 12),
+          height: Number(el("sp-h").value || 9),
+          palette_id: el("sp-pal").value,
+          ambient_phrase: el("sp-desc").value,
+        }).then((res) => {
+          closeModal();
+          const newSid = (res.space && res.space.space_id) || "";
+          if (enterAfterCreate && newSid) {
+            state.selectedEntityId = "";
+            state.selectedBlueprintId = "";
+            state.windowSpaceId = newSid;
+            state.view = "world";
+            renderViewShell();
+          }
+          toast("已新建世界「" + ((res.space && res.space.name) || "新世界") + "」");
+        }).catch((e) => toast(e.message, true)),
+      },
+    ], true);
+}
+
+function openGenerateMapModal(defaultMode) {
+  const presets = [
+    ["🌸 樱花庭院与榻榻米小屋", "樱花环绕的日式庭院与榻榻米小木屋，有池塘、鹅卵石小道、露天篝火、铸铁街灯和百宝箱"],
+    ["🕹️ 赛博霓虹游戏房", "赛博霓虹电玩秘密基地，有双屏游戏电脑、复古街机、懒人沙发、小冰箱和热拉面"],
+    ["☕ 阳光露台咖啡馆", "阳光午后咖啡馆与画室露台，有樱粉软毯、意式咖啡机、草莓蛋糕、黑胶唱机和木质画架"],
+    ["🏕️ 湖畔篝火露营地", "星空下的湖畔露营草地与休憩木屋，有温暖篝火、池水沙滩、猫咪坐垫和林间宝箱"],
+  ];
+  const presetHtml = presets.map(([lbl, p], idx) => '<button type="button" class="px-btn map-preset-btn" data-pidx="' + idx + '" style="font-size:11px;padding:3px 7px;">' + esc(lbl) + "</button>").join("");
+  const isReplace = defaultMode === "replace_current";
+
+  showModal("🗺️ LLM 一键生成像素世界/地图",
+    '<div class="form-grid">'
+    + '<div class="field full"><label>快速场景灵感（点击填入）</label><div style="display:flex;flex-wrap:wrap;gap:6px;">' + presetHtml + "</div></div>"
+    + '<div class="field full"><label>场景与分区描述（大模型将自动规划墙体、地形与家具）</label><textarea class="px-txt" id="map-prompt" rows="3" maxlength="240" placeholder="如：一间分出榻榻米游戏角与小阳台的温馨卧室，外面铺着鹅卵石道和花草。">' + esc(presets[0][1]) + "</textarea></div>"
+    + '<div class="field"><label>地图尺寸</label><select class="px-sel" id="map-size"><option value="12x9">12×9（紧凑小屋）</option><option value="16x12" selected>16×12（标准庭院）</option><option value="20x15">20×15（宽敞大宅）</option><option value="24x18">24×18（庄园全图）</option></select></div>'
+    + '<div class="field"><label>生成方式</label><select class="px-sel" id="map-mode"><option value="new_space"' + (isReplace ? "" : " selected") + '>创建为独立新世界</option><option value="replace_current"' + (isReplace ? " selected" : "") + '>重塑并覆盖当前世界</option></select></div>'
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "开始生成地图",
+        cls: "primary",
+        onClick: (btn) => {
+          const prompt = el("map-prompt").value.trim();
+          if (!prompt) return toast("请输入地图场景描述", true);
+          const [wStr, hStr] = String(el("map-size").value || "16x12").split("x");
+          const pickedMode = el("map-mode").value;
+          btn.disabled = true;
+          btn.textContent = "生成布局中...";
+          runAction("generate_world_map", {
+            prompt_text: prompt,
+            width: Number(wStr || 16),
+            height: Number(hStr || 12),
+            mode: pickedMode,
+            space_id: state.snap ? state.snap.active_space_id : "",
+          }).then((res) => {
+            closeModal();
+            const g = res.generated || {};
+            const newSid = g.space_id || (res.snapshot && res.snapshot.space && res.snapshot.space.space_id) || "";
+            if ((pickedMode === "new_space" || state.view === "hub") && newSid) {
+              state.selectedEntityId = "";
+              state.selectedBlueprintId = "";
+              state.windowSpaceId = newSid;
+              state.view = "world";
+              renderViewShell();
+            }
+            toast((res.note || "地图生成完成") + "（放置 " + Number(g.placed_count || 0) + " 件物品）");
+            setTimeout(() => focusActiveActor(), 80);
+          }).catch((e) => {
+            btn.disabled = false;
+            btn.textContent = "开始生成地图";
+            toast(e.message, true);
+          });
+        },
+      },
+    ]);
+
+  document.querySelectorAll(".map-preset-btn").forEach((b) => {
+    b.onclick = () => {
+      const idx = Number(b.dataset.pidx || 0);
+      if (presets[idx]) el("map-prompt").value = presets[idx][1];
+    };
+  });
+}
+
+function openWorldMenuModal() {
+  const snap = state.snap;
+  if (!snap) return;
+  const sp = snap.space || {};
+  const canDelete = (snap.spaces || []).length > 1;
+  showModal("⚙ 世界管理与工具 — " + (sp.name || "当前世界"),
+    '<div class="menu-grid">'
+    + '<button class="menu-item-btn primary" id="wm-gen-map"><b>🗺️ LLM 生成 / 改造地图</b><span>输入场景描述一键生成家具与地形</span></button>'
+    + '<button class="menu-item-btn" id="wm-import-actor"><b>👤 导入角色包</b><span>从宿主或自定义立绘导入角色</span></button>'
+    + '<button class="menu-item-btn" id="wm-palette"><b>🎨 切换 / 编辑调色板</b><span>调整世界色彩风格或导入 Lospec</span></button>'
+    + '<button class="menu-item-btn" id="wm-tick"><b>⏱ 推进世界时钟 +1h</b><span>推进时间并触发昼夜与生物钟变化</span></button>'
+    + '<button class="menu-item-btn" id="wm-starter"><b>📦 摆入基础测试包</b><span>在当前世界生成一套预设测试物品</span></button>'
+    + '<button class="menu-item-btn" id="wm-new-space"><b>➕ 新建空白世界</b><span>创建一个新的独立像素世界并进入</span></button>'
+    + '<button class="menu-item-btn" id="wm-popout"><b>↗ 独立窗口打开此世界</b><span>另开一个专属浏览器窗口查看本世界</span></button>'
+    + '<button class="menu-item-btn danger" id="wm-clear"><b>🧹 清空当前世界物品</b><span>仅清空室内家具与小物，保留自定义蓝图</span></button>'
+    + '<button class="menu-item-btn danger" id="wm-delete-space"' + (canDelete ? "" : " disabled") + '><b>🗑 删除当前世界</b><span>' + (canDelete ? "永久删除此世界并迁移其中的角色" : "至少需要保留一个世界") + "</span></button>"
+    + "</div>",
+    [{ label: "关闭", onClick: closeModal }],
+  );
+  el("wm-gen-map").onclick = () => openGenerateMapModal("replace_current");
+  el("wm-import-actor").onclick = openImportActorModal;
+  el("wm-palette").onclick = openPaletteModal;
+  el("wm-tick").onclick = () => {
+    closeModal();
+    runAction("tick_world", { advance_minutes: 60 }).then(() => toast("世界时间已推进 1 小时")).catch((e) => toast(e.message, true));
+  };
+  el("wm-starter").onclick = () => {
+    closeModal();
+    runAction("apply_starter_pack", { space_id: sp.space_id }).then(() => toast("已摆入默认测试包")).catch((e) => toast(e.message, true));
+  };
+  el("wm-new-space").onclick = () => openCreateSpaceModal(true);
+  el("wm-popout").onclick = () => {
+    closeModal();
+    openStandaloneWorld(sp.space_id);
+  };
+  el("wm-clear").onclick = () => openConfirm(
+    "确定要清空世界「" + (sp.name || sp.space_id) + "」内的所有物品吗？（不会删除已保存的自定义蓝图）",
+    () => runAction("clear_space", { space_id: sp.space_id }).then(() => { state.selectedEntityId = ""; toast("世界物品已清空"); }),
+  );
+  el("wm-delete-space").onclick = () => {
+    if (!canDelete) return;
+    openConfirm(
+      "确定要永久删除世界「" + (sp.name || sp.space_id) + "」吗？（家具和地形会被清理，角色会自动转移至其他世界。）",
+      () => runAction("delete_space", { space_id: sp.space_id }).then((res) => {
+        const del = res.deleted || {};
+        state.selectedEntityId = "";
+        state.selectedBlueprintId = "";
+        if (del.active_space_id) state.windowSpaceId = del.active_space_id;
+        toast("已删除世界「" + (del.deleted_name || sp.name) + "」，已切换至其他世界");
+      }),
+    );
+  };
+}
+
+function focusActiveActor() {
+  if (!state.snap) return;
+  const act = state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+  if (!act || act.space_id !== state.snap.active_space_id) return;
+  const wrap = el("stage-wrap");
+  if (!wrap) return;
+  const cx = (act.x + 0.5) * TILE * state.zoom;
+  const cy = (act.y + 0.5) * TILE * state.zoom;
+  wrap.scrollTo({
+    left: Math.max(0, cx - wrap.clientWidth / 2),
+    top: Math.max(0, cy - wrap.clientHeight / 2),
+    behavior: "smooth",
+  });
+}
+
+/* ── 绑定控件事件并启动 ── */
+function init() {
+  state.token = tokenFromUrl();
+  const params = new URLSearchParams(window.location.search);
+  const urlSpaceId = (params.get("space_id") || "").trim();
+  const urlView = (params.get("view") || "").trim().toLowerCase();
+  if (urlSpaceId || urlView === "world") {
+    state.view = "world";
+    state.windowSpaceId = urlSpaceId;
+    state.isPopout = Boolean(urlSpaceId || urlView === "world");
+  } else {
+    state.view = "hub";
+  }
+  renderViewShell();
+
+  setupCanvasEvents();
+  el("modal-close").onclick = closeModal;
+
+  /* ── 世界大厅绑定 ── */
+  el("btn-hub-new-world").onclick = () => openCreateSpaceModal(true);
+  el("btn-hub-gen-world").onclick = () => openGenerateMapModal("new_space");
+  el("btn-hub-import-actor").onclick = openImportActorModal;
+  el("btn-hub-refresh").onclick = () => runAction("get_world_snapshot", {}).then(() => toast("已刷新世界列表")).catch((e) => toast(e.message, true));
+
+  /* ── 独立世界窗口顶栏与 3 模式切换 ── */
+  el("btn-go-hub").onclick = () => {
+    state.view = "hub";
+    state.windowSpaceId = "";
+    state.selectedEntityId = "";
+    state.selectedBlueprintId = "";
+    state.eyeMode = false;
+    if (el("btn-eye")) el("btn-eye").classList.remove("eye-on");
+    renderViewShell();
+    runAction("get_world_snapshot", {}).catch((e) => toast(e.message, true));
+  };
+  el("btn-popout-world").onclick = () => {
+    if (state.snap && state.snap.space) openStandaloneWorld(state.snap.space.space_id);
+  };
+  el("btn-world-menu").onclick = openWorldMenuModal;
+  document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
+    btn.onclick = () => setUiMode(btn.dataset.uimode || "play");
+  });
+  document.querySelectorAll("#builder-subtabs .bsub-tab").forEach((btn) => {
+    btn.onclick = () => setBuilderSub(btn.dataset.bsub || "furniture");
+  });
+
+  el("btn-eye").onclick = () => {
+    state.eyeMode = !state.eyeMode;
+    el("btn-eye").classList.toggle("eye-on", state.eyeMode);
+    renderViewport();
+  };
+
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
+    btn.onclick = () => setBuilderTool(btn.dataset.tool || "select");
+  });
+  el("chk-auto-expand").addEventListener("change", (ev) => {
+    state.autoExpand = Boolean(ev.target.checked);
+  });
+  document.querySelectorAll(".expand-edge-btn[data-expand]").forEach((btn) => {
+    btn.onclick = () => {
+      if (!state.snap) return;
+      const dir = btn.dataset.expand;
+      runAction("expand_space", { space_id: state.snap.active_space_id, direction: dir, amount: 4 })
+        .then((res) => {
+          const sp = res.space || (res.snapshot && res.snapshot.space);
+          toast("已向该方向拓展 +4 格" + (sp ? ("（" + sp.width + "×" + sp.height + "）") : ""));
+        })
+        .catch((e) => toast(e.message, true));
+    };
+  });
+
+  const setZoom = (nextZoom) => {
+    state.zoom = Math.max(0.5, Math.min(2.0, Math.round(nextZoom * 4) / 4));
+    el("zoom-val").textContent = Math.round(state.zoom * 100) + "%";
+    renderViewport();
+  };
+  el("btn-zoom-out").onclick = () => setZoom(state.zoom - 0.25);
+  el("btn-zoom-in").onclick = () => setZoom(state.zoom + 0.25);
+  el("btn-focus-actor").onclick = focusActiveActor;
+  el("btn-status-focus").onclick = focusActiveActor;
+
+  el("btn-unselect").onclick = () => {
+    state.selectedEntityId = "";
+    state.selectedBlueprintId = "";
+    el("btn-cancel-brush").classList.add("hidden");
+    el("place-hint").textContent = "未选中放置笔刷";
+    renderAssetsPanel();
+    renderInspector();
+    renderViewport();
+  };
+
+  document.querySelectorAll("#bp-cat-bar .cat-chip").forEach((chip) => {
+    chip.onclick = () => {
+      state.bpCategory = chip.dataset.cat || "all";
+      document.querySelectorAll("#bp-cat-bar .cat-chip").forEach((c) => c.classList.toggle("active", c === chip));
+      renderAssetsPanel();
+    };
+  });
+
+  const triggerAutoStep = (silent) => {
+    if (state.autoStepping) return;
+    const aid = (state.snap && state.snap.active_actor_id) || "";
+    state.autoStepping = true;
+    el("btn-auto-step").disabled = true;
+    runAction("autonomous_step", { actor_id: aid, advance_minutes: 10 })
+      .then((res) => {
+        const decs = (res.tick_result && res.tick_result.decisions) || [];
+        const d = decs[0] || {};
+        if (!silent) toast(d.thought ? ("💭 " + d.thought) : (d.goal || "她自己活动了一下"));
+      })
+      .catch((e) => { if (!silent) toast(e.message, true); })
+      .finally(() => {
+        state.autoStepping = false;
+        el("btn-auto-step").disabled = false;
+      });
+  };
+  el("btn-auto-step").onclick = () => triggerAutoStep(false);
+  el("btn-status-auto-step").onclick = () => triggerAutoStep(false);
+  el("btn-auto-life").onclick = () => {
+    state.autoLife = !state.autoLife;
+    const b = el("btn-auto-life");
+    b.classList.toggle("eye-on", state.autoLife);
+    b.textContent = state.autoLife ? "🤖 自动生活: 开" : "🤖 自动生活: 关";
+    toast(state.autoLife ? "已开启自动生活（每 15 秒自主探索一次）" : "已暂停自动生活");
+  };
+
+  setInterval(() => {
+    if (!state.autoLife || !el("modal-mask").classList.contains("hidden") || state.drag) return;
+    triggerAutoStep(true);
+  }, 15000);
+  el("btn-refresh").onclick = () => {
+    const sid = (state.view === "world" && state.windowSpaceId) || (state.snap ? state.snap.active_space_id : "");
+    runAction("get_world_snapshot", { space_id: sid }).catch((e) => toast(e.message, true));
+  };
+
+  el("actor-select").addEventListener("change", (ev) => {
+    if (ev.target.value) runAction("set_active_actor", { actor_id: ev.target.value }).catch((e) => toast(e.message, true));
+  });
+
+  const setDelivery = (mode) => {
+    state.deliveryMode = mode;
+    el("mode-silent").classList.toggle("active", mode === "silent");
+    el("mode-give").classList.toggle("active", mode === "give");
+  };
+  el("mode-silent").onclick = () => setDelivery("silent");
+  el("mode-give").onclick = () => setDelivery("give");
+
+  el("btn-cancel-brush").onclick = () => {
+    state.selectedBlueprintId = "";
+    el("btn-cancel-brush").classList.add("hidden");
+    el("place-hint").textContent = "未选中放置笔刷";
+    renderAssetsPanel();
+    renderInspector();
+    renderViewport();
+  };
+
+  const triggerForge = () => {
+    const prompt = el("forge-input").value.trim();
+    if (!prompt) return toast("先输入一句物品描述", true);
+    const btn = el("btn-forge");
+    btn.disabled = true;
+    btn.textContent = "编译中";
+    runAction("compile_text_blueprint", { prompt_text: prompt, width: 16, height: 16 })
+      .then((res) => {
+        el("forge-input").value = "";
+        openBlueprintModal(res.blueprint, true);
+        if (res.note) toast(res.note);
+      })
+      .catch((e) => toast(e.message, true))
+      .finally(() => { btn.disabled = false; btn.textContent = "生成"; });
+  };
+  el("btn-forge").onclick = triggerForge;
+  el("forge-input").addEventListener("keydown", (ev) => { if (ev.key === "Enter") triggerForge(); });
+
+  const openCurExpr = () => {
+    const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+    openExpressionModal(act);
+  };
+  el("dock-portrait-card").onclick = openCurExpr;
+  el("btn-open-expr").onclick = openCurExpr;
+
+  el("btn-chat-clear").onclick = () => {
+    const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
+    if (!act) return toast("当前没有活动角色", true);
+    openConfirm("确定清空与「" + act.name + "」的当前世界对话记录吗？", () => runAction("clear_world_chat", { actor_id: act.actor_id }).then(() => toast("已清空对话记录")));
+  };
+
+  const sendWorldChat = () => {
+    const inp = el("chat-input");
+    const btn = el("btn-chat-send");
+    const text = inp.value.trim();
+    if (!text) return toast("先输入想对她说的话", true);
+    const aid = (state.snap && state.snap.active_actor_id) || "";
+    inp.disabled = true;
+    btn.disabled = true;
+    btn.textContent = "回应中";
+    runAction("chat_in_world", { actor_id: aid, text })
+      .then((res) => {
+        inp.value = "";
+        const actions = (res.chat_result && res.chat_result.actions_executed) || [];
+        if (actions.length) toast("她顺手做了 " + actions.length + " 件事");
+      })
+      .catch((e) => toast(e.message, true))
+      .finally(() => {
+        inp.disabled = false;
+        btn.disabled = false;
+        btn.textContent = "发送";
+        inp.focus();
+      });
+  };
+  el("btn-chat-send").onclick = sendWorldChat;
+  el("chat-input").addEventListener("keydown", (ev) => { if (ev.key === "Enter") sendWorldChat(); });
+
+  runAction("get_world_snapshot", { space_id: state.windowSpaceId || "" })
+    .then(() => {
+      if (state.view === "world") setTimeout(() => focusActiveActor(), 100);
+    })
+    .catch((e) => toast("加载世界失败：" + e.message, true));
+  setInterval(() => {
+    if (!el("modal-mask").classList.contains("hidden") || state.drag) return;
+    const sid = (state.view === "world" && state.windowSpaceId) || "";
+    runAction("get_world_snapshot", { space_id: sid }).catch(() => {});
+  }, 6000);
+}
+
+init();
+</script>
+</body>
+</html>
