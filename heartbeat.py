@@ -201,6 +201,24 @@ class WorldHeartbeat:
                     taken.append(f"{aid}: {log_line}")
                 self._maybe_write_diary(aid, act["name"], summary, vis, settings)
 
+            # 行动结果即时回写 nanami_persona 心理模型（L5 ACT + L2 需要 + L6 惯性）
+            if exec_logs or str(plan.get("drive") or "") == "calm":
+                ev_payload = self._build_world_event_payload(plan, exec_logs, summary)
+                if ev_payload is not None:
+                    host_name = str(act.get("host_character") or act.get("name") or "").strip()
+                    ev_res = persona_bridge.emit_world_event_to_persona(
+                        self._project_root,
+                        host_name,
+                        space_id=str(act.get("space_id") or "room_default"),
+                        actor_id=aid,
+                        event_payload=ev_payload,
+                        custom_persona_dir=settings.persona_data_dir,
+                    )
+                    if isinstance(ev_res, dict) and ev_res.get("ok") and "moodV" in ev_res:
+                        cur_vit = dict(act.get("vitals") or {})
+                        cur_vit["mood_v"] = float(ev_res["moodV"])
+                        self._engine.set_actor_vitals(aid, cur_vit)
+
             chat_svc = self._chat_service_provider() if self._chat_service_provider else None
             if chat_svc is not None and not plan.get("skip_auto_chat_log") and (exec_logs or plan.get("record_thought_in_chat")):
                 try:
@@ -224,6 +242,44 @@ class WorldHeartbeat:
             })
 
         return taken, decisions
+
+    @staticmethod
+    def _build_world_event_payload(
+        plan: dict[str, Any],
+        exec_logs: list[str],
+        summary: str,
+    ) -> dict[str, Any] | None:
+        drive = str(plan.get("drive") or "").strip().lower()
+        actions = plan.get("actions") or []
+        first_act = str((actions[0] if actions and isinstance(actions[0], dict) else {}).get("action") or "").lower()
+        first_tool = str((actions[0] if actions and isinstance(actions[0], dict) else {}).get("tool") or "").lower()
+        joined = " ".join(exec_logs)
+
+        if any(k in joined for k in ("失败", "打不开", "锁住", "无法", "受阻", "没成功")):
+            kind = "action_blocked"
+        elif first_tool == "world_talk" or drive == "social":
+            kind = "social_gesture"
+        elif drive == "rest" or first_act in ("rest", "leave_rest"):
+            kind = "rested"
+        elif drive == "hunger" or first_act == "consume":
+            kind = "consumed"
+        elif first_act == "turn_on" and drive == "comfort":
+            kind = "light_on"
+        elif drive in ("curiosity", "explore") or first_act in ("look", "open", "unlock"):
+            kind = "discovered"
+        elif drive == "calm" and not exec_logs:
+            kind = "alone_tick"
+        elif exec_logs:
+            kind = "action_success"
+        else:
+            return None
+
+        domain = "game" if drive == "game" else "nonGame"
+        return {
+            "kind": kind,
+            "domain": domain,
+            "label": (summary or str(plan.get("goal") or kind))[:60],
+        }
 
     def _execute_plan_actions(self, actor_id: str, raw_actions: list[dict[str, Any]]) -> list[str]:
         logs: list[str] = []
@@ -367,6 +423,11 @@ class WorldHeartbeat:
             return None
 
         actor_host = str(actor.get("host_character") or actor.get("name") or "").strip()
+        bp = persona_bridge.read_persona_behavior_profile(
+            self._project_root,
+            actor_host,
+            custom_persona_dir=settings.persona_data_dir,
+        )
         peer_hosts = [str(p.get("host_character") or p.get("name") or "").strip() for p in peers]
         rels = persona_bridge.read_actor_relations(
             self._project_root,
@@ -396,13 +457,16 @@ class WorldHeartbeat:
             val = float(edge.get("affective_valence") or 0.0)
             trust = float(edge.get("trust") or 0.55)
             score = willing * 3.2 + warmth * 2.0 + max(-0.5, val) * 2.5 + trust * 1.4
+            score += (float(bp.get("social_initiative", 0.38)) - 0.5) * 3.0
+            score -= (float(bp.get("social_avoidance", 0.63)) - 0.5) * 2.5
 
             if energy >= 0.60 and mood_v >= 0.05:
                 score += 1.4
             if any(k in agenda for k in ("company", "fun", "social", "talk")):
                 score += 2.2
             if not edge.get("known"):
-                score += 1.8 if (curiosity >= 0.50 or force_autonomy) else -2.5
+                stranger_bias = (float(bp.get("social_initiative", 0.38)) - float(bp.get("social_avoidance", 0.63))) * 3.5
+                score += (1.2 + stranger_bias) if (curiosity >= 0.50 or force_autonomy) else (-2.5 + stranger_bias)
 
             rec_key = f"actor:{p_aid}"
             if recent and recent[0] == rec_key:
@@ -459,11 +523,14 @@ class WorldHeartbeat:
             '"target_id":"主目标entity_id或actor:xxx或空",'
             '"actions":[{"tool":"world_act|world_move|world_write|world_talk","entity_id":"...","action":"turn_on|turn_off|rest|leave_rest|consume|interact|open|unlock|take|look|enter","target_actor_id":"同屋角色actor_id","x":0,"y":0,"text":"..."}]}'
         )
+        bp_llm = l0_llm.get("behavior_profile") or {}
         user_prompt = (
             f"{l0_llm['prompt_block']}\n\n"
             f"{view_txt}\n"
             f"- 体内状态：精力={vit.get('energy')}, 困意={vit.get('sleep_pressure')}, 心情={vit.get('mood_v')}, "
             f"饥饿={aut['hunger']}, 好奇={aut['curiosity']}, 偏好领域={vit.get('preferred_domains')}\n"
+            f"- 人格行为倾向(L1-L8)：安全优先={bp_llm.get('safety_priority')}, 社交主动={bp_llm.get('social_initiative')}, "
+            f"社交回避={bp_llm.get('social_avoidance')}, 探索欲={bp_llm.get('exploration_drive')}, 礼貌克制={bp_llm.get('norm_courtesy')}\n"
             f"- 最近刚碰过的目标：{aut['recent_targets']}\n"
             f"- 空间可用尺寸：{sp_snap['space']['width']}x{sp_snap['space']['height']}\n"
             "不要重复连续碰同一目标；若决定好了，只输出 JSON。"
@@ -671,12 +738,22 @@ class WorldHeartbeat:
                     "record_thought_in_chat": True,
                 }
 
-        # 5. 探索组合：拿钥匙开带锁宝箱
+        bp = l0_frame.get("behavior_profile") or {}
+        exploration_drive = float(bp.get("exploration_drive", 0.64))
+        safety_priority = float(bp.get("safety_priority", 0.55))
+        norm_courtesy = float(bp.get("norm_courtesy", 0.75))
+        game_eff = float(bp.get("domain_efficacy_game", 0.85))
+        has_resting_peer = any(
+            a.get("space_id") == sid and a.get("actor_id") != aid and a.get("posture") == "resting"
+            for a in (sp_snap.get("actors") or [])
+        )
+
+        # 5. 探索组合：拿钥匙开带锁宝箱（受探索欲与安全需要调制；低落或高安全谨慎且探索欲低时延后）
         locked_box = next(
             (e for e in vis if (e.get("traits") or {}).get("container", {}).get("is_locked")),
             None,
         )
-        if locked_box:
+        if locked_box and (exploration_drive >= 0.42 or force_autonomy) and not (float(vit.get("mood_v", 0.15)) <= -0.35 and safety_priority >= 0.65):
             need_tag = str((locked_box.get("traits") or {}).get("container", {}).get("key_tag") or "").strip()
             key_ent = next(
                 (
@@ -774,6 +851,10 @@ class WorldHeartbeat:
                 score = 2.0 + float((ent.get("effects") or {}).get("mood_v_delta") or 0.0) * 5.0
                 if dom in preferred:
                     score += 3.0
+                if dom == "game":
+                    score += (game_eff - 0.5) * 3.0
+                if has_resting_peer and norm_courtesy >= 0.60:
+                    score += 1.4 if dom in ("reading", "hobby") else (-1.2 if dom in ("music", "game") else 0.0)
                 if any(k in agenda for k in ("hide", "calm", "quiet")) and dom in ("reading", "hobby", "music"):
                     score += 1.8
                 elif any(k in agenda for k in ("company", "fun", "play")) and dom in ("game", "music"):

@@ -6,6 +6,8 @@ import json
 import logging
 import math
 import os
+import shutil
+import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -733,6 +735,7 @@ def update_and_project_world_perception(
     look_eid: str = "",
     touched_eid: str = "",
     advance_exposure: float = 0.0,
+    behavior_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """计算 L0 主观注意力焦点 Top-K、更新 Groves-Thompson 熟悉度与 Tolman/ACT-R 认知地图。"""
     if not bool(cfg.get("enabled", True)):
@@ -802,15 +805,24 @@ def update_and_project_world_perception(
         dist = max(abs(ax - ex), abs(ay - ey))
         traits = ent.get("traits") or {}
 
-        # Itti-Koch + Easterbrook 显著度评分
+        # Itti-Koch + Easterbrook 显著度评分（叠加人格特质/域效能自上而下偏置）
+        bp = behavior_profile if isinstance(behavior_profile, Mapping) else {}
         s_dist = math.exp(-dist / max(1.5, eff_r))
         s_topdown = 0.0
         if "consumable" in traits and int(traits["consumable"].get("uses_left") or 0) > 0:
             s_topdown += 0.45 * hunger
         if "restable" in traits and sleep_p >= 0.55:
             s_topdown += 0.45 * sleep_p
-        if "activity" in traits and str(traits["activity"].get("domain") or "") in preferred:
-            s_topdown += 0.40
+        if "activity" in traits:
+            dom = str(traits["activity"].get("domain") or "")
+            if dom in preferred:
+                s_topdown += 0.40
+            if dom == "game":
+                s_topdown += 0.30 * float(bp.get("domain_efficacy_game", 0.5))
+        if "switchable" in traits and traits["switchable"].get("provides_light") and not traits["switchable"].get("is_on"):
+            s_topdown += 0.35 * float(bp.get("safety_priority", 0.5))
+        if "container" in traits and not traits["container"].get("is_open"):
+            s_topdown += 0.25 * float(bp.get("exploration_drive", 0.5))
         is_new = eid not in mmap
         s_nov = nov_w * (0.6 if is_new else 0.0)
         s_ior = ior_w * (0.75 if eid in recent[:2] else 0.0)
@@ -902,6 +914,138 @@ def _sensory_item_desc(ent: Mapping[str, Any], actors_map: Mapping[str, Mapping[
     return f"{name}（{'，'.join(cues)}）" if cues else name
 
 
+def read_persona_behavior_profile(
+    project_root: Path,
+    host_character: str,
+    *,
+    custom_persona_dir: str = "",
+) -> dict[str, Any]:
+    """只读读取 traits.json 与 social_traits.json，映射为基于 L1–L8/S1–S3 真实字段的行为权重。"""
+    defaults: dict[str, float] = {
+        "effortfulControl": 0.80,
+        "arousalBaseline": 0.35,
+        "domainEfficacy.game": 0.85,
+        "domainEfficacy.nonGame": 0.30,
+        "evaluativeSensitivity": 0.70,
+        "needProfile.safety": 0.50,
+        "needProfile.relatedness": 0.70,
+        "needProfile.competence": 0.70,
+        "socialEfficacy": 0.30,
+        "surgency": 0.25,
+        "attachment.avoidance": 0.55,
+        "attachment.anxiety": 0.25,
+        "social.affiliation": 0.60,
+        "social.achievement": 0.65,
+        "social.prosocial": 0.75,
+        "social.normCompliance": 0.75,
+        "attraction.friendThreshold": 0.42,
+    }
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+    merged = dict(defaults)
+    state_root: Path | None = None
+    if base_dir is not None:
+        state_root, _ = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
+    if state_root is not None and state_root.is_dir():
+        for fname in ("traits.json", "social_traits.json"):
+            raw = _read_json(state_root / "state" / fname)
+            if not raw:
+                continue
+            src = raw.get("traits") if isinstance(raw.get("traits"), dict) else raw
+            for k in defaults:
+                if k in src:
+                    merged[k] = _clamp_f(src[k], 0.0, 1.0, defaults[k])
+
+    safety_priority = _clamp_f(
+        0.50 * merged["needProfile.safety"] + 0.30 * merged["effortfulControl"] + 0.20 * (1.0 - merged["arousalBaseline"]),
+        0.0, 1.0, 0.55,
+    )
+    social_initiative = _clamp_f(
+        0.35 * merged["surgency"]
+        + 0.30 * merged["socialEfficacy"]
+        + 0.25 * merged["social.affiliation"]
+        + 0.10 * (1.0 - merged["attachment.avoidance"]),
+        0.0, 1.0, 0.38,
+    )
+    social_avoidance = _clamp_f(
+        0.55 * merged["attachment.avoidance"]
+        + 0.25 * (1.0 - merged["surgency"])
+        + 0.20 * (1.0 - merged["socialEfficacy"]),
+        0.0, 1.0, 0.63,
+    )
+    exploration_drive = _clamp_f(
+        0.45 * merged["needProfile.competence"]
+        + 0.35 * merged["social.achievement"]
+        + 0.20 * (1.0 - merged["needProfile.safety"]),
+        0.0, 1.0, 0.64,
+    )
+    norm_courtesy = _clamp_f(
+        0.60 * merged["social.normCompliance"] + 0.40 * merged["social.prosocial"],
+        0.0, 1.0, 0.75,
+    )
+    return {
+        "safety_priority": round(safety_priority, 3),
+        "social_initiative": round(social_initiative, 3),
+        "social_avoidance": round(social_avoidance, 3),
+        "exploration_drive": round(exploration_drive, 3),
+        "norm_courtesy": round(norm_courtesy, 3),
+        "domain_efficacy_game": round(merged["domainEfficacy.game"], 3),
+        "relatedness_need": round(merged["needProfile.relatedness"], 3),
+        "friend_threshold": round(merged["attraction.friendThreshold"], 3),
+    }
+
+
+def emit_world_event_to_persona(
+    project_root: Path,
+    host_character: str,
+    *,
+    space_id: str,
+    actor_id: str,
+    event_payload: Mapping[str, Any],
+    custom_persona_dir: str = "",
+) -> dict[str, Any] | None:
+    """将文字世界行动结果（客观 EPA 刺激）通过 mind.mjs --world-event 回写心理模型。"""
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+    if base_dir is None:
+        return None
+    state_root, _ = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
+    if state_root is None or not state_root.is_dir():
+        return None
+    mind_mjs = next(
+        (
+            p for p in (
+                Path(project_root) / "plugins" / "nanami_persona" / "toolkit" / "mind.mjs",
+                Path("plugins/nanami_persona/toolkit/mind.mjs"),
+            )
+            if p.is_file()
+        ),
+        None,
+    )
+    node = shutil.which("node")
+    if mind_mjs is None or not node:
+        return None
+    sid = str(space_id or "room_default").strip() or "room_default"
+    aid = str(actor_id or "actor").strip() or "actor"
+    cmd = [
+        node,
+        str(mind_mjs),
+        "--root",
+        str(state_root),
+        "--chat",
+        f"world:{sid}:{aid}",
+        "--world-event",
+        json.dumps(dict(event_payload), ensure_ascii=False),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0, encoding="utf-8", errors="replace")
+        if res.returncode != 0 or not res.stdout.strip():
+            return None
+        parsed = json.loads(res.stdout.strip().splitlines()[-1])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        logger.debug("nanami_world: mind.mjs --world-event 调用失败", exc_info=True)
+        return None
+
+
 def build_percept_frame(
     world_data_root: Path,
     project_root: Path,
@@ -922,6 +1066,7 @@ def build_percept_frame(
     sp_name = str(space_meta.get("name") or sid).strip()
     host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
     cfg = read_world_perception_config(project_root, host_char, custom_persona_dir=custom_persona_dir)
+    behavior_profile = read_persona_behavior_profile(project_root, host_char, custom_persona_dir=custom_persona_dir)
     l0 = update_and_project_world_perception(
         world_data_root,
         sid,
@@ -932,6 +1077,7 @@ def build_percept_frame(
         look_eid=look_eid,
         touched_eid=touched_eid,
         advance_exposure=advance_exposure,
+        behavior_profile=behavior_profile,
     )
 
     hour = float(lighting.get("hour", 12))
@@ -970,6 +1116,7 @@ def build_percept_frame(
         "circadian_phase": circ_phase,
         "focused_names": focused_names,
         "focused_sensory": focused_sensory,
+        "behavior_profile": behavior_profile,
         "prompt_block": prompt_block,
     }
 
