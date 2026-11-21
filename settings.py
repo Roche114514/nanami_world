@@ -57,6 +57,7 @@ class WorldSettings:
     heartbeat_enabled: bool = True
     heartbeat_interval_sec: int = 300
     heartbeat_use_llm: bool = False
+    episodic_memory_enabled: bool = True
     allow_ai_diary: bool = False
     diary_cooldown_hours: float = 6.0
     auto_compile_llm: bool = True
@@ -75,6 +76,7 @@ class WorldSettings:
             heartbeat_enabled=_as_bool(src.get("heartbeat_enabled"), True),
             heartbeat_interval_sec=_clamp_int(src.get("heartbeat_interval_sec"), 30, 3600, 300),
             heartbeat_use_llm=_as_bool(src.get("heartbeat_use_llm"), False),
+            episodic_memory_enabled=_as_bool(src.get("episodic_memory_enabled"), True),
             allow_ai_diary=_as_bool(src.get("allow_ai_diary"), False),
             diary_cooldown_hours=_clamp_float(src.get("diary_cooldown_hours"), 1.0, 72.0, 6.0),
             auto_compile_llm=_as_bool(src.get("auto_compile_llm"), True),

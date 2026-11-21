@@ -208,6 +208,17 @@ class NanamiWorldPlugin(PluginBase):
 
         if settings.inject_world_prompt and isinstance(getattr(context, "messages", None), list):
             block = projector.project_view(self._engine, aid, consume_diffs=True)
+            if settings.episodic_memory_enabled:
+                with self._lock:
+                    character = self._session_character
+                actor = next((item for item in self._engine.list_actors() if item["actor_id"] == aid), None)
+                if character and actor and character in (actor["host_character"], actor["name"]):
+                    cue = next((msg.get("content") for msg in reversed(context.messages)
+                                if isinstance(msg, dict) and msg.get("role") == "user"), "")
+                    if isinstance(cue, str):
+                        memory = projector.recall_puzzle(self._engine, aid, actor["space_id"], cue)
+                        if memory:
+                            block += f"\n【亲历的解谜记录】\n{memory}"
             if block:
                 _strip_world_messages(context.messages)
                 _insert_after_system(context.messages, block)

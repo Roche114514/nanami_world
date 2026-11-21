@@ -708,8 +708,6 @@ class WorldChatService:
                 actor_id,
                 space_id=eff_sid,
                 vitals_patch={
-                    "energy": float(raw_state.get("energy", actor["vitals"].get("energy", 0.72))),
-                    "sleep_pressure": float(raw_state.get("sleepPressure", actor["vitals"].get("sleep_pressure", 0.30))),
                     "mood_v": float(raw_state.get("moodV", actor["vitals"].get("mood_v", 0.15))),
                     "agenda": str(raw_state.get("agenda") or ""),
                     "disengaged": bool(att.get("disengaged", False)),
@@ -722,6 +720,10 @@ class WorldChatService:
         world_view = projector.project_view(self._engine, actor_id, consume_diffs=True)
         setting_text = soul_text or self._character_setting_of(actor)
         settings_now = self._settings_provider() if self._settings_provider else None
+        puzzle_recall = (
+            projector.recall_puzzle(self._engine, actor_id, eff_sid, clean_user)
+            if getattr(settings_now, "episodic_memory_enabled", True) else ""
+        )
         custom_pdir = str(getattr(settings_now, "persona_data_dir", "") or "")
         rels_now = persona_bridge.read_actor_relations(
             self._project_root,
@@ -772,6 +774,7 @@ class WorldChatService:
             + f"【你与用户的关系指针】{u_rel_line}\n\n"
             + l0_block
             + (f"【心理模型状态】\n{mind_card_text}\n\n" if mind_card_text else "")
+            + (f"【亲历的解谜记录】\n{puzzle_recall}\n\n" if puzzle_recall else "")
             + f"{world_view}\n\n"
             + "必须只输出一个合法 JSON 对象（不要 markdown 围栏）：\n"
             + "{\n"
@@ -797,7 +800,12 @@ class WorldChatService:
         brain_intent = str((parsed or {}).get("intent") or (parsed or {}).get("reply") or "").strip() if isinstance(parsed, dict) else ""
         used_llm = bool(brain_intent)
         if not used_llm:
-            parsed = self._offline_fallback(actor, clean_user)
+            parsed = (
+                {"world_actions": [], "emotion": "平静", "reply": puzzle_recall}
+                if puzzle_recall and not actor["vitals"].get("disengaged")
+                and any(word in clean_user for word in ("记得", "上次", "那次", "之前", "昨天"))
+                else self._offline_fallback(actor, clean_user)
+            )
 
         action_logs = self._execute_world_actions(actor_id, parsed.get("world_actions"))
         if used_llm:
@@ -1215,12 +1223,16 @@ class WorldChatService:
         )
 
         # 长短对话同步轻微反馈到双方精力与心情
+        mood_delta = 0.02 * len(turns) if stance_ok else -0.01
         for aid_x, act_x in ((initiator_id, actor_a), (target_actor_id, actor_b)):
             vx = act_x.get("vitals") or {}
             new_e = max(0.05, min(1.0, float(vx.get("energy", 0.72)) - 0.015 * len(turns)))
-            new_m = max(-1.0, min(1.0, float(vx.get("mood_v", 0.10)) + (0.02 * len(turns) if stance_ok else -0.01)))
+            new_m = max(-1.0, min(1.0, float(vx.get("mood_v", 0.10)) + mood_delta))
             try:
-                self._engine.set_actor_vitals(aid_x, {"energy": round(new_e, 3), "mood_v": round(new_m, 3)})
+                self._engine.set_actor_world_mood(
+                    aid_x, space_id=sid, vitals_patch={"energy": round(new_e, 3), "mood_v": round(new_m, 3)},
+                    record_event=False,
+                )
             except Exception:
                 pass
 
@@ -1228,6 +1240,7 @@ class WorldChatService:
         expr_b = self._engine.refresh_actor_expression(target_actor_id, emotion_hint=emo_b, force_auto=True) or {}
 
         action_note = f"[角色社交{'·初次破冰' if first_meet else ''}·{len(turns)}轮] {a_name} 与 {b_name} 聊了起来：{mem_note}"
+        self._engine.record_social_feedback(initiator_id, sid, action_note, peer_id=target_actor_id, mood_delta=mood_delta)
         with self._lock:
             self._append_msg_locked(initiator_id, "action", action_note, space_id=sid)
             self._append_msg_locked(target_actor_id, "action", action_note, space_id=sid)

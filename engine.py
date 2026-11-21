@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from . import persona_bridge
 from .schema import (
@@ -438,6 +439,10 @@ class WorldEngine:
             "last_tick_ts": time.time(),
             "clock_offset_minutes": 0.0,
             "next_seq": 1,
+            "event_source": uuid4().hex,
+            "persona_events": {},
+            "puzzle_memories": {},
+            "key_loans": {},
             "next_entity_num": 1,
             "spaces": {space["space_id"]: space},
             "actors": {},
@@ -495,6 +500,10 @@ class WorldEngine:
             "last_tick_ts": float(raw.get("last_tick_ts") or time.time()),
             "clock_offset_minutes": float(raw.get("clock_offset_minutes") or 0.0),
             "next_seq": max(1, int(raw.get("next_seq") or 1)),
+            "event_source": str(raw.get("event_source") or uuid4().hex),
+            "persona_events": dict(raw.get("persona_events") or {}),
+            "puzzle_memories": dict(raw.get("puzzle_memories") or {}),
+            "key_loans": dict(raw.get("key_loans") or {}),
             "next_entity_num": max(1, int(raw.get("next_entity_num") or 1)),
             "spaces": spaces,
             "actors": actors,
@@ -1109,8 +1118,13 @@ class WorldEngine:
 
             for eid in removed_ids:
                 self._world["entities"].pop(eid, None)
+            self._cancel_key_loans_locked(removed_ids)
 
             deleted_space = spaces.pop(sid)
+            self._world["puzzle_memories"].pop(sid, None)
+            self._world["persona_events"] = {
+                eid: event for eid, event in self._world["persona_events"].items() if event["space_id"] != sid
+            }
             if self._world.get("active_space_id") == sid:
                 self._world["active_space_id"] = fallback_sid
             persona_bridge.delete_world_relations(self._data_root, sid)
@@ -2047,6 +2061,17 @@ class WorldEngine:
                 act["holding_id"] = None
 
             removed = actors.pop(aid)
+            self._world["key_loans"] = {
+                loan_id: loan for loan_id, loan in self._world["key_loans"].items()
+                if aid not in (loan["borrower_id"], loan["lender_id"])
+            }
+            for history in self._world["puzzle_memories"].values():
+                history[:] = [memory for memory in history if aid not in memory["witness_ids"]]
+            for event_id, event in list(self._world["persona_events"].items()):
+                if aid in event["pending"]:
+                    event["pending"].remove(aid)
+                    if not event["pending"]:
+                        del self._world["persona_events"][event_id]
             if self._world.get("active_actor_id") == aid:
                 self._world["active_actor_id"] = next(iter(actors.keys()))
             self._append_event_locked(
@@ -2075,6 +2100,350 @@ class WorldEngine:
             self._append_event_locked(kind, actor_id=actor_id, space_id=sid, payload=dict(payload or {}))
             self._save_world_locked()
 
+    # ── 钥匙借用与归还 ─────────────────────────────────────────────────
+    def _loan_time_locked(self) -> float:
+        return time.time() + self._world["clock_offset_minutes"] * 60
+
+    def _loan_participant_locked(self, loan_id: str, actor_id: str, role: str) -> dict[str, Any]:
+        loan = self._world["key_loans"].get(loan_id)
+        if not loan or loan[f"{role}_id"] != actor_id:
+            raise ValueError("此角色没有这笔借物记录。")
+        return loan
+
+    def _cancel_key_loans_locked(self, item_ids: Sequence[str]) -> None:
+        for loan in self._world["key_loans"].values():
+            if loan["status"] == "open" and loan["item_id"] in item_ids:
+                loan["status"] = "cancelled"
+
+    def _record_loan_event_locked(
+        self, kind: str, actor_id: str, loan: Mapping[str, Any], **facts: Any,
+    ) -> None:
+        actor = self._world["actors"].get(actor_id) or {}
+        self._append_event_locked(kind, actor_id=actor_id, space_id=str(actor.get("space_id") or ""), payload={
+            "loan_id": loan["id"], "item_id": loan["item_id"], "world_at": self._loan_time_locked(), **facts,
+        })
+
+    def _handoff_key_locked(self, giver: dict[str, Any], receiver: dict[str, Any], key: dict[str, Any]) -> str:
+        sid = giver["space_id"]
+        aid = giver["actor_id"]
+        if giver.get("holding_id") != key["entity_id"] or key["parent_id"] != f"actor:{aid}":
+            return "key_not_held"
+        if receiver.get("holding_id"):
+            return "receiver_hands_full"
+        if sid != receiver["space_id"]:
+            return "different_space"
+        if receiver["posture"] == "resting":
+            return "receiver_resting"
+        x, y = receiver["x"], receiver["y"]
+        reach = {(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))}
+        path = self._bfs_locked(sid, (giver["x"], giver["y"]), reach, ignore_actor_id=aid)
+        if not path:
+            return "route_blocked"
+        if len(path) > 1:
+            self._finish_move_locked(giver, path)
+        giver["holding_id"] = None
+        receiver["holding_id"] = key["entity_id"]
+        key.update({"parent_id": f"actor:{receiver['actor_id']}", "x": x, "y": y, "z": -1, "space_id": sid})
+        return "transferred"
+
+    def lend_key(self, lender_id: str, borrower_id: str, item_id: str, *, minutes: int = 30) -> dict[str, Any]:
+        with self._lock:
+            if not 1 <= minutes <= 1440:
+                raise ValueError("借用时间须在 1 到 1440 分钟之间。")
+            actors = self._world["actors"]
+            lender, borrower = actors.get(lender_id), actors.get(borrower_id)
+            key = self._world["entities"].get(item_id)
+            if not lender or not borrower or lender_id == borrower_id or not key or "key" not in key["tags"]:
+                raise ValueError("请选一把钥匙和另一位角色。")
+            loans = self._world["key_loans"]
+            if any(loan["item_id"] == item_id and loan["status"] == "open" for loan in loans.values()):
+                raise ValueError("这把钥匙还在借用中。")
+            outcome = self._handoff_key_locked(lender, borrower, key)
+            if outcome != "transferred":
+                raise ValueError({
+                    "key_not_held": "请先让出借人拿起钥匙。", "receiver_hands_full": "借用人手上已有物品。",
+                    "different_space": "两人要在同一空间交接。", "receiver_resting": "借用人正在休息。",
+                    "route_blocked": "通往借用人的路被挡住了。",
+                }[outcome])
+            now = self._loan_time_locked()
+            loan_id = f"loan_{self._world['next_seq']}"
+            loan = {
+                "id": loan_id, "item_id": item_id, "item_name": key["name"],
+                "lender_id": lender_id, "borrower_id": borrower_id, "status": "open",
+                "started_at": now, "due_at": now + minutes * 60, "original_due_at": now + minutes * 60,
+            }
+            loans[loan_id] = loan
+            self._record_loan_event_locked("key_lent", lender_id, loan, borrower_id=borrower_id,
+                                           due_at=loan["due_at"], witness_ids=[lender_id, borrower_id])
+            self._save_world_locked()
+            return copy.deepcopy(loan)
+
+    def return_key(self, borrower_id: str, loan_id: str) -> dict[str, Any]:
+        with self._lock:
+            loan = self._loan_participant_locked(loan_id, borrower_id, "borrower")
+            if loan["status"] == "returned":
+                return {"outcome": "returned", "late": loan["late"]}
+            if loan["status"] != "open":
+                raise ValueError("这笔借用已结束。")
+            actors = self._world["actors"]
+            borrower, lender = actors.get(borrower_id), actors.get(loan["lender_id"])
+            key = self._world["entities"].get(loan["item_id"])
+            if not borrower or not lender or not key:
+                raise ValueError("借用双方或钥匙已不在世界中。")
+            outcome = self._handoff_key_locked(borrower, lender, key)
+            if outcome != "transferred":
+                self._record_loan_event_locked("key_return_blocked", borrower_id, loan, reason=outcome,
+                                               witness_ids=[borrower_id])
+                self._save_world_locked()
+                return {"outcome": outcome}
+            now = self._loan_time_locked()
+            loan.update({"status": "returned", "returned_at": now, "late": now > loan["due_at"]})
+            self._record_loan_event_locked("key_returned", borrower_id, loan, lender_id=lender["actor_id"],
+                                           late=loan["late"], witness_ids=[borrower_id, lender["actor_id"]])
+            self._save_world_locked()
+            return {"outcome": "returned", "late": loan["late"]}
+
+    def send_key_loan_extension(self, borrower_id: str, loan_id: str, *, minutes: int = 60) -> None:
+        with self._lock:
+            loan = self._loan_participant_locked(loan_id, borrower_id, "borrower")
+            if loan["status"] != "open":
+                raise ValueError("这笔借用已结束。")
+            if loan.get("notice"):
+                return
+            if not 1 <= minutes <= 1440:
+                raise ValueError("延期时长须在 1 到 1440 分钟之间。")
+            now = self._loan_time_locked()
+            requested_due = max(now, loan["due_at"]) + minutes * 60
+            loan["notice"] = {"sent_at": now, "requested_due": requested_due}
+            self._record_loan_event_locked("key_extension_sent", borrower_id, loan, requested_due=requested_due,
+                                           witness_ids=[borrower_id])
+            self._save_world_locked()
+
+    def deliver_key_loan_extension(self, borrower_id: str, loan_id: str) -> None:
+        with self._lock:
+            loan = self._loan_participant_locked(loan_id, borrower_id, "borrower")
+            notice = loan.get("notice")
+            if loan["status"] != "open" or not notice:
+                raise ValueError("当前没有待投递的延期请求。")
+            if "received_at" in notice:
+                return
+            notice["received_at"] = self._loan_time_locked()
+            self._record_loan_event_locked("key_extension_received", loan["lender_id"], loan,
+                                           witness_ids=[borrower_id, loan["lender_id"]])
+            self._save_world_locked()
+
+    def key_loans_for(self, actor_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = []
+            for loan in self._world["key_loans"].values():
+                if actor_id not in (loan["borrower_id"], loan["lender_id"]):
+                    continue
+                row = copy.deepcopy(loan)
+                row.pop("responded_to", None)
+                row["overdue"] = row["status"] == "open" and self._loan_time_locked() > row["due_at"]
+                if actor_id == row["lender_id"] and "received_at" not in (row.get("notice") or {}):
+                    row.pop("notice", None)
+                if actor_id == row["borrower_id"] and (row.get("reaction") or {}).get("choice") != "accept":
+                    row.pop("reaction", None)
+                rows.append(row)
+            return rows
+
+    def _loan_evidence_locked(self, loan: Mapping[str, Any]) -> str:
+        if loan["status"] != "open":
+            return ""
+        notice = loan.get("notice") or {}
+        now = self._loan_time_locked()
+        if "received_at" in notice and "accepted_at" not in notice and notice["requested_due"] > now:
+            evidence = "extension_received"
+        else:
+            evidence = "overdue" if now > loan["due_at"] else ""
+        previous = (loan.get("responded_to") or {}).get(evidence) or {}
+        if previous.get("due_at") == loan["due_at"] and previous.get("retry_at", float("inf")) > now:
+            return ""
+        return evidence
+
+    def pending_key_loan_response(self, lender_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            for loan in self._world["key_loans"].values():
+                if loan["lender_id"] != lender_id:
+                    continue
+                evidence = self._loan_evidence_locked(loan)
+                if evidence:
+                    return {"loan_id": loan["id"], "item_name": loan["item_name"], "evidence": evidence}
+            return None
+
+    def respond_to_key_loan(self, lender_id: str, loan_id: str, evidence: str, choice: str) -> bool:
+        with self._lock:
+            loan = self._loan_participant_locked(loan_id, lender_id, "lender")
+            if not evidence or evidence != self._loan_evidence_locked(loan):
+                return False
+            if choice not in ("wait", "ask", "accept") or (choice == "accept" and evidence != "extension_received"):
+                raise ValueError("当前信息不足以接受延期。")
+            checked = {"due_at": loan["due_at"]}
+            if choice == "wait":
+                checked["retry_at"] = self._loan_time_locked() + 10 * 60
+            loan.setdefault("responded_to", {})[evidence] = checked
+            loan["reaction"] = {"choice": choice, "evidence": evidence}
+            if choice == "accept":
+                loan["due_at"] = loan["notice"]["requested_due"]
+                loan["notice"]["accepted_at"] = self._loan_time_locked()
+            witnesses = [lender_id, loan["borrower_id"]] if choice == "accept" else [lender_id]
+            self._record_loan_event_locked("key_loan_response", lender_id, loan, choice=choice, evidence=evidence,
+                                           due_at=loan["due_at"], witness_ids=witnesses)
+            self._save_world_locked()
+            return True
+
+    def _queue_persona_event_locked(
+        self, actor: Mapping[str, Any], kind: str, entity: Mapping[str, Any] | None, action: str, message: str,
+        *, ok: bool = True, peer: Mapping[str, Any] | None = None, mood_delta: float = 0.0,
+        outcome: str = "",
+    ) -> dict[str, Any]:
+        participants = [{"actor_id": actor["actor_id"], "name": actor["name"], "role": "initiator"}]
+        if peer is not None:
+            role = "helper" if action == "invite_puzzle" else "peer"
+            participants.append({"actor_id": peer["actor_id"], "name": peer["name"], "role": role})
+        source = self._world["event_source"]
+        event_id = f"{source}:{self._world['next_seq']}"
+        target = entity or {}
+        activity = (target.get("traits") or {}).get("activity") or {}
+        payload = {
+            "event_id": event_id,
+            "source": source,
+            "kind": kind,
+            "action": action,
+            "outcome": outcome or ("success" if ok else "blocked"),
+            "entity_id": target.get("entity_id", ""),
+            "entity_name": target.get("name", ""),
+            "domain": str(activity.get("domain") or "nonGame"),
+            "participants": participants,
+            "witness_ids": [person["actor_id"] for person in participants],
+            "label": clip_text(message, 80),
+            "effect_mood_delta": mood_delta,
+        }
+        event = self._append_event_locked(
+            "actor_action_outcome", actor_id=actor["actor_id"], space_id=actor["space_id"], payload=payload,
+        )
+        if kind:
+            self._world["persona_events"][event_id] = {**event, "pending": list(payload["witness_ids"])}
+        return event
+
+    def record_social_feedback(
+        self, actor_id: str, space_id: str, message: str, *, peer_id: str = "", mood_delta: float = 0.0,
+    ) -> None:
+        """Capture a completed exchange or an observed interval of solitude."""
+        with self._lock:
+            actors = self._world["actors"]
+            actor = actors.get(actor_id)
+            if actor is None or actor["space_id"] != space_id:
+                return
+            if peer_id:
+                peer = actors.get(peer_id)
+                if peer is None or peer_id == actor_id or peer["space_id"] != space_id:
+                    return
+                self._queue_persona_event_locked(actor, "social_gesture", None, "talk", message, peer=peer,
+                                                 mood_delta=mood_delta)
+            else:
+                if any(person["space_id"] == space_id and aid != actor_id for aid, person in actors.items()):
+                    return
+                self._queue_persona_event_locked(actor, "alone_tick", None, "idle", message)
+            self._save_world_locked()
+
+    def pending_persona_events(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(sorted(self._world["persona_events"].values(), key=lambda event: event["seq"]))
+
+    def acknowledge_persona_event(
+        self, event_id: str, actor_id: str, mood: float | None,
+        appraisal: Mapping[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            outbox = self._world["persona_events"]
+            event = outbox.get(event_id)
+            if not event or actor_id not in event["pending"]:
+                return
+            if mood is not None and actor_id in self._world["actors"]:
+                self.set_actor_world_mood(
+                    actor_id, space_id=event["space_id"], vitals_patch={"mood_v": mood, "source": "nanami_persona"},
+                    record_event=False, persist=False,
+                )
+            if appraisal and event["payload"]["kind"] == "cooperative_solve":
+                for memory in self._world["puzzle_memories"].get(event["space_id"], []):
+                    if memory["event_id"] == event_id:
+                        memory.setdefault("appraisals", {})[actor_id] = dict(appraisal)
+                        break
+            event["pending"].remove(actor_id)
+            if not event["pending"]:
+                del outbox[event_id]
+            self._save_world_locked()
+
+    def puzzle_memories(self, actor_id: str, space_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            history = self._world["puzzle_memories"].get(space_id, [])
+            return copy.deepcopy([
+                {
+                    **{key: value for key, value in memory.items() if key != "appraisals"},
+                    "appraisal": memory.get("appraisals", {}).get(actor_id),
+                }
+                for memory in reversed(history) if actor_id in memory["witness_ids"]
+            ])
+
+    def puzzle_peers(self, actor_id: str, entity_id: str) -> list[str]:
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            entity = self._world["entities"].get(entity_id)
+            if actor is None or entity is None or entity["space_id"] != actor["space_id"]:
+                return []
+            lock = entity["traits"].get("container") or {}
+            tag = lock.get("key_tag")
+            if not lock.get("is_locked") or not tag:
+                return []
+            return [
+                peer["actor_id"] for peer in self._world["actors"].values()
+                if peer["actor_id"] != actor_id and peer["space_id"] == actor["space_id"]
+                and tag in (self._world["entities"].get(peer.get("holding_id")) or {}).get("tags", [])
+            ]
+
+    def invite_to_puzzle(self, actor_id: str, peer_id: str, entity_id: str, *, willing: bool) -> str:
+        """Settle a request to use a companion's held key against the current world state."""
+        with self._lock:
+            if peer_id not in self.puzzle_peers(actor_id, entity_id):
+                return "这位同伴现在没有能打开这个箱子的钥匙。"
+            actor = self._world["actors"][actor_id]
+            peer = self._world["actors"][peer_id]
+            entity = self._world["entities"][entity_id]
+            if any(entity_id not in {e["entity_id"] for e in self.visible_entities(person["actor_id"])}
+                   for person in (actor, peer)):
+                return "两人需要都能看到这个箱子。"
+            sid = actor["space_id"]
+            name = entity["name"]
+            kind = ""
+            vitals = peer["vitals"]
+            if (not willing or peer["posture"] == "resting" or vitals["disengaged"]
+                    or vitals["energy"] < 0.35 or vitals["sleep_pressure"] >= 0.68 or vitals["mood_v"] <= -0.35):
+                message = f"{peer['name']}暂时不想帮忙打开「{name}」。"
+                outcome = "declined"
+            else:
+                leader_ready, _ = self._walk_to_entity_locked(actor, entity)
+                helper_ready, _ = self._walk_to_entity_locked(peer, entity) if leader_ready else (False, "")
+                if not helper_ready:
+                    message = f"通往「{name}」的路过不去，这次没能一起开锁。"
+                    outcome = "blocked"
+                else:
+                    entity["traits"]["container"].update({"is_locked": False, "is_open": True})
+                    self._record_act_locked(peer, "unlock", entity)
+                    kind = "cooperative_solve"
+                    message = f"{actor['name']}找到「{name}」，{peer['name']}用手里的钥匙打开了它。"
+                    outcome = "success"
+            event = self._queue_persona_event_locked(
+                actor, kind, entity, "invite_puzzle", message, peer=peer, outcome=outcome,
+            )
+            if kind:
+                history = self._world["puzzle_memories"].setdefault(sid, [])
+                history.append({**event["payload"], "key_tag": entity["traits"]["container"]["key_tag"]})
+                del history[:-80]
+            self._save_world_locked()
+            return message
+
     def list_actors(self) -> list[dict[str, Any]]:
         with self._lock:
             return [copy.deepcopy(a) for a in self._world["actors"].values()]
@@ -2096,6 +2465,8 @@ class WorldEngine:
         space_id: str = "",
         vitals_patch: Mapping[str, Any] | None = None,
         autonomy_patch: Mapping[str, Any] | None = None,
+        record_event: bool = True,
+        persist: bool = True,
     ) -> dict[str, Any]:
         """针对指定世界（space_id）更新角色的心情参数与心愿状态，与其他世界完全隔离。"""
         with self._lock:
@@ -2116,7 +2487,7 @@ class WorldEngine:
                     aut.update(dict(autonomy_patch))
                 actor["autonomy"] = normalize_autonomy(aut)
 
-                self._refresh_actor_expression_locked(actor, force_auto=True)
+                self._refresh_actor_expression_locked(actor, force_auto=record_event)
                 self._sync_actor_world_state_locked(actor, target_sid)
                 result_state = actor["world_states"][target_sid]
             else:
@@ -2134,17 +2505,19 @@ class WorldEngine:
                 states[target_sid] = bucket
                 result_state = bucket
 
-            self._append_event_locked(
-                "actor_world_mood_updated",
-                actor_id=actor_id,
-                space_id=target_sid,
-                payload={
-                    "energy": result_state["vitals"]["energy"],
-                    "sleep_pressure": result_state["vitals"]["sleep_pressure"],
-                    "mood_v": result_state["vitals"]["mood_v"],
-                },
-            )
-            self._save_world_locked()
+            if record_event:
+                self._append_event_locked(
+                    "actor_world_mood_updated",
+                    actor_id=actor_id,
+                    space_id=target_sid,
+                    payload={
+                        "energy": result_state["vitals"]["energy"],
+                        "sleep_pressure": result_state["vitals"]["sleep_pressure"],
+                        "mood_v": result_state["vitals"]["mood_v"],
+                    },
+                )
+            if persist:
+                self._save_world_locked()
             return copy.deepcopy(result_state)
 
     def update_actor_sprite(self, actor_id: str, sprite: Mapping[str, Any]) -> dict[str, Any]:
@@ -2355,6 +2728,7 @@ class WorldEngine:
                     to_remove.append(cid)
             for rid in to_remove:
                 self._world["entities"].pop(rid, None)
+            self._cancel_key_loans_locked(to_remove)
             self._push_diff_locked(sid, f"「{ent['name']}」被收走了")
             self._append_event_locked("entity_removed", space_id=sid, payload={"entity_id": entity_id, "name": ent["name"], "cascade": to_remove})
             self._save_world_locked()
@@ -2400,6 +2774,7 @@ class WorldEngine:
             removed = [eid for eid, ent in self._world["entities"].items() if ent.get("space_id") == sid]
             for eid in removed:
                 self._world["entities"].pop(eid, None)
+            self._cancel_key_loans_locked(removed)
             for act in self._world["actors"].values():
                 if act.get("space_id") == sid:
                     act["holding_id"] = None
@@ -2767,14 +3142,17 @@ class WorldEngine:
             path = self._bfs_locked(sid, (int(actor["x"]), int(actor["y"])), {(tx, ty)}, ignore_actor_id=actor_id)
             if not path:
                 return f"去 ({tx}, {ty}) 的路被家具挡住了，过不去。"
-            self._clear_actor_rest_locked(actor)
-            self._record_move_locked(actor, path)
-            actor["x"] = tx
-            actor["y"] = ty
-            self._refresh_actor_expression_locked(actor, action_kind="move")
-            self._append_event_locked("actor_moved", actor_id=actor_id, space_id=sid, payload={"x": tx, "y": ty})
+            self._finish_move_locked(actor, path)
             self._save_world_locked()
             return f"你走到了房间坐标 ({tx}, {ty})。"
+
+    def _finish_move_locked(self, actor: dict[str, Any], path: list[tuple[int, int]]) -> None:
+        self._clear_actor_rest_locked(actor)
+        self._record_move_locked(actor, path)
+        actor["x"], actor["y"] = path[-1]
+        self._refresh_actor_expression_locked(actor, action_kind="move")
+        self._append_event_locked("actor_moved", actor_id=actor["actor_id"], space_id=actor["space_id"],
+                                  payload={"x": actor["x"], "y": actor["y"]})
 
     def execute_act(self, actor_id: str, entity_id: str, action: str, target_id: str = "") -> str:
         with self._lock:
@@ -2790,14 +3168,30 @@ class WorldEngine:
                 return f"你此刻看不到「{ent['name']}」。"
 
             canon = _VERB_ALIASES.get(str(action or "").strip().lower()) or _VERB_ALIASES.get(str(action or "").strip(), "")
+            event_kind = {
+                "unlock": "discovered", "consume": "consumed", "rest": "rested",
+                "interact": "action_success",
+            }.get(canon)
+            if canon == "turn_on" and (ent["traits"].get("switchable") or {}).get("provides_light"):
+                event_kind = "light_on"
+
+            def report(message: str, *, ok: bool = False) -> str:
+                if event_kind:
+                    self._queue_persona_event_locked(
+                        actor, event_kind if ok else "action_blocked", ent, canon, message, ok=ok,
+                        mood_delta=float(ent["effects"].get("mood_v_delta") or 0) if ok and canon in ("consume", "interact") else 0.0,
+                    )
+                    self._save_world_locked()
+                return message
+
             legal = dict(self.legal_verbs(ent, actor))
             if canon not in legal:
                 if canon == "consume" and "consumable" in (ent.get("traits") or {}):
-                    return f"「{ent['name']}」已经空了，没有可以再用的份量。"
+                    return report(f"「{ent['name']}」已经空了，没有可以再用的份量。")
                 if canon == "take" and "portable" not in (ent.get("traits") or {}):
                     return f"「{ent['name']}」太沉或固定在原地，拿不起来。"
                 avail = "、".join(legal.values())
-                return f"现在不能对「{ent['name']}」做这个动作（当前可行：{avail}）。"
+                return report(f"现在不能对「{ent['name']}」做这个动作（当前可行：{avail}）。")
 
             traits = ent["traits"]
             sid = actor["space_id"]
@@ -2899,7 +3293,7 @@ class WorldEngine:
             if canon == "unlock":
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
                 if not ok:
-                    return prefix
+                    return report(prefix)
                 need_tag = str(traits["container"].get("key_tag") or "").strip()
                 held_id = actor.get("holding_id")
                 has_key = False
@@ -2910,12 +3304,11 @@ class WorldEngine:
                                 has_key = True
                                 break
                 if need_tag and not has_key:
-                    return f"「{ent['name']}」锁着，需要带有「{need_tag}」标签的钥匙在手边才能打开。"
+                    return report(f"「{ent['name']}」锁着，需要带有「{need_tag}」标签的钥匙在手边才能打开。")
                 traits["container"]["is_locked"] = False
                 traits["container"]["is_open"] = True
                 self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "unlocked": True, "is_open": True})
-                self._save_world_locked()
-                return f"{prefix}解开了「{ent['name']}」的锁并打开了它。"
+                return report(f"{prefix}解开了「{ent['name']}」的锁并打开了它。", ok=True)
 
             if canon in ("open", "close"):
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
@@ -2958,7 +3351,7 @@ class WorldEngine:
             if canon == "consume":
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
                 if not ok:
-                    return prefix
+                    return report(prefix)
                 cm = traits["consumable"]
                 full_name, empty_name = infer_consumable_names(ent["name"], str(cm.get("empty_name") or ""))
                 if not cm.get("empty_name") and empty_name != full_name:
@@ -2971,10 +3364,10 @@ class WorldEngine:
                     if actor.get("holding_id") == eid:
                         actor["holding_id"] = None
                     self._world["entities"].pop(eid, None)
+                    self._cancel_key_loans_locked((eid,))
                     self._refresh_actor_expression_locked(actor, action_kind="consume")
                     self._append_event_locked("entity_consumed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "verb": verb, "uses_left": 0, "vanished": True})
-                    self._save_world_locked()
-                    return f"{prefix}把「{full_name}」{verb}光了，现在彻底没了。"
+                    return report(f"{prefix}把「{full_name}」{verb}光了，现在彻底没了。", ok=True)
                 if left == 0:
                     if empty_name:
                         ent["name"] = empty_name
@@ -2984,20 +3377,20 @@ class WorldEngine:
                 ent["traces"].append({"ts": time.time(), "text": f"{actor['name']}{verb}了一次"})
                 self._refresh_actor_expression_locked(actor, action_kind="consume")
                 self._append_event_locked("entity_consumed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "verb": verb, "uses_left": left})
-                self._save_world_locked()
-                return f"{prefix}{verb}了「{full_name}」，" + (f"还剩 {left} 次。" if left > 0 else "已经空了。")
+                return report(f"{prefix}{verb}了「{full_name}」，" + (f"还剩 {left} 次。" if left > 0 else "已经空了。"), ok=True)
 
             if canon in ("turn_on", "turn_off"):
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
                 if not ok:
-                    return prefix
+                    return report(prefix)
                 new_on = canon == "turn_on"
                 traits["switchable"]["is_on"] = new_on
                 self._refresh_actor_expression_locked(actor, action_kind=canon)
                 self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "is_on": new_on})
-                self._save_world_locked()
+                if not event_kind:
+                    self._save_world_locked()
                 label = "打开了" if new_on else "关掉了"
-                return f"{prefix}{label}「{ent['name']}」。"
+                return report(f"{prefix}{label}「{ent['name']}」。", ok=True)
 
             if canon == "rest":
                 occ = traits["restable"].get("occupied_by")
@@ -3005,10 +3398,10 @@ class WorldEngine:
                     occ_act = (self._world.get("actors") or {}).get(str(occ))
                     if isinstance(occ_act, Mapping) and occ_act.get("posture") == "resting" and occ_act.get("resting_on_id") == eid:
                         occ_name = str(occ_act.get("name") or "别人").strip()
-                        return f"「{ent['name']}」上已经有{occ_name}在睡觉了，挤不下啦。"
+                        return report(f"「{ent['name']}」上已经有{occ_name}在睡觉了，挤不下啦。")
                 ok, prefix = self._walk_to_entity_locked(actor, ent, allow_inside_entity=True)
                 if not ok:
-                    return prefix
+                    return report(prefix)
                 self._clear_actor_rest_locked(actor)
                 traits["restable"]["occupied_by"] = actor_id
                 actor["resting_on_id"] = eid
@@ -3017,8 +3410,7 @@ class WorldEngine:
                 actor["y"] = int(ent["y"])
                 self._refresh_actor_expression_locked(actor, action_kind="rest")
                 self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "resting": True})
-                self._save_world_locked()
-                return f"{prefix}在「{ent['name']}」上歇了下来。"
+                return report(f"{prefix}在「{ent['name']}」上歇了下来。", ok=True)
 
             if canon == "leave_rest":
                 self._clear_actor_rest_locked(actor)
@@ -3030,23 +3422,22 @@ class WorldEngine:
             if canon == "interact":
                 ok, prefix = self._walk_to_entity_locked(actor, ent)
                 if not ok:
-                    return prefix
+                    return report(prefix)
                 ac = traits["activity"]
                 if "switchable" in traits and not traits["switchable"].get("is_on"):
                     traits["switchable"]["is_on"] = True
                 if ac.get("battery") is not None:
                     cost = int(ac.get("battery_cost") or 10)
                     if int(ac["battery"]) <= 0:
-                        return f"「{ent['name']}」没电了，打不开。"
+                        return report(f"「{ent['name']}」没电了，打不开。")
                     ac["battery"] = max(0, int(ac["battery"]) - cost)
                 ac["progress"] = int(ac.get("progress") or 0) + 1
                 self._apply_effects_locked(actor, ent)
                 ent["traces"].append({"ts": time.time(), "text": f"{actor['name']}玩/用了第 {ac['progress']} {ac['progress_unit']}"})
                 self._refresh_actor_expression_locked(actor, action_kind="interact")
                 self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "progress": ac["progress"], "battery": ac.get("battery")})
-                self._save_world_locked()
                 bat_msg = f"，剩余电量 {ac['battery']}%" if ac.get("battery") is not None else ""
-                return f"{prefix}用「{ent['name']}」推进到了第 {ac['progress']} {ac['progress_unit']}{bat_msg}。"
+                return report(f"{prefix}用「{ent['name']}」推进到了第 {ac['progress']} {ac['progress_unit']}{bat_msg}。", ok=True)
 
             if canon == "read":
                 ok, prefix = self._walk_to_entity_locked(actor, ent) if self.chebyshev_distance(actor, ent) > 2 else (True, "")
@@ -3181,6 +3572,7 @@ class WorldEngine:
                 if actor.get("holding_id") == sid_src:
                     actor["holding_id"] = None
                 self._world["entities"].pop(sid_src, None)
+                self._cancel_key_loans_locked((sid_src,))
 
             fb = str(matched_rule.get("feedback") or "两件东西产生了一点变化。")
             self._refresh_actor_expression_locked(actor, action_kind="combine")

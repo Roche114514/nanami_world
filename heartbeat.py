@@ -77,8 +77,9 @@ class WorldHeartbeat:
     ) -> dict[str, Any]:
         with self._step_lock:
             settings = self._settings_provider()
-            tick_res = self._engine.tick_physics(advance_minutes=advance_minutes)
             self._sync_persona_vitals(settings)
+            tick_res = self._engine.tick_physics(advance_minutes=advance_minutes)
+            self._deliver_persona_events(settings)
             should_act = bool(force_autonomy or advance_minutes is None or float(advance_minutes) > 0.0)
             if should_act:
                 actions_taken, decisions = self._run_autonomous_l2(
@@ -89,6 +90,7 @@ class WorldHeartbeat:
                 )
             else:
                 actions_taken, decisions = [], []
+            self._deliver_persona_events(settings)
             self._export_bridges()
             return {
                 "tick": tick_res,
@@ -115,31 +117,49 @@ class WorldHeartbeat:
             remote_ts = float(synced.get("updated_at") or 0.0)
             ts_key = f"{sid}::{aid}"
             prev_ts = self._last_persona_ts.get(ts_key, -1.0)
-            is_fresh_remote = prev_ts < 0 or (remote_ts > 0 and remote_ts != prev_ts)
+            patch = {"preferred_domains": synced["preferred_domains"]}
+            if remote_ts > 0 and cur_vit.get("source") == "builtin":
+                patch.update({field: synced[field] for field in ("energy", "sleep_pressure", "mood_v", "agenda", "disengaged")})
+                patch["source"] = "nanami_persona"
+            if synced["world_state"] and remote_ts > prev_ts:
+                patch.update({field: synced[field] for field in ("mood_v", "agenda", "disengaged")})
+            if any(cur_vit.get(key) != value for key, value in patch.items()):
+                self._engine.set_actor_world_mood(aid, space_id=sid, vitals_patch=patch, record_event=False)
+            if synced["world_state"]:
+                self._last_persona_ts[ts_key] = max(prev_ts, remote_ts)
 
-            if is_fresh_remote:
-                self._last_persona_ts[ts_key] = remote_ts
-                next_vit = {
-                    "energy": synced["energy"],
-                    "sleep_pressure": synced["sleep_pressure"],
-                    "mood_v": synced["mood_v"],
-                    "agenda": synced["agenda"],
-                    "disengaged": synced["disengaged"],
-                    "preferred_domains": synced["preferred_domains"],
-                    "source": "nanami_persona",
-                }
-            else:
-                # 若人格状态文件时间戳未变化，则保留世界中休息/消费演化后的数值
-                next_vit = {
-                    "energy": float(cur_vit.get("energy", synced["energy"])),
-                    "sleep_pressure": float(cur_vit.get("sleep_pressure", synced["sleep_pressure"])),
-                    "mood_v": float(cur_vit.get("mood_v", synced["mood_v"])),
-                    "agenda": synced["agenda"],
-                    "disengaged": synced["disengaged"],
-                    "preferred_domains": synced["preferred_domains"],
-                    "source": "nanami_persona",
-                }
-            self._engine.set_actor_vitals(aid, next_vit)
+    def deliver_persona_events(self) -> None:
+        with self._step_lock:
+            self._deliver_persona_events(self._settings_provider())
+
+    def _deliver_persona_events(self, settings: WorldSettings) -> None:
+        actors = {actor["actor_id"]: actor for actor in self._engine.list_actors()}
+        retry = set()
+        attempts = 0
+        for event in self._engine.pending_persona_events():
+            payload = {**event["payload"], "seq": event["seq"], "at": round(event["ts"] * 1000)}
+            for aid in event["pending"]:
+                key = (event["space_id"], aid)
+                if key in retry:
+                    continue
+                if attempts >= 12:
+                    return
+                actor = actors.get(aid)
+                result = {"status": "unbound"}
+                if actor:
+                    attempts += 1
+                    result = persona_bridge.emit_world_event_to_persona(
+                        self._project_root, str(actor.get("host_character") or actor["name"]),
+                        space_id=event["space_id"], actor_id=aid, event_payload=payload,
+                        custom_persona_dir=settings.persona_data_dir,
+                    ) or {}
+                mood = result.get("moodV")
+                if result.get("ok") and isinstance(mood, (int, float)):
+                    self._engine.acknowledge_persona_event(payload["event_id"], aid, mood, result.get("appraisal"))
+                elif result.get("status") == "unbound":
+                    self._engine.acknowledge_persona_event(payload["event_id"], aid, None)
+                else:
+                    retry.add(key)
 
     # ── 自主决策执行管线 ─────────────────────────────────────────────────
     def _run_autonomous_l2(
@@ -163,6 +183,12 @@ class WorldHeartbeat:
             if not aut.get("enabled", True) and not force_autonomy:
                 continue
 
+            loan_decision = self._respond_to_key_loan(act, settings)
+            if loan_decision:
+                decisions.append(loan_decision)
+                taken.extend(f"{aid}: {line}" for line in loan_decision["actions"])
+                continue
+
             sp_snap = self._engine.snapshot_for_ui(act["space_id"])
             vis = self._engine.visible_entities(aid)
 
@@ -176,6 +202,8 @@ class WorldHeartbeat:
 
             exec_logs = self._execute_plan_actions(aid, plan.get("actions") or [])
             summary = "；".join(exec_logs) if exec_logs else str(plan.get("passive_summary") or "")
+            if not exec_logs and plan.get("drive") == "calm":
+                self._engine.record_social_feedback(aid, act["space_id"], "独自待了一会儿")
             target_id = str(plan.get("target_id") or "").strip()
 
             recent = list(aut.get("recent_targets") or [])
@@ -201,24 +229,6 @@ class WorldHeartbeat:
                     taken.append(f"{aid}: {log_line}")
                 self._maybe_write_diary(aid, act["name"], summary, vis, settings)
 
-            # 行动结果即时回写 nanami_persona 心理模型（L5 ACT + L2 需要 + L6 惯性）
-            if exec_logs or str(plan.get("drive") or "") == "calm":
-                ev_payload = self._build_world_event_payload(plan, exec_logs, summary)
-                if ev_payload is not None:
-                    host_name = str(act.get("host_character") or act.get("name") or "").strip()
-                    ev_res = persona_bridge.emit_world_event_to_persona(
-                        self._project_root,
-                        host_name,
-                        space_id=str(act.get("space_id") or "room_default"),
-                        actor_id=aid,
-                        event_payload=ev_payload,
-                        custom_persona_dir=settings.persona_data_dir,
-                    )
-                    if isinstance(ev_res, dict) and ev_res.get("ok") and "moodV" in ev_res:
-                        cur_vit = dict(act.get("vitals") or {})
-                        cur_vit["mood_v"] = float(ev_res["moodV"])
-                        self._engine.set_actor_vitals(aid, cur_vit)
-
             chat_svc = self._chat_service_provider() if self._chat_service_provider else None
             if chat_svc is not None and not plan.get("skip_auto_chat_log") and (exec_logs or plan.get("record_thought_in_chat")):
                 try:
@@ -243,43 +253,54 @@ class WorldHeartbeat:
 
         return taken, decisions
 
-    @staticmethod
-    def _build_world_event_payload(
-        plan: dict[str, Any],
-        exec_logs: list[str],
-        summary: str,
-    ) -> dict[str, Any] | None:
-        drive = str(plan.get("drive") or "").strip().lower()
-        actions = plan.get("actions") or []
-        first_act = str((actions[0] if actions and isinstance(actions[0], dict) else {}).get("action") or "").lower()
-        first_tool = str((actions[0] if actions and isinstance(actions[0], dict) else {}).get("tool") or "").lower()
-        joined = " ".join(exec_logs)
+    def respond_to_key_loan(self, actor_id: str) -> dict[str, Any] | None:
+        with self._step_lock:
+            actor = next((actor for actor in self._engine.list_actors() if actor["actor_id"] == actor_id), None)
+            return self._respond_to_key_loan(actor, self._settings_provider()) if actor else None
 
-        if any(k in joined for k in ("失败", "打不开", "锁住", "无法", "受阻", "没成功")):
-            kind = "action_blocked"
-        elif first_tool == "world_talk" or drive == "social":
-            kind = "social_gesture"
-        elif drive == "rest" or first_act in ("rest", "leave_rest"):
-            kind = "rested"
-        elif drive == "hunger" or first_act == "consume":
-            kind = "consumed"
-        elif first_act == "turn_on" and drive == "comfort":
-            kind = "light_on"
-        elif drive in ("curiosity", "explore") or first_act in ("look", "open", "unlock"):
-            kind = "discovered"
-        elif drive == "calm" and not exec_logs:
-            kind = "alone_tick"
-        elif exec_logs:
-            kind = "action_success"
-        else:
+    def _respond_to_key_loan(self, actor: dict[str, Any], settings: WorldSettings) -> dict[str, Any] | None:
+        aid = actor["actor_id"]
+        pending = self._engine.pending_key_loan_response(aid)
+        if pending is None:
             return None
-
-        domain = "game" if drive == "game" else "nonGame"
+        profile = persona_bridge.read_persona_behavior_profile(
+            self._project_root, str(actor.get("host_character") or actor["name"]),
+            custom_persona_dir=settings.persona_data_dir,
+        )
+        evidence = pending["evidence"]
+        vitals = actor["vitals"]
+        if vitals["disengaged"] or vitals["energy"] < 0.35 or vitals["sleep_pressure"] >= 0.68 or actor["posture"] == "resting":
+            choice = "wait"
+        elif evidence == "extension_received":
+            choice = "accept" if profile["norm_courtesy"] >= 0.55 else "ask"
+        else:
+            choice = "ask" if profile["social_initiative"] >= 0.25 else "wait"
+        if not self._engine.respond_to_key_loan(aid, pending["loan_id"], evidence, choice):
+            return None
+        item = pending["item_name"]
+        message = {
+            "wait": f"暂且等一等「{item}」的消息。",
+            "ask": f"准备问问「{item}」什么时候能归还。",
+            "accept": f"收到了延期请求，同意晚些归还「{item}」。",
+        }[choice]
         return {
-            "kind": kind,
-            "domain": domain,
-            "label": (summary or str(plan.get("goal") or kind))[:60],
+            "actor_id": aid, "goal": message, "drive": "social", "thought": "",
+            "emotion": "平静", "actions": [message],
+            "loan_response": {**pending, "choice": choice},
         }
+
+    def invite_to_puzzle(self, actor_id: str, peer_id: str, entity_id: str) -> str:
+        peers = {person["actor_id"]: person for person in self._engine.list_actors()}
+        peer = peers.get(peer_id)
+        if peer is None:
+            return "这位同伴现在不在这里。"
+        profile = persona_bridge.read_persona_behavior_profile(
+            self._project_root, str(peer.get("host_character") or peer["name"]),
+            custom_persona_dir=self._settings_provider().persona_data_dir,
+        )
+        return self._engine.invite_to_puzzle(
+            actor_id, peer_id, entity_id, willing=profile["norm_courtesy"] >= 0.35,
+        )
 
     def _execute_plan_actions(self, actor_id: str, raw_actions: list[dict[str, Any]]) -> list[str]:
         logs: list[str] = []
@@ -287,7 +308,11 @@ class WorldHeartbeat:
             if not isinstance(item, dict):
                 continue
             tool = str(item.get("tool") or "world_act").strip().lower()
-            if tool == "world_move":
+            if tool == "world_invite_puzzle":
+                logs.append(self.invite_to_puzzle(
+                    actor_id, str(item.get("target_actor_id") or ""), str(item.get("entity_id") or ""),
+                ))
+            elif tool == "world_move":
                 try:
                     tx = int(item.get("x"))
                     ty = int(item.get("y"))
@@ -347,6 +372,7 @@ class WorldHeartbeat:
                         space_id=me["space_id"],
                         payload={"initiator": me["name"], "target": peer["name"], "first_meet": first_meet, "summary": note},
                     )
+                    self._engine.record_social_feedback(actor_id, me_sid, note, peer_id=tgt_aid)
                     logs.append(note)
             elif tool == "world_write":
                 eid = str(item.get("entity_id") or "").strip()
@@ -490,6 +516,24 @@ class WorldHeartbeat:
             return None
         return best
 
+    def _puzzle_invitation(
+        self, actor: dict[str, Any], box: dict[str, Any], settings: WorldSettings,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        if (not settings.episodic_memory_enabled or actor["vitals"]["disengaged"]
+                or box["entity_id"] in actor["autonomy"]["recent_targets"][:2]):
+            return None
+        lock = box["traits"].get("container") or {}
+        if not lock.get("is_locked") or not lock.get("key_tag"):
+            return None
+        eligible = set(self._engine.puzzle_peers(actor["actor_id"], box["entity_id"]))
+        if not eligible:
+            return None
+        for memory in self._engine.puzzle_memories(actor["actor_id"], actor["space_id"]):
+            helper = next(person for person in memory["participants"] if person["role"] == "helper")
+            if memory["key_tag"] == lock["key_tag"] and helper["actor_id"] in eligible:
+                return helper, memory
+        return None
+
     # ── 可选 LLM 自由意志决策 ────────────────────────────────────────────
     def _decide_with_llm(
         self,
@@ -502,6 +546,16 @@ class WorldHeartbeat:
         aut = normalize_autonomy(actor.get("autonomy"))
         view_txt = projector.project_view(self._engine, aid, consume_diffs=False)
         settings_now = self._settings_provider()
+        invitations = {}
+        for box in vis:
+            invitation = self._puzzle_invitation(actor, box, settings_now)
+            if invitation:
+                invitations[box["entity_id"]] = invitation
+        puzzle_context = "\n".join(
+            f"- 上次「{memory['entity_name']}」由{helper['name']}打开。可以邀请对方帮忙开锁，"
+            f"使用 world_invite_puzzle，entity_id={eid}，target_actor_id={helper['actor_id']}。"
+            for eid, (helper, memory) in invitations.items()
+        )
         l0_llm = persona_bridge.build_percept_frame(
             self._engine.data_root,
             self._project_root,
@@ -521,7 +575,7 @@ class WorldHeartbeat:
             '{"goal":"此刻想做的事(<=16字)","drive":"rest|hunger|game|music|reading|hobby|curiosity|explore|comfort|social",'
             '"thought":"简短口语碎碎念(<=28字)","emotion":"开心|好奇|困倦|平静|害羞|兴奋|温柔",'
             '"target_id":"主目标entity_id或actor:xxx或空",'
-            '"actions":[{"tool":"world_act|world_move|world_write|world_talk","entity_id":"...","action":"turn_on|turn_off|rest|leave_rest|consume|interact|open|unlock|take|look|enter","target_actor_id":"同屋角色actor_id","x":0,"y":0,"text":"..."}]}'
+            '"actions":[{"tool":"world_act|world_move|world_write|world_talk|world_invite_puzzle","entity_id":"...","action":"turn_on|turn_off|rest|leave_rest|consume|interact|open|unlock|take|look|enter","target_actor_id":"同屋角色actor_id","x":0,"y":0,"text":"..."}]}'
         )
         bp_llm = l0_llm.get("behavior_profile") or {}
         user_prompt = (
@@ -533,6 +587,7 @@ class WorldHeartbeat:
             f"社交回避={bp_llm.get('social_avoidance')}, 探索欲={bp_llm.get('exploration_drive')}, 礼貌克制={bp_llm.get('norm_courtesy')}\n"
             f"- 最近刚碰过的目标：{aut['recent_targets']}\n"
             f"- 空间可用尺寸：{sp_snap['space']['width']}x{sp_snap['space']['height']}\n"
+            f"{puzzle_context}\n"
             "不要重复连续碰同一目标；若决定好了，只输出 JSON。"
         )
         parsed = text_compiler._ask_llm_json(
@@ -557,6 +612,10 @@ class WorldHeartbeat:
             tool = str(item.get("tool") or "world_act").strip().lower()
             if tool == "world_move":
                 valid_actions.append(item)
+            elif tool == "world_invite_puzzle":
+                invitation = invitations.get(str(item.get("entity_id") or ""))
+                if invitation and item.get("target_actor_id") == invitation[0]["actor_id"]:
+                    valid_actions.append(item)
             elif tool == "world_talk" and str(item.get("target_actor_id") or "") in peer_ids:
                 valid_actions.append(item)
                 has_talk = True
@@ -755,6 +814,19 @@ class WorldHeartbeat:
         )
         if locked_box and (exploration_drive >= 0.42 or force_autonomy) and not (float(vit.get("mood_v", 0.15)) <= -0.35 and safety_priority >= 0.65):
             need_tag = str((locked_box.get("traits") or {}).get("container", {}).get("key_tag") or "").strip()
+            box_id = locked_box["entity_id"]
+            invitation = self._puzzle_invitation(actor, locked_box, settings)
+            if invitation:
+                helper, memory = invitation
+                return {
+                    "goal": f"请{helper['name']}一起打开「{locked_box['name']}」",
+                    "drive": "curiosity",
+                    "thought": f"上次「{memory['entity_name']}」是{helper['name']}打开的，再请帮一次吧。",
+                    "emotion": "好奇",
+                    "target_id": box_id,
+                    "actions": [{"tool": "world_invite_puzzle", "entity_id": box_id, "target_actor_id": helper["actor_id"]}],
+                    "record_thought_in_chat": True,
+                }
             key_ent = next(
                 (
                     e for e in vis

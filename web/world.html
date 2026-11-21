@@ -453,6 +453,7 @@
     <select id="actor-select" class="px-sel" title="当前观测角色"></select>
     <button class="px-btn" id="btn-auto-step" title="立即推进一次心跳，让她按自己想法去行动">💓 自主行动</button>
     <button class="px-btn" id="btn-auto-life" title="每 15 秒自动让角色按内心驱力生活">🤖 自动生活: 关</button>
+    <button class="px-btn" id="btn-key-loans">借还钥匙</button>
     <button class="px-btn" id="btn-world-menu" title="地图生成、导入角色、调色板、时间与管理菜单">⚙ 世界菜单</button>
   </header>
 
@@ -612,6 +613,11 @@
             <div class="vital-cell"><b id="v-curiosity">—</b><span>好奇心</span></div>
           </div>
           <button class="px-btn primary" id="btn-status-auto-step" style="width:100%;font-size:11px;">💓 让她立刻做件想做的事</button>
+        </div>
+
+        <div id="active-key-loans" class="sec-box hidden">
+          <div class="sec-title"><span>借还钥匙</span><button class="px-btn" id="btn-status-key-loans">查看</button></div>
+          <div id="active-key-loans-label" class="muted"></div>
         </div>
 
         <div class="sec-box">
@@ -2546,6 +2552,12 @@ function renderTopbar() {
   const pMap = { dawn: "清晨", day: "白天", dusk: "傍晚", night: "夜晚" };
   el("light-dot").className = "dot" + (lt.is_dark ? " dark" : "");
   el("light-text").textContent = (lt.clock || "12:00") + " " + (pMap[lt.period] || "白天") + (lt.is_dark ? " · 暗" : "");
+  const loanButton = el("btn-key-loans");
+  const activeLoans = (snap.key_loans || []).filter((loan) => loan.status === "open").length;
+  loanButton.disabled = !snap.active_actor_id;
+  loanButton.textContent = activeLoans ? "借还钥匙 (" + activeLoans + ")" : "借还钥匙";
+  loanButton.classList.toggle("eye-on", Boolean(snap.pending_key_loan));
+  loanButton.title = snap.pending_key_loan ? "有借物事项待回应" : "查看借用、归还和延期";
 
   const sel = el("actor-select");
   sel.innerHTML = "";
@@ -2814,6 +2826,13 @@ function openExpressionModal(act) {
 function renderStatusPanel() {
   const snap = state.snap;
   const act = snap.actors.find((a) => a.actor_id === snap.active_actor_id);
+  const activeLoans = (snap.key_loans || []).filter((loan) => loan.status === "open");
+  const loanCard = el("active-key-loans");
+  loanCard.classList.toggle("hidden", !activeLoans.length);
+  const overdue = activeLoans.filter((loan) => loan.overdue).length;
+  el("active-key-loans-label").textContent = activeLoans.length + " 笔进行中"
+    + (overdue ? " · " + overdue + " 笔逾期" : "")
+    + (snap.pending_key_loan ? " · 有事项待回应" : "");
   if (!act) {
     el("actor-status-name").textContent = "尚未导入角色";
     el("actor-status-pos").textContent = "坐标：—";
@@ -2937,8 +2956,30 @@ function renderStatusPanel() {
   }
   list.innerHTML = events.map((ev) => {
     const t = new Date((ev.ts || 0) * 1000).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    return '<li><span class="ev-time">' + esc(t) + "</span><b>" + esc(ev.kind) + "</b> " + esc(JSON.stringify(ev.payload || {})) + "</li>";
+    const loanEvent = describeKeyLoanEvent(ev, snap);
+    return '<li><span class="ev-time">' + esc(t) + "</span><b>" + esc(loanEvent?.[0] || ev.kind)
+      + "</b> " + esc(loanEvent?.[1] || JSON.stringify(ev.payload || {})) + "</li>";
   }).join("");
+}
+
+function describeKeyLoanEvent(event, snap) {
+  const labels = {
+    key_lent: "钥匙已借出", key_return_blocked: "归还受阻", key_returned: "钥匙已归还",
+    key_extension_sent: "已申请延期", key_extension_received: "延期消息已送达", key_loan_response: "出借人回应",
+  };
+  if (!Object.hasOwn(labels, event.kind)) return null;
+  const payload = event.payload || {};
+  const actor = snap.actors.find((item) => item.actor_id === event.actor_id)?.name || "角色";
+  const loan = (snap.key_loans || []).find((item) => item.id === payload.loan_id);
+  const details = {
+    key_return_blocked: {
+      route_blocked: "通路受阻", different_space: "双方不在同一空间", key_not_held: "钥匙未拿在手上",
+      receiver_hands_full: "出借人手中有物品", receiver_resting: "出借人正在休息",
+    }[payload.reason],
+    key_returned: payload.late ? "逾期归还" : "按时归还",
+    key_loan_response: { wait: "暂时等待", ask: "准备询问", accept: "同意延期" }[payload.choice],
+  }[event.kind];
+  return [labels[event.kind], [actor, loan?.item_name, details].filter(Boolean).join(" · ")];
 }
 
 function renderInspector() {
@@ -2980,8 +3021,19 @@ function renderInspector() {
     addAct(tr.switchable.is_on ? "关掉" : "打开", () => interactAndToast(ent.entity_id, tr.switchable.is_on ? "turn_off" : "turn_on"));
   }
   if (tr.container) {
-    if (tr.container.is_locked) addAct("开锁", () => interactAndToast(ent.entity_id, "unlock"));
-    else addAct(tr.container.is_open ? "合上箱子" : "打开箱子", () => interactAndToast(ent.entity_id, tr.container.is_open ? "close" : "open"));
+    if (tr.container.is_locked) {
+      addAct("开锁", () => interactAndToast(ent.entity_id, "unlock"));
+      const tag = tr.container.key_tag;
+      const peers = tag ? snap.actors.filter((actor) =>
+        actor.actor_id !== snap.active_actor_id && actor.space_id === snap.active_space_id
+        && snap.entities.some((key) => key.entity_id === actor.holding_id && (key.tags || []).includes(tag))
+      ) : [];
+      for (const peer of peers) {
+        addAct("请" + peer.name + "帮忙开锁", () => interactAndToast(ent.entity_id, "invite_puzzle", peer.actor_id));
+      }
+    } else {
+      addAct(tr.container.is_open ? "合上箱子" : "打开箱子", () => interactAndToast(ent.entity_id, tr.container.is_open ? "close" : "open"));
+    }
   }
   if (tr.consumable && Number(tr.consumable.uses_left || 0) > 0) {
     addAct(tr.consumable.consume_verb || "使用", () => interactAndToast(ent.entity_id, "consume"));
@@ -3003,6 +3055,10 @@ function renderInspector() {
   }
   // 放入当前空间内已打开的容器
   if (tr.portable) {
+    const held = ent.parent_id === "actor:" + snap.active_actor_id;
+    if (tr.portable.weight === "light" && snap.active_actor_id && (held || !ent.parent_id.startsWith("actor:"))) {
+      addAct(held ? "放下" : "拿起", () => interactAndToast(ent.entity_id, held ? "place" : "take"));
+    }
     const openBox = snap.entities.find((c) => c.entity_id !== ent.entity_id && c.traits && c.traits.container && c.traits.container.is_open);
     if (openBox) {
       addAct("放进" + openBox.name, () => runAction("move_entity", { entity_id: ent.entity_id, x: openBox.x, y: openBox.y, target_parent_id: "entity:" + openBox.entity_id }).catch((e) => toast(e.message, true)));
@@ -3012,8 +3068,10 @@ function renderInspector() {
   addAct("收走", () => openConfirm("确定从空间收走「" + ent.name + "」吗？", () => runAction("remove_entity", { entity_id: ent.entity_id }).then(() => { state.selectedEntityId = ""; })), "danger");
 }
 
-function interactAndToast(entityId, action) {
-  runAction("entity_ui_interact", { entity_id: entityId, action }).then((res) => {
+function interactAndToast(entityId, action, targetId = "") {
+  runAction("entity_ui_interact", {
+    entity_id: entityId, action, target_id: targetId, actor_id: state.snap.active_actor_id,
+  }).then((res) => {
     if (res.feedback) toast(res.feedback);
   }).catch((e) => toast(e.message, true));
 }
@@ -3233,6 +3291,76 @@ function showModal(title, bodyHtml, buttons, narrow) {
 }
 function closeModal() {
   el("modal-mask").classList.add("hidden");
+}
+
+async function openKeyLoansModal() {
+  const snap = state.snap;
+  const actor = snap?.actors.find((item) => item.actor_id === snap.active_actor_id);
+  if (!actor) return toast("请先选择一位角色。", true);
+  const actorId = actor.actor_id;
+  const spaceId = snap.active_space_id;
+  const { loans, pending } = await runAction("key_loan", { actor_id: actorId, operation: "list" });
+  const held = snap.entities.find((item) => item.entity_id === actor.holding_id);
+  const borrowers = snap.actors.filter((peer) =>
+    peer.actor_id !== actorId && peer.space_id === actor.space_id && !peer.holding_id
+  );
+  const canLend = (held?.tags || []).includes("key") && borrowers.length
+    && !loans.some((loan) => loan.item_id === held.entity_id && loan.status === "open");
+  const date = (seconds) => new Date(seconds * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const names = new Map(snap.actors.map((item) => [item.actor_id, item.name]));
+  const form = canLend ? '<div class="field"><label>借出「' + esc(held.name) + '」</label>'
+    + '<select class="px-sel" id="loan-peer">'
+    + borrowers.map((peer) => '<option value="' + esc(peer.actor_id) + '">' + esc(peer.name) + '</option>').join("")
+    + '</select><label for="loan-duration">借用分钟</label><input class="px-inp" id="loan-duration" type="number" min="1" max="1440" value="30"></div>' : "";
+  const rows = [...loans].reverse().map((loan) => {
+    const borrowing = loan.borrower_id === actorId;
+    const peer = names.get(borrowing ? loan.lender_id : loan.borrower_id) || "另一位角色";
+    const status = loan.status === "open" ? (loan.overdue ? "已逾期" : "借用中")
+      : loan.status === "returned" ? (loan.late ? "逾期归还" : "按时归还") : "已结束";
+    const notice = loan.notice?.accepted_at ? "已同意延期" : loan.notice
+      ? ("延期请求" + (loan.notice.received_at ? "已送达" : "待投递")) : "";
+    const reply = { wait: "准备再等一会儿", ask: "准备询问归还时间" }[loan.reaction?.choice] || "";
+    const buttons = [];
+    if (loan.status === "open" && borrowing) {
+      buttons.push(["return", "归还钥匙"]);
+      if (!loan.notice) buttons.push(["send_extension", "申请延期 60 分钟"]);
+      else if (!loan.notice.received_at) buttons.push(["deliver_extension", "投递延期消息"]);
+    } else if (loan.status === "open" && pending?.loan_id === loan.id) {
+      buttons.push(["respond", "让出借人回应"]);
+    }
+    return '<div class="field"><b>' + esc(loan.item_name) + '</b><span>'
+      + esc((borrowing ? "向 " : "给 ") + peer + " · " + status + " · 到期 " + date(loan.due_at)) + '</span>'
+      + (notice || reply ? '<span>' + esc([notice, reply].filter(Boolean).join(" · ")) + '</span>' : "")
+      + buttons.map(([op, label]) => '<button class="px-btn" data-loan-operation="' + op + '" data-loan-id="'
+        + esc(loan.id) + '">' + esc(label) + '</button>').join("") + '</div>';
+  }).join("");
+  const submit = async (button, values) => {
+    button.disabled = true;
+    try {
+      const res = await runAction("key_loan", { actor_id: actorId, space_id: spaceId, ...values });
+      toast(res.feedback);
+      if (!el("modal-mask").classList.contains("hidden")) await openKeyLoansModal();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  const actions = [
+    { label: "关闭", onClick: closeModal },
+    { label: "刷新借用状态", onClick: () => openKeyLoansModal().catch((err) => toast(err.message, true)) },
+  ];
+  if (canLend) actions.push({
+    label: "借出", cls: "primary", onClick: (button) => {
+      if (!el("loan-duration").reportValidity()) return;
+      submit(button, { operation: "lend", item_id: held.entity_id, borrower_id: el("loan-peer").value,
+        minutes: Number(el("loan-duration").value) });
+    },
+  });
+  showModal(actor.name + " · 借还钥匙", form + (rows || (form ? "" : '<p>手持钥匙并与另一角色同处一室时，可以在此借出。</p>')), actions, true);
+  el("modal-body").querySelectorAll("[data-loan-operation]").forEach((button) => {
+    button.onclick = () => submit(button, { operation: button.dataset.loanOperation, loan_id: button.dataset.loanId });
+  });
 }
 
 function openConfirm(text, onYes) {
@@ -4420,6 +4548,8 @@ function init() {
     }
   })();
   el("btn-world-menu").onclick = openWorldMenuModal;
+  el("btn-key-loans").onclick = () => openKeyLoansModal().catch((err) => toast(err.message, true));
+  el("btn-status-key-loans").onclick = el("btn-key-loans").onclick;
   document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
     btn.onclick = () => setUiMode(btn.dataset.uimode || "play");
   });

@@ -166,7 +166,7 @@ def read_persona_state(
             if not isinstance(v, dict):
                 continue
             ks = str(k)
-            if (needle_exact and needle_exact in ks) or (needle_space in ks):
+            if (needle_exact and ks == needle_exact) or (not needle_exact and ks.startswith(needle_space)):
                 matched_entries.append(v)
 
     if matched_entries:
@@ -205,6 +205,7 @@ def read_persona_state(
         "updated_at": float(latest.get("updatedAt") or 0.0),
         "asleep": bool(latest.get("asleep", False)),
         "source": "nanami_persona",
+        "world_state": bool(matched_entries),
     }
 
 
@@ -950,10 +951,19 @@ def read_persona_behavior_profile(
             raw = _read_json(state_root / "state" / fname)
             if not raw:
                 continue
-            src = raw.get("traits") if isinstance(raw.get("traits"), dict) else raw
+            wrapper = "traits" if fname == "traits.json" else "socialTraits"
+            src = raw.get(wrapper, raw.get("traits", raw))
+            if not isinstance(src, Mapping):
+                continue
             for k in defaults:
                 if k in src:
-                    merged[k] = _clamp_f(src[k], 0.0, 1.0, defaults[k])
+                    value = src[k]
+                else:
+                    parent, _, child = k.partition(".")
+                    branch = src.get(parent)
+                    value = branch.get(child) if child and isinstance(branch, Mapping) else None
+                if value is not None:
+                    merged[k] = _clamp_f(value, 0.0, 1.0, merged[k])
 
     safety_priority = _clamp_f(
         0.50 * merged["needProfile.safety"] + 0.30 * merged["effortfulControl"] + 0.20 * (1.0 - merged["arousalBaseline"]),
@@ -1006,9 +1016,11 @@ def emit_world_event_to_persona(
     """将文字世界行动结果（客观 EPA 刺激）通过 mind.mjs --world-event 回写心理模型。"""
     base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
     if base_dir is None:
-        return None
+        return {"status": "unbound"}
     state_root, _ = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
-    if state_root is None or not state_root.is_dir():
+    if state_root is None:
+        return {"status": "unbound"}
+    if not state_root.is_dir():
         return None
     mind_mjs = next(
         (

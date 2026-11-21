@@ -12,6 +12,23 @@ from .schema import TILE_CATALOG
 _LOOK_WINDOW_SEC = 180.0
 
 
+def recall_puzzle(engine: WorldEngine, actor_id: str, space_id: str, cue: str) -> str:
+    """Retrieve one relevant firsthand memory for the bound actor and room."""
+    text = cue.casefold()
+    puzzle_topic = any(word in text for word in ("解谜", "开锁", "箱子", "钥匙", "puzzle"))
+    for memory in engine.puzzle_memories(actor_id, space_id):
+        helper = next(person for person in memory["participants"] if person["role"] == "helper")
+        target = memory["entity_name"]
+        names = [target, *(person["name"] for person in memory["participants"] if person["actor_id"] != actor_id)]
+        if not puzzle_topic and not any(len(name) >= 2 and name.casefold() in text for name in names):
+            continue
+        if helper["actor_id"] == actor_id:
+            initiator = next(person for person in memory["participants"] if person["role"] == "initiator")
+            return f"记得。{initiator['name']}找到了「{target}」，我用手里的钥匙打开了它。"
+        return f"记得。那次我找到了「{target}」，{helper['name']}用手里的钥匙打开了它。"
+    return ""
+
+
 def _direction_text(ax: int, ay: int, tx: int, ty: int) -> str:
     dx = tx - ax
     dy = ty - ay

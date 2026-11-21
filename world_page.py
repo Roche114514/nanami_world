@@ -33,6 +33,16 @@ def _ok_with_snap(
     snap = engine.snapshot_for_ui(space_id)
     eff_sid = str(snap.get("active_space_id") or space_id or "room_default").strip() or "room_default"
     aid = snap.get("active_actor_id") or ""
+    snap["key_loans"] = engine.key_loans_for(aid) if aid else []
+    snap["pending_key_loan"] = engine.pending_key_loan_response(aid) if aid else None
+    snap["events"] = [
+        event for event in snap.get("events", [])
+        if event.get("kind") not in {
+            "key_lent", "key_returned", "key_return_blocked",
+            "key_extension_sent", "key_extension_received", "key_loan_response",
+        }
+        or aid in (event.get("payload") or {}).get("witness_ids", [])
+    ]
     if aid:
         act = next((a for a in (snap.get("actors") or []) if a.get("actor_id") == aid), None)
         if act:
@@ -276,14 +286,15 @@ def register_pages(
         eid = str(v.get("entity_id") or "")
         action = str(v.get("action") or "").strip()
         aid = str(v.get("actor_id") or "") or engine.resolve_actor_id()
+        if not aid:
+            raise ValueError("请先导入一个角色，再在画布上操作。")
         if action == "write_user_note":
-            if not aid:
-                raise ValueError("请先导入一个角色，或先落格后再操作。")
             feedback = engine.execute_write(aid, eid, str(v.get("text") or ""), author="你")
+        elif action == "invite_puzzle":
+            feedback = heartbeat.invite_to_puzzle(aid, str(v.get("target_id") or ""), eid)
         else:
-            if not aid:
-                raise ValueError("请先导入一个角色，才能在画布里演示交互动作。")
             feedback = engine.execute_act(aid, eid, action, str(v.get("target_id") or ""))
+        heartbeat.deliver_persona_events()
         return _snap_ok({"feedback": feedback})
 
     def _act_compile_text_bp(v: dict[str, Any]) -> dict[str, Any]:
@@ -731,6 +742,40 @@ def register_pages(
         )
         return _snap_ok({"tick_result": res})
 
+    def _act_key_loan(v: dict[str, Any]) -> dict[str, Any]:
+        aid = str(v.get("actor_id") or "")
+        operation = str(v.get("operation") or "list")
+        loan_id = str(v.get("loan_id") or "")
+        space_id = str(v.get("space_id") or "")
+        if operation == "list":
+            return {"ok": True, "loans": engine.key_loans_for(aid), "pending": engine.pending_key_loan_response(aid)}
+        if operation == "lend":
+            engine.lend_key(aid, str(v.get("borrower_id") or ""), str(v.get("item_id") or ""),
+                            minutes=int(v.get("minutes", 30)))
+            feedback = "钥匙已交给借用人。"
+        elif operation == "return":
+            result = engine.return_key(aid, loan_id)
+            feedback = {
+                "returned": "钥匙已归还（逾期）。" if result.get("late") else "钥匙已按时归还。",
+                "route_blocked": "回去的路被挡住了，钥匙还在你手里。",
+                "different_space": "请到出借人所在的空间交接。",
+                "key_not_held": "请先把要归还的钥匙拿在手上。",
+                "receiver_hands_full": "出借人手上还有物品，暂时接不了。",
+                "receiver_resting": "出借人正在休息，稍后再交接。",
+            }[result["outcome"]]
+        elif operation == "send_extension":
+            engine.send_key_loan_extension(aid, loan_id, minutes=int(v.get("minutes", 60)))
+            feedback = "延期请求已发出，等待投递。"
+        elif operation == "deliver_extension":
+            engine.deliver_key_loan_extension(aid, loan_id)
+            feedback = "出借人已收到延期请求。"
+        elif operation == "respond":
+            response = heartbeat.respond_to_key_loan(aid)
+            feedback = response["goal"] if response else "当前没有新的借物消息需要回应。"
+        else:
+            raise ValueError("未知的借物操作。")
+        return _snap_ok({"feedback": feedback}, space_id=space_id)
+
     def _act_apply_starter(v: dict[str, Any]) -> dict[str, Any]:
         placed = engine.apply_starter_pack(str(v.get("space_id") or ""))
         return _snap_ok({"placed_count": len(placed)})
@@ -751,6 +796,7 @@ def register_pages(
         if not text:
             raise ValueError("请输入想对她说的话。")
         res = world_chat.chat(aid, text, space_id=req_sid)
+        heartbeat.deliver_persona_events()
         return _snap_ok({"chat_result": res}, space_id=req_sid)
 
     def _act_clear_world_chat(v: dict[str, Any]) -> dict[str, Any]:
@@ -937,6 +983,7 @@ def register_pages(
         ("set_space_palette", "切换空间调色板", _act_set_space_palette),
         ("tick_world", "推进世界时钟", _act_tick_world),
         ("autonomous_step", "触发角色自主行动", _act_autonomous_step),
+        ("key_loan", "借还钥匙与延期通知", _act_key_loan),
         ("apply_starter_pack", "放入基础测试包", _act_apply_starter),
         ("clear_space", "清空当前空间", _act_clear_space),
         ("chat_in_world", "在世界中对话", _act_chat_in_world),
@@ -1015,6 +1062,7 @@ def register_pages(
                 {"key": "heartbeat_enabled", "type": "boolean", "label": "开启后台心跳推进", "description": "按真实时间自动推进热饮降温、昼夜光影与低精力自主休息"},
                 {"key": "heartbeat_interval_sec", "type": "integer", "label": "心跳间隔（秒）", "min": 30, "max": 3600, "step": 30},
                 {"key": "heartbeat_use_llm", "type": "boolean", "label": "自主心跳使用大模型自由意志", "description": "开启后心跳步进优先让大模型决定她想做什么（关闭时用 0 Token 十类内心驱力规则）"},
+                {"key": "episodic_memory_enabled", "type": "boolean", "label": "使用世界经历", "description": "让角色在相关话题中回忆共同解谜，并在遇到同类谜题时考虑再次邀请同伴"},
                 {"key": "allow_ai_diary", "type": "boolean", "label": "允许离线在笔记本自主写随手记", "description": "仅当房间内放有可写笔记本且触发关键状态变化时低频写一句"},
                 {"key": "diary_cooldown_hours", "type": "number", "label": "自主写字冷却时长（小时）", "min": 1.0, "max": 72.0, "step": 0.5},
                 {"key": "persona_data_dir", "type": "text", "label": "人格模型数据目录（可选覆盖）", "placeholder": "留空自动探测 data/nanami"},
