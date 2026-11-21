@@ -3563,7 +3563,23 @@ function openImportActorModal() {
             sprite_prompt: el("act-prompt").value.trim(),
             sprite_image_data: imgData,
             space_id: state.snap.active_space_id,
-          }).then(() => { closeModal(); toast("角色已添加到当前世界"); }).catch((e) => { btn.disabled = false; toast(e.message, true); });
+          }).then(async (res) => {
+            if (res && res.cached_pixel_data_url && res.actor) {
+              try {
+                const cf = await pdExtractNativePixelSprite(res.cached_pixel_data_url);
+                await runAction("set_actor_appearance", {
+                  actor_id: res.actor.actor_id,
+                  appearance: Object.assign({}, res.actor.appearance || {}, { custom_frames: cf }),
+                  map_style: res.actor.map_style || "doll",
+                });
+                closeModal();
+                toast("角色已添加，并自动应用本地缓存像素小人");
+                return;
+              } catch (_err) { /* ignore fallback */ }
+            }
+            closeModal();
+            toast("角色已添加到当前世界");
+          }).catch((e) => { btn.disabled = false; toast(e.message, true); });
         },
       },
     ], true);
@@ -3661,6 +3677,7 @@ function openAppearanceModal(act) {
   if (!act) return toast("当前没有活动角色", true);
   const cur = JSON.parse(JSON.stringify(act.appearance || {}));
   let mapStyle = act.map_style === "portrait" ? "portrait" : "doll";
+  let lastUploadedPixelUrl = "";
   const colorFields = [
     ["hair_color", "主发色"], ["hair_shade", "发梢/副发色"], ["skin", "肤色"], ["eye_color", "瞳色"],
     ["outfit_color", "衣服主色"], ["outfit_accent", "衣服点缀"], ["outfit_inner", "内衬色"],
@@ -3677,8 +3694,9 @@ function openAppearanceModal(act) {
     + '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;">'
     + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);"><input type="checkbox" id="ap-use-web" checked> 🌐 联网检索参考'
     + ((state.snap && state.snap.pixellab_ready) ? ' <span style="color:var(--ok);">[PixelLab 已配置]</span>' : '') + '</label>'
-    + '<div style="display:flex;align-items:center;gap:6px;"><span id="ap-mode-badge" style="color:var(--accent-2);"></span>'
+    + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span id="ap-mode-badge" style="color:var(--accent-2);"></span>'
     + '<label class="px-btn" style="padding:1px 6px;font-size:10px;cursor:pointer;">🖼 导入像素图<input type="file" id="ap-img-file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;"></label>'
+    + '<button type="button" class="px-btn" id="ap-open-pack" style="padding:1px 6px;font-size:10px;">📦 像素图包</button>'
     + '<button type="button" class="px-btn hidden" id="ap-clear-custom" style="padding:1px 6px;font-size:10px;">改用基础模板</button></div>'
     + '</div>'
     + '<div class="form-grid">'
@@ -3705,14 +3723,17 @@ function openAppearanceModal(act) {
           const handleResult = async (res) => {
             if (res.used_official_pixel && res.official_image_data_url) {
               cur.custom_frames = await pdExtractNativePixelSprite(res.official_image_data_url);
+              lastUploadedPixelUrl = "";
               redraw();
-              toast("已提取原版弹丸像素小人（" + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
+              toast((res.from_cache ? "已从本地缓存秒加载原版像素小人（" : "已联网提取并缓存原版像素小人（") + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
             } else if (res.used_pixellab && res.pixellab_images) {
               cur.custom_frames = await pdExtract4DirPixelLabFrames(res.pixellab_images);
+              lastUploadedPixelUrl = "";
               redraw();
               toast("已生成 PixelLab 原生 4 向小人（" + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
             } else {
               Object.assign(cur, res.appearance || {});
+              lastUploadedPixelUrl = "";
               ["hair_style", "outfit_style", "accessory"].forEach((k) => { el("ap-" + k).value = cur[k]; });
               colorFields.forEach(([k]) => { el("ap-" + k).value = cur[k]; });
               redraw();
@@ -3747,7 +3768,12 @@ function openAppearanceModal(act) {
         onClick: (btn) => {
           btn.disabled = true;
           collect();
-          runAction("set_actor_appearance", { actor_id: act.actor_id, appearance: cur, map_style: el("ap-map-style").value })
+          runAction("set_actor_appearance", {
+            actor_id: act.actor_id,
+            appearance: cur,
+            map_style: el("ap-map-style").value,
+            cache_image_data_url: lastUploadedPixelUrl || "",
+          })
             .then(() => { closeModal(); toast("已保存「" + act.name + "」的外观"); })
             .catch((e) => { btn.disabled = false; toast(e.message, true); });
         },
@@ -3795,16 +3821,208 @@ function openAppearanceModal(act) {
     if (!f) return;
     const r = new FileReader();
     r.onload = () => {
-      pdExtractNativePixelSprite(String(r.result || ""))
-        .then((cf) => { cur.custom_frames = cf; redraw(); toast("已无损提取 " + cf.w + "×" + cf.h + " 像素小人"); })
+      const rawUrl = String(r.result || "");
+      pdExtractNativePixelSprite(rawUrl)
+        .then((cf) => {
+          cur.custom_frames = cf;
+          lastUploadedPixelUrl = rawUrl;
+          redraw();
+          toast("已无损提取 " + cf.w + "×" + cf.h + " 像素小人");
+        })
         .catch((e) => toast(e.message, true));
     };
     r.readAsDataURL(f);
   });
-  el("ap-clear-custom").onclick = () => { cur.custom_frames = {}; redraw(); toast("已切换回基础模板，可用下方下拉与色板微调"); };
-  ["hair_style", "outfit_style", "accessory"].forEach((k) => el("ap-" + k).addEventListener("change", () => { cur.custom_frames = {}; redraw(); }));
-  colorFields.forEach(([k]) => el("ap-" + k).addEventListener("input", () => { cur.custom_frames = {}; redraw(); }));
+  el("ap-open-pack").onclick = () => openPixelPackModal(act);
+  el("ap-clear-custom").onclick = () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); toast("已切换回基础模板，可用下方下拉与色板微调"); };
+  ["hair_style", "outfit_style", "accessory"].forEach((k) => el("ap-" + k).addEventListener("change", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
+  colorFields.forEach(([k]) => el("ap-" + k).addEventListener("input", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
   redraw();
+}
+
+function openPixelPackModal(returnActor) {
+  let activeSeries = "all";
+  let statusData = null;
+
+  showModal("📦 弹丸论破像素图包与跨设备同步",
+    '<div id="pp-stats" style="font-size:12px;padding:8px;border:1px solid var(--border);background:var(--panel-2);margin-bottom:8px;">正在读取本地图包缓存…</div>'
+    + '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">一台设备联网预缓存后，可导出 .zip 图包到其他设备直接导入，无需再逐个爬图；也可以将官方像素图放进 data/nanami_world/pixel_sprite_packs/ 目录自动识别。</div>'
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">'
+    + '<label class="px-btn primary" style="cursor:pointer;">📥 导入图包 (.zip)<input type="file" id="pp-import-zip" accept=".zip,application/zip" style="display:none;"></label>'
+    + '<button type="button" class="px-btn" id="pp-export-zip">📤 导出图包 (.zip)</button>'
+    + '<button type="button" class="px-btn" id="pp-batch-cache">🌐 一键预缓存当前系列</button>'
+    + '<button type="button" class="px-btn" id="pp-force-cache" title="重新联网拉取并覆盖已有的背面或旧版缓存">🔄 强制重拉当前系列</button>'
+    + '</div>'
+    + '<div id="pp-series-tabs" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;"></div>'
+    + '<div id="pp-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:6px;max-height:310px;overflow:auto;padding:2px;"></div>',
+    [
+      {
+        label: returnActor ? "返回外观编辑" : "关闭",
+        onClick: () => {
+          if (returnActor) {
+            const actors = (state.snap && state.snap.actors) || [];
+            const latest = actors.find((a) => a.actor_id === returnActor.actor_id) || returnActor;
+            openAppearanceModal(latest);
+          } else {
+            closeModal();
+          }
+        },
+      },
+    ], false);
+
+  const seriesLabels = [["all", "全部"], ["DR1", "1代 (DR1)"], ["DR2", "2代 (DR2)"], ["V3", "新弹丸 V3"], ["UDG", "衍生/吉祥物"]];
+
+  const renderGrid = () => {
+    if (!statusData) return;
+    const sc = statusData.series_counts || {};
+    const statsEl = el("pp-stats");
+    if (statsEl) {
+      statsEl.innerHTML = '<b>已缓存：' + esc(statusData.cached_count) + ' / ' + esc(statusData.total_catalog_count) + ' 位弹丸论破角色</b>'
+        + (returnActor ? ' <span style="color:var(--accent-2);margin-left:8px;">（点击「✅ 已缓存」卡片可直接应用到「' + esc(returnActor.name) + '」）</span>' : "");
+    }
+    const tabsEl = el("pp-series-tabs");
+    if (tabsEl) {
+      tabsEl.innerHTML = "";
+      seriesLabels.forEach(([key, label]) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "px-btn" + (activeSeries === key ? " primary" : "");
+        b.style.cssText = "padding:2px 8px;font-size:11px;";
+        if (key === "all") {
+          b.textContent = label + " (" + statusData.cached_count + "/" + statusData.total_catalog_count + ")";
+        } else {
+          const info = sc[key] || { cached: 0, total: 0 };
+          b.textContent = label + " (" + info.cached + "/" + info.total + ")";
+        }
+        b.onclick = () => { activeSeries = key; renderGrid(); };
+        tabsEl.appendChild(b);
+      });
+    }
+    const gridEl = el("pp-grid");
+    if (!gridEl) return;
+    gridEl.innerHTML = "";
+    const rows = (statusData.items || []).filter((it) => activeSeries === "all" || it.series === activeSeries);
+    rows.forEach((it) => {
+      const card = document.createElement("div");
+      card.style.cssText = "border:1px solid var(--border);background:var(--panel);padding:6px;display:flex;align-items:center;gap:6px;font-size:11px;"
+        + (returnActor && it.cached ? "cursor:pointer;" : "");
+      const thumbHtml = (it.cached && it.thumb_data_url)
+        ? '<img src="' + esc(it.thumb_data_url) + '" alt="' + esc(it.zh) + '" style="width:36px;height:42px;object-fit:contain;image-rendering:pixelated;background:var(--panel-2);border:1px solid var(--border);flex:0 0 auto;">'
+        : '<div style="width:36px;height:42px;display:flex;align-items:center;justify-content:center;background:var(--panel-2);border:1px dashed var(--border);color:var(--muted);font-size:12px;flex:0 0 auto;">?</div>';
+      card.innerHTML = thumbHtml
+        + '<div style="flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;">'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:4px;">'
+        + '<b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(it.zh) + '</b>'
+        + '<span style="font-size:10px;color:var(--muted);flex:0 0 auto;">' + esc(it.series) + '</span></div>'
+        + '<div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(it.en) + '</div>'
+        + '<div style="font-size:10px;color:' + (it.cached ? 'var(--ok)' : 'var(--muted)') + ';">'
+        + (it.cached ? ('✅ 已缓存' + (it.width && it.height ? (' ' + it.width + '×' + it.height) : '')) : '⚪ 未缓存')
+        + '</div></div>';
+      if (returnActor && it.cached) {
+        card.title = "点击应用到「" + returnActor.name + "」";
+        card.onclick = () => {
+          runAction("get_cached_pixel_sprite", { name: it.zh, key: it.key })
+            .then(async (spRes) => {
+              const url = spRes && spRes.sprite && spRes.sprite.image_data_url;
+              if (!url) throw new Error("未读取到缓存像素图");
+              const cf = await pdExtractNativePixelSprite(url);
+              const saved = await runAction("set_actor_appearance", {
+                actor_id: returnActor.actor_id,
+                appearance: Object.assign({}, returnActor.appearance || {}, { custom_frames: cf }),
+                map_style: returnActor.map_style || "doll",
+              });
+              const latest = (saved && saved.actor) || returnActor;
+              openAppearanceModal(latest);
+              toast("已应用「" + it.zh + "」像素小人");
+            })
+            .catch((e) => toast(e.message, true));
+        };
+      }
+      gridEl.appendChild(card);
+    });
+  };
+
+  const refreshStatus = () => runAction("get_pixel_pack_status", {})
+    .then((res) => { statusData = res; renderGrid(); })
+    .catch((e) => {
+      const statsEl = el("pp-stats");
+      if (statsEl) statsEl.textContent = "读取图包状态失败：" + e.message;
+    });
+
+  el("pp-import-zip").addEventListener("change", (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      toast("正在解包导入…");
+      runAction("import_pixel_pack_zip", { zip_data_url: String(r.result || "") })
+        .then((res) => {
+          statusData = res.status || statusData;
+          renderGrid();
+          const unm = (res.unmatched_files || []).length;
+          toast("成功导入 " + (res.imported_count || 0) + " 位角色像素图" + (unm ? ("（" + unm + " 个未识别文件名已跳过）") : ""));
+        })
+        .catch((e) => toast(e.message, true));
+    };
+    r.readAsDataURL(f);
+  });
+
+  el("pp-export-zip").onclick = () => {
+    const btn = el("pp-export-zip");
+    btn.disabled = true;
+    runAction("export_pixel_pack_zip", {})
+      .then((res) => {
+        const bin = atob(String(res.zip_b64 || ""));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const blob = new Blob([bytes], { type: "application/zip" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = res.filename || "danganronpa_pixel_pack.zip";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast("已导出 " + (res.count || 0) + " 位角色图包（" + Math.max(1, Math.round((res.size_bytes || 0) / 1024)) + " KB）");
+      })
+      .catch((e) => toast(e.message, true))
+      .finally(() => { btn.disabled = false; });
+  };
+
+  const runBatchCache = (btn, forceRefresh) => {
+    const otherBtn = el(forceRefresh ? "pp-batch-cache" : "pp-force-cache");
+    btn.disabled = true;
+    if (otherBtn) otherBtn.disabled = true;
+    const prevText = btn.textContent;
+    btn.textContent = forceRefresh ? "启动强制重拉…" : "启动预缓存…";
+    runAction("batch_cache_official_pixels", { series: activeSeries, force_refresh: Boolean(forceRefresh) })
+      .then(async (res) => {
+        const jobId = res && res.job_id;
+        while (res && (res.pending || res.done === false) && (res.job_id || jobId)) {
+          btn.textContent = res.label || "预缓存中…";
+          await new Promise((r) => setTimeout(r, 1200));
+          if (!el("pp-batch-cache") || el("modal-mask").classList.contains("hidden")) return;
+          res = await runAction("get_regen_job", { job_id: res.job_id || jobId });
+        }
+        if (res && res.status) statusData = res.status;
+        renderGrid();
+        const failCnt = (res && res.failed_names) ? res.failed_names.length : 0;
+        toast((forceRefresh ? "强制重拉完成：" : "预缓存完成：") + "更新 " + ((res && res.succeeded) || 0) + "，跳过 " + ((res && res.skipped) || 0) + (failCnt ? ("，未拉取到 " + failCnt + " 位") : ""));
+      })
+      .catch((e) => toast(e.message, true))
+      .finally(() => {
+        if (el("pp-batch-cache")) {
+          btn.disabled = false;
+          btn.textContent = prevText;
+          if (otherBtn) otherBtn.disabled = false;
+        }
+      });
+  };
+  el("pp-batch-cache").onclick = () => runBatchCache(el("pp-batch-cache"), false);
+  el("pp-force-cache").onclick = () => runBatchCache(el("pp-force-cache"), true);
+
+  refreshStatus();
 }
 
 function openWorldMoodModal(act) {

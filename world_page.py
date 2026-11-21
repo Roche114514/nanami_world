@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
-from . import persona_bridge, projector, text_compiler
+from . import danganronpa_catalog, persona_bridge, projector, sprite_pack, text_compiler
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +149,43 @@ def register_pages(
         if not job:
             return {"ok": False, "done": True, "error": "生图任务不存在或已过期"}
         return job
+
+    def _spawn_bg_job(job_fn: Callable[[Callable[[dict[str, Any]], None]], dict[str, Any]], label: str) -> dict[str, Any]:
+        job_id = uuid.uuid4().hex[:12]
+        with _regen_lock:
+            _regen_jobs[job_id] = {
+                "ok": True,
+                "pending": True,
+                "done": False,
+                "job_id": job_id,
+                "label": label,
+                "started_ts": time.time(),
+            }
+
+        def _update_progress(patch: dict[str, Any]) -> None:
+            with _regen_lock:
+                cur_j = _regen_jobs.get(job_id)
+                if cur_j is not None:
+                    cur_j.update(patch)
+
+        def _worker() -> None:
+            try:
+                res_payload = job_fn(_update_progress)
+                res_payload["pending"] = False
+                res_payload["done"] = True
+                res_payload["job_id"] = job_id
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("nanami_world: 后台任务异常")
+                res_payload = {"ok": False, "pending": False, "done": True, "job_id": job_id, "error": str(exc)}
+            with _regen_lock:
+                _regen_jobs[job_id] = res_payload
+                if len(_regen_jobs) > 24:
+                    oldest = next(iter(_regen_jobs))
+                    if oldest != job_id:
+                        _regen_jobs.pop(oldest, None)
+
+        threading.Thread(target=_worker, name=f"nanami-gen-{job_id}", daemon=True).start()
+        return {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label}
 
     def _ensure_default_host_actor() -> None:
         if engine.list_actors():
@@ -374,7 +411,14 @@ def register_pages(
             )
             actor = next((a for a in engine.list_actors() if a["actor_id"] == actor["actor_id"]), actor)
         heartbeat.step(advance_minutes=0.0)
-        return _snap_ok({"actor": actor}, space_id=actor["space_id"])
+        extra_res: dict[str, Any] = {"actor": actor}
+        has_custom = bool(((actor.get("appearance") or {}).get("custom_frames") or {}).get("down"))
+        if not has_custom:
+            cached_px = sprite_pack.get_cached_sprite(engine.data_root, lookup_name)
+            if cached_px is not None:
+                extra_res["cached_pixel_data_url"] = cached_px["image_data_url"]
+                extra_res["cached_pixel_title"] = cached_px["title"]
+        return _snap_ok(extra_res, space_id=actor["space_id"])
 
     def _act_set_actor_appearance(v: dict[str, Any]) -> dict[str, Any]:
         aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=str(v.get("space_id") or ""))
@@ -386,6 +430,19 @@ def register_pages(
             appearance=dict(raw_app) if isinstance(raw_app, Mapping) else None,
             map_style=str(v.get("map_style") or "").strip(),
         )
+        cache_img_url = str(v.get("cache_image_data_url") or "").strip()
+        if cache_img_url:
+            host_key = str(actor.get("host_character") or actor.get("name") or "").strip()
+            if host_key:
+                try:
+                    sprite_pack.save_cached_sprite_data_url(
+                        engine.data_root,
+                        host_key,
+                        cache_img_url,
+                        source="manual",
+                    )
+                except Exception:
+                    logger.debug("nanami_world: 自动沉淀手动上传像素图到缓存失败", exc_info=True)
         return _snap_ok({"actor": actor}, space_id=actor["space_id"])
 
     def _act_regen_actor_appearance(v: dict[str, Any]) -> dict[str, Any]:
@@ -409,41 +466,66 @@ def register_pages(
         use_web = bool(v.get("use_web", True))
         use_llm = bool(v.get("use_llm", cfg.auto_compile_llm)) and bool(desc or use_web or ref_img)
         gen_mode = str(v.get("gen_mode") or "auto").strip().lower()
+        force_refresh = bool(v.get("force_refresh", False))
         pixellab_key = str(v.get("pixellab_api_key") or getattr(cfg, "pixellab_api_key", "") or "").strip()
 
         def _spawn_async(job_fn: Callable[[], dict[str, Any]], label: str) -> dict[str, Any]:
             if not bool(v.get("async_job", True)):
                 return job_fn()
-            job_id = uuid.uuid4().hex[:12]
-            with _regen_lock:
-                _regen_jobs[job_id] = {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label, "started_ts": time.time()}
+            return _spawn_bg_job(lambda _upd: job_fn(), label)
 
-            def _worker() -> None:
-                try:
-                    res_payload = job_fn()
-                    res_payload["pending"] = False
-                    res_payload["done"] = True
-                    res_payload["job_id"] = job_id
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("nanami_world: 生图后台任务异常")
-                    res_payload = {"ok": False, "pending": False, "done": True, "job_id": job_id, "error": str(exc)}
-                with _regen_lock:
-                    _regen_jobs[job_id] = res_payload
-                    if len(_regen_jobs) > 24:
-                        oldest = next(iter(_regen_jobs))
-                        if oldest != job_id:
-                            _regen_jobs.pop(oldest, None)
-
-            threading.Thread(target=_worker, name=f"nanami-gen-{job_id}", daemon=True).start()
-            return {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label}
-
-        # 1. 优先尝试检索弹丸论破原版像素小人（auto 或 official）
+        # 1. 优先尝试检索弹丸论破原版像素小人（先本地缓存，未命中再多路联网拉取）
         if gen_mode in ("auto", "official") and (use_web or gen_mode == "official"):
-            en_hint = ""
-            reason: dict[str, Any] = {}
-            if gen_mode == "official" or use_web:
+            target_label = host_name or act["name"]
+            if not force_refresh:
+                cached_off = sprite_pack.get_cached_sprite(engine.data_root, target_label)
+                if cached_off is not None:
+                    return {
+                        "ok": True,
+                        "used_official_pixel": True,
+                        "official_image_data_url": cached_off["image_data_url"],
+                        "official_title": cached_off["title"],
+                        "english_name": cached_off["english_name"],
+                        "from_cache": True,
+                    }
+            if gen_mode == "official":
+                def _run_official() -> dict[str, Any]:
+                    reason: dict[str, Any] = {}
+                    off = text_compiler.search_official_pixel_sprite(
+                        target_label,
+                        "",
+                        data_root=engine.data_root,
+                        force_refresh=force_refresh,
+                        reason_out=reason,
+                    )
+                    if off is None:
+                        if reason.get("network_error"):
+                            detail = "；".join(reason.get("errors") or [])[:220]
+                            raise ValueError(
+                                f"访问弹丸论破 Wiki 失败（{detail}），请检查网络或代理；"
+                                "也可在「📦 像素图包」导入其他设备导出的 .zip 图包，或改用 PixelLab / 手动上传图片。"
+                            )
+                        raise ValueError(
+                            f"未能在 Wiki 拉取到「{target_label}」的原版像素小人。"
+                            "若当前设备无法访问 Fandom Wiki，可在「📦 像素图包」中导入其他设备导出的 .zip 图包，或改用 PixelLab / 本地上传图片。"
+                        )
+                    return {
+                        "ok": True,
+                        "used_official_pixel": True,
+                        "official_image_data_url": off["image_data_url"],
+                        "official_title": off["title"],
+                        "english_name": off["english_name"],
+                        "from_cache": False,
+                    }
+
+                return _spawn_async(_run_official, "检索弹丸原版像素小人中")
+            if use_web:
                 off = text_compiler.search_official_pixel_sprite(
-                    host_name or act["name"], en_hint, reason_out=reason)
+                    target_label,
+                    "",
+                    data_root=engine.data_root,
+                    force_refresh=force_refresh,
+                )
                 if off is not None:
                     return {
                         "ok": True,
@@ -451,14 +533,8 @@ def register_pages(
                         "official_image_data_url": off["image_data_url"],
                         "official_title": off["title"],
                         "english_name": off["english_name"],
+                        "from_cache": False,
                     }
-            if gen_mode == "official":
-                if reason.get("network_error"):
-                    detail = "；".join(reason.get("errors") or [])[:220]
-                    raise ValueError(
-                        f"访问弹丸论破 Wiki 失败，没能取到「{host_name or act['name']}」的原版像素小人（{detail}）。"
-                        "请检查网络或代理，也可改用 PixelLab 或手动导入图片。")
-                raise ValueError(f"未在弹丸论破 Wiki 找到「{host_name or act['name']}」的原版像素小人，可尝试改用 PixelLab 或手动导入图片。")
 
         # 2. PixelLab 云端 4 向生成（作为备用 / 或显式选择 pixellab）
         if gen_mode == "pixellab" or (gen_mode == "auto" and pixellab_key and bool(v.get("use_pixellab", True))):
@@ -763,6 +839,71 @@ def register_pages(
             space_id=applied["space"]["space_id"],
         )
 
+    def _act_get_pixel_pack_status(_v: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True, **sprite_pack.list_cache_status(engine.data_root)}
+
+    def _act_get_cached_pixel_sprite(v: dict[str, Any]) -> dict[str, Any]:
+        probe = str(v.get("name") or v.get("key") or "").strip()
+        if not probe:
+            raise ValueError("缺少角色名称或键名。")
+        sp = sprite_pack.get_cached_sprite(engine.data_root, probe)
+        if sp is None:
+            raise ValueError(f"角色「{probe}」尚未在本地缓存像素小人。")
+        return {"ok": True, "sprite": sp}
+
+    def _act_import_pixel_pack_zip(v: dict[str, Any]) -> dict[str, Any]:
+        payload = str(v.get("zip_data_url") or v.get("zip_b64") or "").strip()
+        res = sprite_pack.import_pack_zip_b64(engine.data_root, payload)
+        return {"ok": True, **res}
+
+    def _act_export_pixel_pack_zip(_v: dict[str, Any]) -> dict[str, Any]:
+        res = sprite_pack.export_pack_zip_b64(engine.data_root)
+        return {"ok": True, **res}
+
+    def _act_batch_cache_official_pixels(v: dict[str, Any]) -> dict[str, Any]:
+        series = str(v.get("series") or "all").strip()
+        force_refresh = bool(v.get("force_refresh", False))
+        rows = danganronpa_catalog.list_catalog(series)
+        if not rows:
+            raise ValueError(f"未找到系列「{series}」的角色列表。")
+
+        def _worker(update_progress: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+            total = len(rows)
+            ok_cnt = 0
+            skip_cnt = 0
+            failed_names: list[str] = []
+            for idx, item in enumerate(rows, start=1):
+                zh = item["zh"]
+                en = item["en"]
+                update_progress({
+                    "label": f"预缓存 {idx}/{total}：{zh}（已就绪 {ok_cnt + skip_cnt}）",
+                    "progress": f"{idx}/{total}",
+                })
+                if not force_refresh and sprite_pack.get_cached_sprite(engine.data_root, zh, en) is not None:
+                    skip_cnt += 1
+                    continue
+                fetched = text_compiler.search_official_pixel_sprite(
+                    zh,
+                    en,
+                    data_root=engine.data_root,
+                    force_refresh=force_refresh,
+                )
+                if fetched is not None:
+                    ok_cnt += 1
+                else:
+                    failed_names.append(zh)
+            return {
+                "ok": True,
+                "series": series,
+                "total": total,
+                "succeeded": ok_cnt,
+                "skipped": skip_cnt,
+                "failed_names": failed_names,
+                "status": sprite_pack.list_cache_status(engine.data_root),
+            }
+
+        return _spawn_bg_job(_worker, f"准备预缓存 {len(rows)} 位角色")
+
     action_specs: list[tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
         ("get_world_snapshot", "刷新世界快照", _act_get_snapshot),
         ("place_from_blueprint", "放入物品", _act_place_from_bp),
@@ -784,6 +925,11 @@ def register_pages(
         ("set_actor_appearance", "保存像素小人外观", _act_set_actor_appearance),
         ("regen_actor_appearance", "按设定生成小人外观", _act_regen_actor_appearance),
         ("get_regen_job", "查询生图任务状态", _act_get_regen_job),
+        ("get_pixel_pack_status", "查询本地像素图包状态", _act_get_pixel_pack_status),
+        ("get_cached_pixel_sprite", "读取已缓存像素小人", _act_get_cached_pixel_sprite),
+        ("import_pixel_pack_zip", "导入像素图包(.zip)", _act_import_pixel_pack_zip),
+        ("export_pixel_pack_zip", "导出像素图包(.zip)", _act_export_pixel_pack_zip),
+        ("batch_cache_official_pixels", "按系列一键预缓存像素小人", _act_batch_cache_official_pixels),
         ("create_space", "新建空间", _act_create_space),
         ("switch_space", "切换空间", _act_switch_space),
         ("delete_space", "删除世界", _act_delete_space),

@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
+from . import danganronpa_catalog, sprite_pack
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -564,13 +565,23 @@ _APPEARANCE_SYSTEM_PROMPT = """你是弹丸论破风格 8-bit 像素 Q 版小人
 ]"""
 
 
-def _http_get_text(url: str, *, timeout_sec: float = 2.8) -> str:
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def _http_get_text(url: str, *, timeout_sec: float = 6.0) -> str:
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; Shinsekai-NanamiWorld/0.2)"},
+        headers={
+            "User-Agent": _BROWSER_UA,
+            "Accept": "application/json,text/html,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-        raw = resp.read(200_000)
+        raw = resp.read(300_000)
         return raw.decode("utf-8", errors="ignore")
 
 
@@ -659,7 +670,7 @@ _OUTFIT_COLOR_WORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 
 
 def _fallback_appearance_from_text(name: str, text: str) -> dict[str, Any]:
-    base = default_appearance(name)
+    base = danganronpa_catalog.preset_appearance_for(name) or default_appearance(name)
     t = str(text or "")
     raw = dict(base)
     for words, (main, shade) in _HAIR_COLOR_WORDS:
@@ -790,8 +801,8 @@ def resolve_character_search_info(
             used_llm = bool(english_name or outfit_prompt)
 
     if not english_name:
-        known_en = {"七海千秋": "Chiaki Nanami", "日向创": "Hajime Hinata", "狛枝凪斗": "Nagito Komaeda", "哈贝特洛特": "Habetrot"}
-        english_name = known_en.get(clean_name, clean_name)
+        known_en = {"哈贝特洛特": "Habetrot"}
+        english_name = danganronpa_catalog.resolve_english_name(clean_name) or known_en.get(clean_name, clean_name)
 
     return {
         "english_name": english_name,
@@ -802,66 +813,349 @@ def resolve_character_search_info(
     }
 
 
+_PIXEL_BAD_WORDS = (
+    "execution", "wallpaper", "banner", "sheet", "fullbody", "halfbody",
+    "bust", "gallery", "nameplate", "name plate", "head pixel", "pixel head",
+    "equipment", "death road", "nwp model", "collab", "map menu", "sidebar",
+    "fte guide", "non-related", "back", "rear", "behind", "lying", "dead",
+    "crying", "sleeping",
+)
+_PIXEL_FRAME_RE = re.compile(r"(?:[\s_\-(])0*(\d{1,2})\s*\)?\s*\.(?:png|gif|webp)$")
+
+
+def _score_pixel_candidate(title: str, w: int, h: int, target_tokens: set[str]) -> float | None:
+    if not (12 <= w <= 360 and 12 <= h <= 360):
+        return None
+    ratio = w / max(1, h)
+    if not (0.35 <= ratio <= 1.65):
+        return None
+    tl = title.lower()
+    if not any(k in tl for k in ("pixel", "8-bit", "8bit", "像素", "点阵", "mini", "icon", "sprite")):
+        return None
+    if any(bad in tl for bad in _PIXEL_BAD_WORDS) or re.search(r"\bcg\b", tl):
+        return None
+
+    # 仅接收正面站立帧 (00 / 01 / 1) 或无帧号静态正面图，严禁接收 02+ 背面/侧面/动作帧
+    frame_m = _PIXEL_FRAME_RE.search(tl)
+    frame_bonus = 4.5
+    if frame_m is not None:
+        frame_idx = int(frame_m.group(1))
+        if frame_idx >= 2:
+            return None
+        frame_bonus = 8.0
+
+    hits = sum(1 for tok in target_tokens if tok in tl) if target_tokens else 1
+    if target_tokens and hits == 0:
+        return None
+
+    score = 1.0 + frame_bonus + 1.5 * hits
+    if any(k in tl for k in ("pixel", "8-bit", "8bit", "像素", "点阵")):
+        score += 2.5
+    if w <= 160 and h <= 160:
+        score += 1.5
+
+    # 游戏本篇经典服装优先于 Danganronpa 3 动画褐色校服
+    is_dr3 = any(k in tl for k in ("danganronpa 3", " dr3", "(dr3)", "side despair", "side future"))
+    if is_dr3:
+        score -= 4.5
+    else:
+        if any(k in tl for k in ("island mode", "school mode", "bonus mode")):
+            score += 5.5
+        elif any(k in tl for k in ("danganronpa 1", "danganronpa 2", "danganronpa v3", "drs -")):
+            score += 3.5
+
+    if tl.endswith(".png"):
+        score += 2.0
+    elif tl.endswith(".gif"):
+        score += 0.5
+    return score
+
+
+def _collect_candidates_from_pages(
+    pages_iter: Any,
+    target_tokens: set[str],
+) -> list[tuple[float, str, int, int, str]]:
+    cands: list[tuple[float, str, int, int, str]] = []
+    if not isinstance(pages_iter, list):
+        pages_iter = list(pages_iter or [])
+    for page in sorted(pages_iter, key=lambda p: str((p or {}).get("title") or "")):
+        if not isinstance(page, dict) or "missing" in page:
+            continue
+        title = str(page.get("title") or "")
+        ii = (page.get("imageinfo") or [{}])[0]
+        if not isinstance(ii, dict):
+            continue
+        w, h = int(ii.get("width") or 0), int(ii.get("height") or 0)
+        img_url = str(ii.get("url") or "").strip()
+        if not img_url:
+            continue
+        sc = _score_pixel_candidate(title, w, h, target_tokens)
+        if sc is not None:
+            cands.append((sc, title, w, h, img_url))
+    cands.sort(key=lambda item: item[0], reverse=True)
+    return cands
+
+
+def _fetch_mediawiki_imageinfo(
+    api_base: str,
+    file_titles: list[str],
+    *,
+    timeout_sec: float,
+) -> list[dict[str, Any]]:
+    if not file_titles:
+        return []
+    pages_out: list[dict[str, Any]] = []
+    for offset in range(0, len(file_titles), 25):
+        chunk = file_titles[offset:offset + 25]
+        q = urllib.parse.urlencode({
+            "action": "query",
+            "titles": "|".join(chunk),
+            "prop": "imageinfo",
+            "iiprop": "url|size",
+            "format": "json",
+        })
+        data = json.loads(_http_get_text(f"{api_base}?{q}", timeout_sec=timeout_sec))
+        pages_out.extend(((data.get("query") or {}).get("pages") or {}).values())
+    return pages_out
+
+
+def _download_pixel_candidate(
+    img_url: str,
+    title: str,
+    w: int,
+    h: int,
+    q_name: str,
+    save_name: str,
+    *,
+    data_root: Path | None,
+    timeout_sec: float,
+) -> dict[str, Any] | None:
+    req = urllib.request.Request(
+        img_url,
+        headers={
+            "User-Agent": _BROWSER_UA,
+            "Referer": "https://danganronpa.fandom.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as r:
+        raw = r.read(500_000)
+    if len(raw) < 8:
+        return None
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        mime = "image/gif"
+    elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    else:
+        return None
+
+    if data_root is not None:
+        saved = sprite_pack.save_cached_sprite(
+            data_root,
+            save_name,
+            raw,
+            mime=mime,
+            title=title,
+            width=w,
+            height=h,
+            english_name=q_name,
+            source="wiki",
+        )
+        return {
+            "image_data_url": saved["image_data_url"],
+            "title": title,
+            "width": w or saved["width"],
+            "height": h or saved["height"],
+            "english_name": q_name,
+            "cached": True,
+            "source": "wiki",
+        }
+    return {
+        "image_data_url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}",
+        "title": title,
+        "width": w,
+        "height": h,
+        "english_name": q_name,
+        "cached": False,
+        "source": "wiki",
+    }
+
+
 def search_official_pixel_sprite(
     name: str,
     english_name: str = "",
     *,
+    data_root: Path | None = None,
+    force_refresh: bool = False,
     timeout_sec: float = 20.0,
     reason_out: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """检索弹丸论破 Wiki 原版 8-bit 像素小人图（如 75x84 @ 3x），返回原生 data URL。"""
-    q_name = str(english_name or "").strip()
-    if not q_name:
-        known_en = {"七海千秋": "Chiaki Nanami", "日向创": "Hajime Hinata", "狛枝凪斗": "Nagito Komaeda", "索妮娅": "Sonia Nevermind", "雾切响子": "Kyoko Kirigiri", "苗木诚": "Makoto Naegi"}
-        q_name = known_en.get(str(name or "").strip(), "")
+    """检索弹丸论破 Wiki 原版 8-bit 正面像素小人图（优先本地缓存与游戏本篇立绘，严禁缓存背面帧），返回原生 data URL。"""
+    if data_root is not None and not force_refresh:
+        cached = sprite_pack.get_cached_sprite(data_root, name, english_name)
+        if cached is not None:
+            return cached
+
+    cat_entry = danganronpa_catalog.lookup_character(name) or (
+        danganronpa_catalog.lookup_character(english_name) if english_name else None
+    )
+    q_name = str(english_name or (cat_entry["en"] if cat_entry else "")).strip()
     if not q_name:
         return None
-
-    api = "https://danganronpa.fandom.com/api.php"
-    # 走代理访问 fandom 时 TLS 握手常常 5 秒以上，原来写死 5.0 会直接超时被当成"没找到"
+    zh_name = str(cat_entry["zh"] if cat_entry else name).strip()
+    save_name = zh_name or q_name
+    target_tokens = {
+        tok for tok in re.split(r"[\s_\-]+", f"{q_name} {zh_name}".lower())
+        if len(tok) >= 2
+    }
     errors: list[str] = []
-    for term in (f"{q_name} Pixel Sprites", f"{q_name} Pixel"):
+
+    def _try_cands(cands: list[tuple[float, str, int, int, str]]) -> dict[str, Any] | None:
+        for _sc, title, w, h, img_url in cands[:5]:
+            try:
+                res = _download_pixel_candidate(
+                    img_url, title, w, h, q_name, save_name,
+                    data_root=data_root, timeout_sec=timeout_sec,
+                )
+                if res is not None:
+                    return res
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+                continue
+        return None
+
+    api_en = "https://danganronpa.fandom.com/api.php"
+
+    # 策略 1：精确本篇正面标题批量直查（优先 Island / School / Bonus Mode 正面 1 号帧）
+    direct_titles = [
+        f"File:Danganronpa 2 Island Mode {q_name} Pixel Icon (1).png",
+        f"File:{q_name} Bonus Mode Pixel Icon (1).png",
+        f"File:{q_name} School Mode Pixel Icon (1).png",
+        f"File:Danganronpa 1 School Mode {q_name} Pixel Sprite 01.png",
+        f"File:Danganronpa 1 {q_name} School Mode Pixel Sprite 01.png",
+        f"File:Danganronpa V3 Bonus Mode {q_name} Pixel Icon (1).png",
+        f"File:Danganronpa V3 Bonus Mode {q_name} DR1 Pixel Sprite 01.png",
+        f"File:Danganronpa V3 Bonus Mode {q_name} DR1 Pixel Sprite 01.gif",
+        f"File:Danganronpa V3 {q_name} Bonus Mode Pixel Icon (1).png",
+        f"File:Danganronpa V3 {q_name} Pixel Sprites (01).gif",
+        f"File:Danganronpa 2 {q_name} Pixel Sprites (00).gif",
+        f"File:Danganronpa 2 {q_name} Pixel Sprites (01).gif",
+        f"File:DRS - {q_name} Pixel (1).gif",
+        f"File:DRS - {q_name} Pixel (1).png",
+        f"File:Danganronpa 1 {q_name} Pixel Sprites (01).gif",
+    ]
+    try:
+        pages = _fetch_mediawiki_imageinfo(api_en, direct_titles, timeout_sec=timeout_sec)
+        res = _try_cands(_collect_candidates_from_pages(pages, target_tokens))
+        if res is not None:
+            return res
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    # 策略 2：Fandom EN 加引号文件搜索（gsrlimit=25，确保包含 01 正面帧供打分筛选）
+    for term in (f'"{q_name}" Pixel', f"{q_name} Pixel Icon", f"{q_name} Pixel Sprites"):
         try:
             q = urllib.parse.urlencode({
                 "action": "query",
                 "generator": "search",
                 "gsrsearch": term,
                 "gsrnamespace": "6",
-                "gsrlimit": "6",
+                "gsrlimit": "25",
                 "prop": "imageinfo",
                 "iiprop": "url|size",
                 "format": "json",
             })
-            data = json.loads(_http_get_text(f"{api}?{q}", timeout_sec=timeout_sec))
-            pages = sorted((data.get("query") or {}).get("pages", {}).values(), key=lambda p: str(p.get("title") or ""))
-            for page in pages:
-                title = str(page.get("title") or "")
-                if "pixel" not in title.lower():
-                    continue
-                ii = (page.get("imageinfo") or [{}])[0]
-                w, h = int(ii.get("width") or 0), int(ii.get("height") or 0)
-                img_url = str(ii.get("url") or "")
-                if not img_url or not (20 <= w <= 160 and 20 <= h <= 160):
-                    continue
-                req = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=timeout_sec) as r:
-                    raw = r.read(300_000)
-                if raw[:6] in (b"GIF87a", b"GIF89a"):
-                    mime = "image/gif"
-                elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-                    mime = "image/webp"
-                else:
-                    mime = "image/png"
-                return {
-                    "image_data_url": f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}",
-                    "title": title,
-                    "width": w,
-                    "height": h,
-                    "english_name": q_name,
-                }
+            data = json.loads(_http_get_text(f"{api_en}?{q}", timeout_sec=timeout_sec))
+            pages = list(((data.get("query") or {}).get("pages") or {}).values())
+            res = _try_cands(_collect_candidates_from_pages(pages, target_tokens))
+            if res is not None:
+                return res
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{type(exc).__name__}: {exc}")
             continue
+
+    # 策略 3：Fandom EN 角色 Sprite_Gallery / 角色页全量列举像素图片
+    try:
+        q = urllib.parse.urlencode({
+            "action": "query",
+            "titles": f"{q_name}/Sprite_Gallery|{q_name}",
+            "prop": "images",
+            "imlimit": "500",
+            "redirects": "1",
+            "format": "json",
+        })
+        data = json.loads(_http_get_text(f"{api_en}?{q}", timeout_sec=timeout_sec))
+        img_titles: list[str] = []
+        for page in ((data.get("query") or {}).get("pages") or {}).values():
+            for im in page.get("images") or []:
+                t = str((im or {}).get("title") or "")
+                tl = t.lower()
+                if not any(k in tl for k in ("pixel", "8-bit", "8bit", "mini")):
+                    continue
+                if any(bad in tl for bad in _PIXEL_BAD_WORDS):
+                    continue
+                fm = _PIXEL_FRAME_RE.search(tl)
+                if fm is not None and int(fm.group(1)) >= 2:
+                    continue
+                img_titles.append(t)
+        if img_titles:
+            pages = _fetch_mediawiki_imageinfo(api_en, img_titles[:50], timeout_sec=timeout_sec)
+            res = _try_cands(_collect_candidates_from_pages(pages, target_tokens))
+            if res is not None:
+                return res
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    # 策略 4：Fandom 中文站 & 萌娘百科降级
+    if zh_name:
+        api_zh = "https://danganronpa.fandom.com/zh/api.php"
+        for term in (f"{zh_name} 像素", f"{zh_name} Pixel"):
+            try:
+                q = urllib.parse.urlencode({
+                    "action": "query",
+                    "generator": "search",
+                    "gsrsearch": term,
+                    "gsrnamespace": "6",
+                    "gsrlimit": "8",
+                    "prop": "imageinfo",
+                    "iiprop": "url|size",
+                    "format": "json",
+                })
+                data = json.loads(_http_get_text(f"{api_zh}?{q}", timeout_sec=timeout_sec))
+                pages = list(((data.get("query") or {}).get("pages") or {}).values())
+                res = _try_cands(_collect_candidates_from_pages(pages, target_tokens))
+                if res is not None:
+                    return res
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+                continue
+
+        try:
+            api_mg = "https://zh.moegirl.org.cn/api.php"
+            q = urllib.parse.urlencode({
+                "action": "query",
+                "titles": zh_name,
+                "prop": "images",
+                "imlimit": "60",
+                "redirects": "1",
+                "format": "json",
+            })
+            data = json.loads(_http_get_text(f"{api_mg}?{q}", timeout_sec=timeout_sec))
+            img_titles = []
+            for page in ((data.get("query") or {}).get("pages") or {}).values():
+                for im in page.get("images") or []:
+                    t = str((im or {}).get("title") or "")
+                    if any(k in t.lower() for k in ("pixel", "8-bit", "8bit", "像素", "点阵")):
+                        img_titles.append(t)
+            if img_titles:
+                pages = _fetch_mediawiki_imageinfo(api_mg, img_titles, timeout_sec=timeout_sec)
+                res = _try_cands(_collect_candidates_from_pages(pages, target_tokens))
+                if res is not None:
+                    return res
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+
     if reason_out is not None:
         reason_out["errors"] = errors[-2:]
         reason_out["network_error"] = bool(errors)
