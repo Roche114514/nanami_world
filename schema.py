@@ -25,6 +25,7 @@ VALID_TRAITS: tuple[str, ...] = (
 
 VALID_PLACEMENTS: frozenset[str] = frozenset({"floor", "wall", "surface_only", "any"})
 VALID_LIGHT_MODES: frozenset[str] = frozenset({"auto", "dawn", "day", "dusk", "night"})
+VALID_SPACE_KINDS: frozenset[str] = frozenset({"room", "town", "building"})
 PIXEL_SLOTS: frozenset[str] = frozenset({".", "o", "1", "2", "3", "a", "b"})
 
 MAX_BRIEF_CHARS = 25
@@ -429,6 +430,7 @@ def normalize_traits(raw: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]
             "key_tag": str(c.get("key_tag") or "").strip()[:32],
             "is_open": bool(c.get("is_open", False)),
             "is_locked": bool(c.get("is_locked", False)),
+            **({"owner_actor_id": str(c["owner_actor_id"])[:80]} if c.get("owner_actor_id") else {}),
         }
 
     if isinstance(src.get("consumable"), Mapping):
@@ -637,6 +639,69 @@ def normalize_space_tiles(raw: Any, width: int, height: int) -> dict[str, str]:
     return out
 
 
+def normalize_zones(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    max_w = max(1, int(width))
+    max_h = max(1, int(height))
+    out: list[dict[str, Any]] = []
+    for item in raw[:16]:
+        if not isinstance(item, Mapping):
+            continue
+        name = clip_text(item.get("name"), 16, "区域")
+        zid = str(item.get("zone_id") or "").strip() or slugify(name, prefix="zone")
+        x = clamp_int(item.get("x"), 0, max_w - 1, 0)
+        y = clamp_int(item.get("y"), 0, max_h - 1, 0)
+        w = clamp_int(item.get("w"), 1, max_w - x, 1)
+        h = clamp_int(item.get("h"), 1, max_h - y, 1)
+        out.append({
+            "zone_id": zid,
+            "name": name,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "color": _hex_color(item.get("color"), "#ffd166"),
+            "description": clip_text(item.get("description"), 60, ""),
+        })
+    return out
+
+
+def normalize_buildings(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return []
+    max_w = max(1, int(width))
+    max_h = max(1, int(height))
+    out: list[dict[str, Any]] = []
+    for item in raw[:24]:
+        if not isinstance(item, Mapping):
+            continue
+        name = clip_text(item.get("name"), 16, "建筑")
+        bid = str(item.get("building_id") or "").strip() or slugify(name, prefix="bldg")
+        x = clamp_int(item.get("x"), 0, max_w - 1, 0)
+        y = clamp_int(item.get("y"), 0, max_h - 1, 0)
+        w = clamp_int(item.get("w"), 1, max_w - x, 1)
+        h = clamp_int(item.get("h"), 1, max_h - y, 1)
+        door_x = clamp_int(item.get("door_x"), 0, max_w - 1, x)
+        door_y = clamp_int(item.get("door_y"), 0, max_h - 1, min(max_h - 1, y + h - 1))
+        out.append({
+            "building_id": bid,
+            "name": name,
+            "zone_id": str(item.get("zone_id") or "").strip(),
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "door_x": door_x,
+            "door_y": door_y,
+            "roof_color": _hex_color(item.get("roof_color"), "#a85646"),
+            "interior_space_id": str(item.get("interior_space_id") or "").strip(),
+            "category": clip_text(item.get("category"), 16, "house"),
+            "icon": clip_text(item.get("icon"), 4, "🏠"),
+        })
+    return out
+
+
 def normalize_space(raw: Mapping[str, Any]) -> dict[str, Any]:
     name = clip_text(raw.get("name"), 16, "默认房间")
     sid = str(raw.get("space_id") or "").strip() or slugify(name, prefix="space")
@@ -646,16 +711,24 @@ def normalize_space(raw: Mapping[str, Any]) -> dict[str, Any]:
     light = str(raw.get("ambient_light") or "auto").strip().lower()
     if light not in VALID_LIGHT_MODES:
         light = "auto"
+    space_kind = str(raw.get("space_kind") or "room").strip().lower()
+    if space_kind not in VALID_SPACE_KINDS:
+        space_kind = "room"
     return {
         "space_id": sid,
         "name": name,
         "width": width,
         "height": height,
         "wall_rows": wall_rows,
+        "space_kind": space_kind,
+        "parent_space_id": str(raw.get("parent_space_id") or "").strip(),
+        "district": clip_text(raw.get("district"), 16, ""),
         "ambient_phrase": clip_text(raw.get("ambient_phrase"), 60, "一间安静的小房间，墙边开着一扇窗。"),
         "palette_id": str(raw.get("palette_id") or "warm_stardew").strip() or "warm_stardew",
         "ambient_light": light,
         "tiles": normalize_space_tiles(raw.get("tiles"), width, height),
+        "zones": normalize_zones(raw.get("zones"), width, height),
+        "buildings": normalize_buildings(raw.get("buildings"), width, height),
     }
 
 
@@ -699,6 +772,14 @@ def _normalize_expression(raw: Any) -> dict[str, Any]:
     }
 
 
+def inscription_is_new(text: str, entries: Sequence[Mapping[str, Any]]) -> bool:
+    def normalized(value: str) -> str:
+        return "".join(c for c in value.casefold() if c.isalnum())
+
+    candidate = normalized(text)
+    return bool(candidate) and all(candidate != normalized(row["text"]) for row in entries[-10:])
+
+
 def normalize_autonomy(raw: Any) -> dict[str, Any]:
     src = raw if isinstance(raw, Mapping) else {}
     try:
@@ -708,17 +789,20 @@ def normalize_autonomy(raw: Any) -> dict[str, Any]:
     if step_ts != step_ts:
         step_ts = 0.0
     recent = [str(x).strip() for x in (src.get("recent_targets") or []) if str(x).strip()]
-    return {
+    out = {
         "enabled": bool(src.get("enabled", True)),
         "current_goal": clip_text(src.get("current_goal"), 36, "刚来到空间，正四处打量"),
         "current_drive": clip_text(src.get("current_drive"), 24, "curiosity"),
         "last_thought": clip_text(src.get("last_thought"), 60, ""),
         "last_action_summary": clip_text(src.get("last_action_summary"), 80, ""),
         "last_step_ts": max(0.0, step_ts),
-        "hunger": round(clamp_float(src.get("hunger"), 0.0, 1.0, 0.30), 3),
-        "curiosity": round(clamp_float(src.get("curiosity"), 0.0, 1.0, 0.55), 3),
+        "hunger": round(clamp_float(src.get("hunger"), 0.0, 1.0, 0.30), 5),
+        "curiosity": round(clamp_float(src.get("curiosity"), 0.0, 1.0, 0.55), 5),
         "recent_targets": recent[:5],
     }
+    if isinstance(src.get("cognition"), Mapping):
+        out["cognition"] = dict(src["cognition"])
+    return out
 
 
 def _normalize_vitals(raw: Any) -> dict[str, Any]:
@@ -971,6 +1055,7 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         "actor_id": aid,
         "host_character": str(raw.get("host_character") or "").strip(),
         "name": name,
+        "is_player": bool(raw.get("is_player", False)),
         "space_id": cur_sid,
         "x": clamp_int(raw.get("x"), 0, MAX_SPACE_WIDTH - 1, 5),
         "y": clamp_int(raw.get("y"), 0, MAX_SPACE_HEIGHT - 1, 4),
@@ -982,6 +1067,8 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         "last_act": normalize_last_act(raw.get("last_act")),
         "posture": posture,
         "holding_id": str(raw.get("holding_id")).strip() if raw.get("holding_id") else None,
+        **({"inventory_started": True} if raw.get("inventory_started") else {}),
+        **({"gift_history": dict(list(raw["gift_history"].items())[-48:])} if isinstance(raw.get("gift_history"), Mapping) else {}),
         "resting_on_id": str(raw.get("resting_on_id")).strip() if raw.get("resting_on_id") else None,
         "last_action_kind": str(raw.get("last_action_kind") or "").strip(),
         "expression": expression,

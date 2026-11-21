@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import danganronpa_catalog, persona_bridge, projector, sprite_pack, text_compiler
+from .cognitive_engine import cognitive_summary
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ def _ok_with_snap(
     snap = engine.snapshot_for_ui(space_id)
     eff_sid = str(snap.get("active_space_id") or space_id or "room_default").strip() or "room_default"
     aid = snap.get("active_actor_id") or ""
+    snap["active_cognition"] = {}
     snap["key_loans"] = engine.key_loans_for(aid) if aid else []
     snap["pending_key_loan"] = engine.pending_key_loan_response(aid) if aid else None
     snap["events"] = [
@@ -46,6 +48,7 @@ def _ok_with_snap(
     if aid:
         act = next((a for a in (snap.get("actors") or []) if a.get("actor_id") == aid), None)
         if act:
+            snap["active_cognition"] = cognitive_summary(act)
             host_char = str(act.get("host_character") or act.get("name") or "").strip()
             all_names = [
                 str(a.get("host_character") or a.get("name") or "").strip()
@@ -56,10 +59,11 @@ def _ok_with_snap(
                 cname = str(hc.get("name") or "").strip()
                 if cname and cname not in all_names:
                     all_names.append(cname)
+            realm_sid = engine.realm_space_id(eff_sid) if hasattr(engine, "realm_space_id") else eff_sid
             snap["actor_relations"] = persona_bridge.read_actor_relations(
                 engine.project_root,
                 host_char,
-                space_id=eff_sid,
+                space_id=realm_sid,
                 world_data_root=engine.data_root,
                 custom_persona_dir=custom_persona_dir,
                 known_actors=all_names,
@@ -219,7 +223,11 @@ def register_pages(
     # ── 画布页 RPC Actions ──────────────────────────────────────────────
     def _act_get_snapshot(v: dict[str, Any]) -> dict[str, Any]:
         _ensure_default_host_actor()
-        return _snap_ok(space_id=str(v.get("space_id") or ""))
+        sid = str(v.get("space_id") or "")
+        out = _snap_ok(space_id=sid)
+        if world_chat is not None and v.get("roaming"):
+            out["player_greeting"] = world_chat.pending_player_greeting(sid)
+        return out
 
     def _act_place_from_bp(v: dict[str, Any]) -> dict[str, Any]:
         bp_id = str(v.get("blueprint_id") or "")
@@ -399,10 +407,11 @@ def register_pages(
             appearance=appearance_payload,
             map_style=str(v.get("map_style") or "").strip(),
         )
+        imp_realm_sid = engine.realm_space_id(actor["space_id"]) if hasattr(engine, "realm_space_id") else actor["space_id"]
         synced = persona_bridge.read_persona_state(
             engine.project_root,
             lookup_name,
-            space_id=actor["space_id"],
+            space_id=imp_realm_sid,
             actor_id=actor["actor_id"],
             custom_persona_dir=str(getattr(cfg, "persona_data_dir", "") or ""),
         )
@@ -679,14 +688,96 @@ def register_pages(
         if "cool_off_turns" in v and v.get("cool_off_turns") not in (None, ""):
             patch["cool_off_turns"] = int(v["cool_off_turns"])
 
+        realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
         edge = persona_bridge.save_world_actor_relation(
             engine.data_root,
-            sid,
+            realm_sid,
             subj,
             target_key,
             patch,
         )
         return _snap_ok({"relation": edge, "space_id": sid}, space_id=sid)
+
+    def _act_create_default_town(v: dict[str, Any]) -> dict[str, Any]:
+        _ensure_default_host_actor()
+        town_id = str(v.get("town_id") or "town_sakura").strip() or "town_sakura"
+        replace = bool(v.get("replace", False))
+        place_actor = bool(v.get("place_actor", True))
+        req_aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id()
+        res = engine.create_default_town(
+            town_id=town_id,
+            replace=replace,
+            move_actor_id=req_aid if place_actor else "",
+        )
+        if not res.get("created") and place_actor and req_aid:
+            actors_now = engine.list_actors()
+            has_in_realm = any(
+                (engine.realm_space_id(str(a.get("space_id") or "")) == town_id)
+                for a in actors_now
+            )
+            if not has_in_realm:
+                try:
+                    from . import town_builder
+                    engine.place_actor(req_aid, town_id, *town_builder.DEFAULT_TOWN_SPAWN)
+                except ValueError:
+                    pass
+        return _snap_ok({"town": res}, space_id=res["town_space_id"])
+
+    def _act_enter_portal(v: dict[str, Any]) -> dict[str, Any]:
+        eid = str(v.get("entity_id") or "").strip()
+        aid = str(v.get("actor_id") or "").strip()
+        res = engine.enter_portal(eid, actor_id=aid)
+        heartbeat.deliver_persona_events()
+        return _snap_ok(
+            {"portal_result": res, "feedback": res.get("feedback", "")},
+            space_id=str(res.get("target_space_id") or ""),
+        )
+
+    def _act_move_actor(v: dict[str, Any]) -> dict[str, Any]:
+        req_sid = str(v.get("space_id") or "").strip()
+        aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=req_sid)
+        if not aid:
+            raise ValueError("当前世界里还没有角色。")
+        act = next((a for a in engine.list_actors() if a.get("actor_id") == aid), None)
+        if act is None:
+            raise ValueError(f"角色不存在：{aid}")
+        if req_sid and act.get("space_id") != req_sid:
+            raise ValueError("当前查看的场景里没有选中的角色。")
+        feedback = engine.execute_move(aid, int(v.get("x") or 0), int(v.get("y") or 0))
+        return _snap_ok({"feedback": feedback}, space_id=req_sid or str(act.get("space_id") or ""))
+
+    def _act_create_building_subworld(v: dict[str, Any]) -> dict[str, Any]:
+        town_sid = str(v.get("town_space_id") or v.get("space_id") or "").strip()
+        if not town_sid:
+            town_sid = str(engine.snapshot_for_ui().get("active_space_id") or "")
+        kwargs: dict[str, Any] = {
+            "name": str(v.get("name") or "新建筑"),
+            "zone_id": str(v.get("zone_id") or ""),
+            "ext_x": int(v.get("ext_x") or 2),
+            "ext_y": int(v.get("ext_y") or 2),
+            "ext_w": int(v.get("ext_w") or 5),
+            "ext_h": int(v.get("ext_h") or 4),
+            "roof_color": str(v.get("roof_color") or "#a85646"),
+            "wall_tile": str(v.get("wall_tile") or "brick_wall"),
+            "category": str(v.get("category") or "house"),
+            "icon": str(v.get("icon") or "🏠"),
+            "interior_width": int(v.get("interior_width") or 12),
+            "interior_height": int(v.get("interior_height") or 9),
+            "interior_palette": str(v.get("interior_palette") or "warm_stardew"),
+            "interior_floor_tile": str(v.get("interior_floor_tile") or "wood_floor"),
+            "interior_wall_tile": str(v.get("interior_wall_tile") or "wood_wall"),
+            "interior_ambient": str(v.get("interior_ambient") or ""),
+        }
+        if v.get("door_x") is not None:
+            kwargs["door_x"] = int(v["door_x"])
+        if v.get("door_y") is not None:
+            kwargs["door_y"] = int(v["door_y"])
+        if v.get("building_id"):
+            kwargs["building_id"] = str(v["building_id"])
+        if v.get("interior_space_id"):
+            kwargs["interior_space_id"] = str(v["interior_space_id"])
+        res = engine.create_building_subworld(town_sid, **kwargs)
+        return _snap_ok({"building": res}, space_id=town_sid)
 
     def _act_create_space(v: dict[str, Any]) -> dict[str, Any]:
         cfg = settings_store.get()
@@ -740,7 +831,46 @@ def register_pages(
             use_llm=v.get("use_llm"),
             actor_id=str(v.get("actor_id") or "") or engine.resolve_actor_id(),
         )
-        return _snap_ok({"tick_result": res})
+        sid = str(v.get("space_id") or "")
+        out = _snap_ok({"tick_result": res}, space_id=sid)
+        if world_chat is not None and v.get("roaming"):
+            out["player_greeting"] = world_chat.pending_player_greeting(sid)
+        return out
+
+    def _act_live_control(v: dict[str, Any]) -> dict[str, Any]:
+        aid, client = str(v.get("actor_id") or ""), str(v.get("client") or "")[:80]
+        command = str(v.get("command") or "")
+        speed = v.get("speed", 1)
+        if not aid or not client or command not in ("start", "speed", "stop") or speed not in (0, 1, 2, 4):
+            raise ValueError("实时生活控制参数无效。")
+        return {"ok": True, "live": heartbeat.live.control(aid, client, command, int(speed))}
+
+    def _act_get_live_frame(v: dict[str, Any]) -> dict[str, Any]:
+        aid = str(v.get("actor_id") or "")
+        peers = v.get("peers")
+        live = heartbeat.live.frame(
+            aid, str(v.get("client") or "")[:80], int(v.get("after", -1)),
+            peers if isinstance(peers, dict) else None,
+        )
+        extra = {}
+        if v.get("roaming"):
+            extra["player_gifts"] = engine.gift_offers_for("player_avatar")
+            if world_chat is not None:
+                extra["player_greeting"] = world_chat.pending_player_greeting(str(v.get("space_id") or ""))
+        if not live:
+            return {"ok": True, "live": {}, **extra}
+        version = "|".join(f"{row['actor_id']}:{row['world_revision']}" for row in [live, *live["peers"]]
+                           if row["space_id"] == live["space_id"])
+        live["world_version"] = version
+        sid = live["space_id"]
+        out = {"ok": True, "live": live, **extra}
+        if sid == v.get("space_id") and version != v.get("world_version"):
+            out["changes"] = engine.live_space_changes(sid)
+        if world_chat is not None:
+            history = world_chat.get_history_if_changed(aid, sid, str(v.get("history_after", "")))
+            if history is not None:
+                out["chat_history"] = history
+        return out
 
     def _act_key_loan(v: dict[str, Any]) -> dict[str, Any]:
         aid = str(v.get("actor_id") or "")
@@ -795,7 +925,12 @@ def register_pages(
         text = str(v.get("text") or "").strip()
         if not text:
             raise ValueError("请输入想对她说的话。")
+        heartbeat.live.hold_for_user_chat(aid, 20.0)
         res = world_chat.chat(aid, text, space_id=req_sid)
+        if res.get("action_queued") or engine.pending_preempt_seq(aid) > 0:
+            cog_now = (next((a for a in engine.list_actors() if a["actor_id"] == aid), None) or {}).get("autonomy", {}).get("cognition") or {}
+            if res.get("action_queued") or cog_now.get("pending_modulation"):
+                heartbeat.live.release_user_chat(aid)
         heartbeat.deliver_persona_events()
         return _snap_ok({"chat_result": res}, space_id=req_sid)
 
@@ -950,6 +1085,107 @@ def register_pages(
 
         return _spawn_bg_job(_worker, f"准备预缓存 {len(rows)} 位角色")
 
+    def _act_player_spawn(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "").strip()
+        name = str(v.get("name") or "你").strip()
+        player = engine.ensure_player_avatar(space_id=sid, name=name)
+        return _snap_ok({"player": player, "inventory": engine.inventory_state(player["actor_id"])},
+                        space_id=str(player["space_id"]))
+
+    def _act_player_move(v: dict[str, Any]) -> dict[str, Any]:
+        pid = str(v.get("player_id") or "player_avatar").strip() or "player_avatar"
+        dx = int(v.get("dx") or 0)
+        dy = int(v.get("dy") or 0)
+        res = engine.step_player_move(
+            pid, dx, dy, space_id=str(v.get("space_id") or ""), include_prompt=bool(v.get("include_prompt", True)),
+        )
+        return {"ok": True, **res}
+
+    def _act_player_interact(v: dict[str, Any]) -> dict[str, Any]:
+        pid = str(v.get("player_id") or "player_avatar").strip() or "player_avatar"
+        rx = v.get("x")
+        ry = v.get("y")
+        rfacing = str(v.get("facing") or "").strip()
+        res = engine.player_interact_front(
+            pid,
+            x=int(rx) if rx is not None and str(rx) != "" else None,
+            y=int(ry) if ry is not None and str(ry) != "" else None,
+            facing=rfacing,
+            space_id=str(v.get("space_id") or ""),
+            target_kind=str(v.get("target_kind") or ""),
+            target_id=str(v.get("target_id") or ""),
+        )
+        if res.get("kind") == "talk_actor" and res.get("target_actor_id"):
+            heartbeat.live.hold_for_user_chat(str(res["target_actor_id"]), 22.0)
+        sid = str(res["space_id"])
+        if res.get("kind") == "entered_space":
+            return _snap_ok({"interaction": res}, space_id=sid)
+        out = {"ok": True, "interaction": res, "player": engine.live_actor_frame(pid) or {}}
+        if entity_ids := res.get("changed_entity_ids"):
+            out["changes"] = engine.live_space_changes(sid, entity_ids=entity_ids)
+        if res["kind"] == "container":
+            out["inventory"] = engine.inventory_state(pid, res["entity_id"])
+        elif res.get("action") == "take":
+            out["inventory"] = engine.inventory_state(pid)
+        return out
+
+    def _act_player_inventory(v: dict[str, Any]) -> dict[str, Any]:
+        pid = "player_avatar"
+        operation = str(v.get("operation") or "list")
+        eid = str(v.get("entity_id") or "")
+        chest_id = str(v.get("chest_id") or "")
+        offer_id = str(v.get("offer_id") or "")
+        owner_id = str(v.get("owner_id") or "")
+        out: dict[str, Any] = {"ok": True}
+        # The read, validation, mutation and response use the same world state.
+        with engine._lock:
+            player = engine.live_actor_frame(pid)
+            if not player or not player.get("is_player"):
+                raise ValueError("请先进入主控漫游。")
+            if v.get("space_id") and player["space_id"] != v["space_id"]:
+                raise ValueError("当前场景已变化。")
+            if operation == "gift":
+                out["gift"] = engine.give_item(pid, str(v.get("recipient_id") or ""), eid,
+                                              custom_persona_dir=settings_store.get().persona_data_dir)
+                out["message"] = out["gift"]["message"]
+            elif operation in ("accept_gift", "decline_gift"):
+                out["gift"] = engine.respond_to_gift(pid, offer_id, accept=operation == "accept_gift")
+                out["message"] = out["gift"]["message"]
+            elif operation != "list":
+                out["message"] = engine.inventory_action(
+                    pid, operation, entity_id=eid, chest_id=chest_id, blueprint_id=str(v.get("blueprint_id") or ""),
+                    verb=str(v.get("verb") or ""), slot=int(v.get("slot", -1)), owner_id=owner_id,
+                    facing=str(v.get("facing") or ""),
+                )
+            out["player"] = engine.live_actor_frame(pid)
+            out["inventory"] = engine.inventory_state(pid, "" if operation == "assign_chest" and owner_id not in ("", pid) else chest_id)
+            dirty_id = chest_id if operation == "assign_chest" else eid
+            if dirty_id and operation in ("place", "pickup", "withdraw", "deposit", "assign_chest", "use"):
+                out["changes"] = engine.live_space_changes(player["space_id"], entity_ids=[dirty_id])
+        return out
+
+    def _act_user_chat_presence(v: dict[str, Any]) -> dict[str, Any]:
+        aid = str(v.get("actor_id") or "").strip()
+        active = bool(v.get("active", True))
+        if aid:
+            if active:
+                heartbeat.live.hold_for_user_chat(aid, float(v.get("seconds") or 20.0))
+            else:
+                heartbeat.live.release_user_chat(aid)
+        return {"ok": True}
+
+    def _act_open_player_greeting(v: dict[str, Any]) -> dict[str, Any]:
+        if world_chat is None:
+            return {"ok": True}
+        sid = str(v.get("space_id") or "")
+        greeting = world_chat.open_player_greeting(str(v.get("greeting_id") or ""), sid)
+        if greeting is None:
+            return {"ok": True}
+        aid = greeting["actor_id"]
+        engine.set_active_actor(aid, expected_space_id=sid)
+        heartbeat.live.hold_for_user_chat(aid, 20.0)
+        return {"ok": True, "greeting": greeting}
+
     action_specs: list[tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
         ("get_world_snapshot", "刷新世界快照", _act_get_snapshot),
         ("place_from_blueprint", "放入物品", _act_place_from_bp),
@@ -977,12 +1213,18 @@ def register_pages(
         ("export_pixel_pack_zip", "导出像素图包(.zip)", _act_export_pixel_pack_zip),
         ("batch_cache_official_pixels", "按系列一键预缓存像素小人", _act_batch_cache_official_pixels),
         ("create_space", "新建空间", _act_create_space),
+        ("create_default_town", "创建并进入默认示范小镇", _act_create_default_town),
+        ("create_building_subworld", "建造可进入建筑子世界", _act_create_building_subworld),
         ("switch_space", "切换空间", _act_switch_space),
         ("delete_space", "删除世界", _act_delete_space),
+        ("enter_portal", "推门进入连通空间", _act_enter_portal),
+        ("move_actor", "引导角色走动到坐标", _act_move_actor),
         ("save_palette", "保存调色板", _act_save_palette),
         ("set_space_palette", "切换空间调色板", _act_set_space_palette),
         ("tick_world", "推进世界时钟", _act_tick_world),
         ("autonomous_step", "触发角色自主行动", _act_autonomous_step),
+        ("live_control", "控制实时生活", _act_live_control),
+        ("get_live_frame", "读取实时动作帧", _act_get_live_frame),
         ("key_loan", "借还钥匙与延期通知", _act_key_loan),
         ("apply_starter_pack", "放入基础测试包", _act_apply_starter),
         ("clear_space", "清空当前空间", _act_clear_space),
@@ -993,6 +1235,12 @@ def register_pages(
         ("paint_tiles", "搭建或拆除地形方块", _act_paint_tiles),
         ("expand_space", "无限拓展地图边界", _act_expand_space),
         ("generate_world_map", "LLM 生成像素地图", _act_generate_world_map),
+        ("player_spawn", "生成或切换主控玩家小人", _act_player_spawn),
+        ("player_move", "主控玩家单步移动", _act_player_move),
+        ("player_interact", "主控玩家眼前交互", _act_player_interact),
+        ("player_inventory", "主控背包、箱子与赠礼", _act_player_inventory),
+        ("user_chat_presence", "同步玩家面对面交谈状态", _act_user_chat_presence),
+        ("open_player_greeting", "接收角色的当面招呼", _act_open_player_greeting),
     ]
 
     actions = [
@@ -1005,16 +1253,6 @@ def register_pages(
         )
         for idx, (aid, label, fn) in enumerate(action_specs)
     ]
-
-    def _load_canvas_summary() -> dict[str, Any]:
-        snap = engine.snapshot_for_ui()
-        return {
-            "active_space_id": snap["active_space_id"],
-            "active_actor_id": snap["active_actor_id"],
-            "space_count": len(snap["spaces"]),
-            "actor_count": len(snap["actors"]),
-            "entity_count": len(snap["entities"]),
-        }
 
     world_html = code_dir / "web" / "world.html"
     if world_html.is_file() and hasattr(register, "register_frontend_page"):
@@ -1036,7 +1274,7 @@ def register_pages(
             kind="tools",
             description="像素风自定义文字世界画布、以文生像素造物台与「她的视角」终端。",
             schema=[],
-            load_values=_load_canvas_summary,
+            load_values=engine.canvas_summary,
             save_values=lambda _v: None,
             actions=actions,
             order=65.0,
@@ -1061,9 +1299,9 @@ def register_pages(
             "fields": [
                 {"key": "heartbeat_enabled", "type": "boolean", "label": "开启后台心跳推进", "description": "按真实时间自动推进热饮降温、昼夜光影与低精力自主休息"},
                 {"key": "heartbeat_interval_sec", "type": "integer", "label": "心跳间隔（秒）", "min": 30, "max": 3600, "step": 30},
-                {"key": "heartbeat_use_llm", "type": "boolean", "label": "自主心跳使用大模型自由意志", "description": "开启后心跳步进优先让大模型决定她想做什么（关闭时用 0 Token 十类内心驱力规则）"},
+                {"key": "heartbeat_use_llm", "type": "boolean", "label": "自主心跳使用大模型", "description": "自动生活中，关键经历会触发后台反思，清醒角色相遇时可生成对话。步行与日常动作由本地引擎执行。"},
                 {"key": "episodic_memory_enabled", "type": "boolean", "label": "使用世界经历", "description": "让角色在相关话题中回忆共同解谜，并在遇到同类谜题时考虑再次邀请同伴"},
-                {"key": "allow_ai_diary", "type": "boolean", "label": "允许离线在笔记本自主写随手记", "description": "仅当房间内放有可写笔记本且触发关键状态变化时低频写一句"},
+                {"key": "allow_ai_diary", "type": "boolean", "label": "允许自主写随手记", "description": "城镇角色有新经历时，可在可写的笔记本或读过的布告栏留一句话。"},
                 {"key": "diary_cooldown_hours", "type": "number", "label": "自主写字冷却时长（小时）", "min": 1.0, "max": 72.0, "step": 0.5},
                 {"key": "persona_data_dir", "type": "text", "label": "人格模型数据目录（可选覆盖）", "placeholder": "留空自动探测 data/nanami"},
             ],

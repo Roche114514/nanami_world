@@ -129,6 +129,7 @@ class NanamiWorldPlugin(PluginBase):
             project_root=project_root,
             settings_provider=self._settings_store.get,
             adapter_provider=text_compiler._default_adapter,
+            action_scheduler=self._heartbeat.live.queue_action,
         )
         world_tools.bind_runtime(self._engine, self._current_actor_id)
 

@@ -8,12 +8,15 @@ import math
 import os
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_MIND_WRITE_LOCK = threading.Lock()
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -681,6 +684,52 @@ def record_world_social_interaction(
     return {"a_to_b": next_ab, "b_to_a": next_ba}
 
 
+def evaluate_gift(
+    profile: Mapping[str, Any], relation: Mapping[str, Any], recipient: Mapping[str, Any],
+    item: Mapping[str, Any],
+) -> tuple[bool, float]:
+    """评估收礼意愿与物品喜好，使用 L0 人格特征和当前关系指针。"""
+    traits = item["traits"]
+    activity = traits.get("activity") or {}
+    food = traits.get("consumable")
+    domain = activity.get("domain")
+    if food is not None:
+        preference = 0.35 + 0.55 * recipient["autonomy"]["hunger"] if food["uses_left"] else 0.10
+    elif domain:
+        efficacy = profile["domain_efficacy_game"] if domain == "game" else profile["domain_efficacy_non_game"]
+        preference = 0.27 + 0.48 * efficacy
+        if domain in recipient["vitals"]["preferred_domains"]:
+            preference += 0.25
+        if activity.get("battery") == 0:
+            preference *= 0.6
+    else:
+        preference = 0.40
+    stance = relation.get("attitude_stance")
+    trust = float(relation.get("trust", 0.55))
+    willingness = preference + 0.25 * trust + 0.2 * float(profile["norm_courtesy"])
+    if stance == "guarded":
+        willingness -= 0.22
+    if activity and not relation.get("known"):
+        willingness -= 0.30
+    accepted = stance != "cold" and not relation.get("cool_off_turns") and willingness >= 0.48
+    return accepted, round(min(preference, 1.0), 2)
+
+
+def record_world_gift(
+    world_data_root: Path, space_id: str, subject: str, target_key: str, target_name: str,
+    relation: Mapping[str, Any], summary: str, impact: float,
+) -> None:
+    if target_key == f"char:{subject}":
+        return
+    updated = _bump_directed_edge(
+        relation, tkey=target_key, target_name=target_name, summary=summary, first_meet=False,
+        valence_delta=impact, trust_delta=impact * 0.35, warmth_delta=impact * 0.75,
+    )
+    edges = _load_world_edges(world_data_root, space_id)
+    edges[subject] = {**(edges.get(subject) or {}), target_key: updated}
+    _save_world_edges(world_data_root, space_id, edges)
+
+
 # ── L0 环境感知与适应层桥接（Itti-Koch / Groves-Thompson / Tolman-ACT-R / Borbély）──
 _DEFAULT_L0_CFG: dict[str, Any] = {
     "enabled": True,
@@ -927,6 +976,7 @@ def read_persona_behavior_profile(
         "arousalBaseline": 0.35,
         "domainEfficacy.game": 0.85,
         "domainEfficacy.nonGame": 0.30,
+        "dynamics.hysteresisInertia": 0.65,
         "evaluativeSensitivity": 0.70,
         "needProfile.safety": 0.50,
         "needProfile.relatedness": 0.70,
@@ -999,6 +1049,13 @@ def read_persona_behavior_profile(
         "exploration_drive": round(exploration_drive, 3),
         "norm_courtesy": round(norm_courtesy, 3),
         "domain_efficacy_game": round(merged["domainEfficacy.game"], 3),
+        "domain_efficacy_non_game": round(merged["domainEfficacy.nonGame"], 3),
+        "effortful_control": round(merged["effortfulControl"], 3),
+        "arousal_baseline": round(merged["arousalBaseline"], 3),
+        "hysteresis_inertia": round(merged["dynamics.hysteresisInertia"], 3),
+        "safety_need": round(merged["needProfile.safety"], 3),
+        "competence_need": round(merged["needProfile.competence"], 3),
+        "norm_compliance": round(merged["social.normCompliance"], 3),
         "relatedness_need": round(merged["needProfile.relatedness"], 3),
         "friend_threshold": round(merged["attraction.friendThreshold"], 3),
     }
@@ -1012,8 +1069,9 @@ def emit_world_event_to_persona(
     actor_id: str,
     event_payload: Mapping[str, Any],
     custom_persona_dir: str = "",
+    thought: bool = False,
 ) -> dict[str, Any] | None:
-    """将文字世界行动结果（客观 EPA 刺激）通过 mind.mjs --world-event 回写心理模型。"""
+    """经 mind.mjs 记录行动反馈或阶段性反思。"""
     base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
     if base_dir is None:
         return {"status": "unbound"}
@@ -1037,24 +1095,30 @@ def emit_world_event_to_persona(
         return None
     sid = str(space_id or "room_default").strip() or "room_default"
     aid = str(actor_id or "actor").strip() or "actor"
-    cmd = [
-        node,
-        str(mind_mjs),
-        "--root",
-        str(state_root),
-        "--chat",
-        f"world:{sid}:{aid}",
-        "--world-event",
-        json.dumps(dict(event_payload), ensure_ascii=False),
-    ]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3.0, encoding="utf-8", errors="replace")
+    command = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{sid}:{aid}"]
+
+    def call(args: list[str]) -> dict[str, Any] | None:
+        with _MIND_WRITE_LOCK:
+            res = subprocess.run(
+                [*command, *args], capture_output=True, text=True, timeout=3.0,
+                encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
         if res.returncode != 0 or not res.stdout.strip():
             return None
         parsed = json.loads(res.stdout.strip().splitlines()[-1])
         return parsed if isinstance(parsed, dict) else None
+
+    try:
+        payload = json.dumps(dict(event_payload), ensure_ascii=False)
+        if not thought:
+            return call(["--world-event", payload])
+        with tempfile.TemporaryDirectory(prefix="nanami-thought-") as directory:
+            path = Path(directory) / "thought.json"
+            path.write_text(payload, encoding="utf-8")
+            return call(["--think", "--think-file", str(path)])
     except Exception:
-        logger.debug("nanami_world: mind.mjs --world-event 调用失败", exc_info=True)
+        logger.debug("nanami_world: mind.mjs 调用失败", exc_info=True)
         return None
 
 
@@ -1067,6 +1131,7 @@ def build_percept_frame(
     entities: Sequence[Mapping[str, Any]],
     *,
     actors_map: Mapping[str, Mapping[str, Any]] | None = None,
+    visible_peer_ids: set[str] | None = None,
     custom_persona_dir: str = "",
     peer_known: bool = False,
     look_eid: str = "",
@@ -1076,6 +1141,7 @@ def build_percept_frame(
     """统一输入层（Input）：客观世界刺激 → L0 主观感知帧（PerceptFrame，供思考层 Brain 消费）。"""
     sid = str(space_meta.get("space_id") or actor.get("space_id") or "room_default").strip() or "room_default"
     sp_name = str(space_meta.get("name") or sid).strip()
+    sp_kind = str(space_meta.get("space_kind") or "room")
     host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
     cfg = read_world_perception_config(project_root, host_char, custom_persona_dir=custom_persona_dir)
     behavior_profile = read_persona_behavior_profile(project_root, host_char, custom_persona_dir=custom_persona_dir)
@@ -1096,8 +1162,39 @@ def build_percept_frame(
     chrono = float(l0.get("chronotype_offset") or 0.0) if l0.get("enabled") else 0.0
     bio_hour = (hour - chrono) % 24.0
     circ_phase = "deep_night" if (bio_hour >= 23.0 or bio_hour < 6.0) else ("evening" if bio_hour >= 21.0 else "daytime")
-    period_cn = {"dawn": "清晨", "day": "白天", "dusk": "傍晚", "night": "夜晚"}.get(str(lighting.get("period") or "day"), "白天")
-    light_desc = "屋里暗着" if lighting.get("is_dark") else "室内光线明亮"
+    period_str = str(lighting.get("period") or "day")
+    period_cn = {"dawn": "清晨", "day": "白天", "dusk": "傍晚", "night": "夜晚"}.get(period_str, "白天")
+    if sp_kind == "town":
+        light_desc = (
+            ("夜色已深，街灯微亮" if lighting.get("lamp_positions") else "夜色有些暗")
+            if period_str == "night"
+            else "户外光线充足"
+        )
+    else:
+        light_desc = "屋里暗着" if lighting.get("is_dark") else "室内光线明亮"
+
+    aid = str(actor.get("actor_id") or "")
+    ax, ay = int(actor.get("x") or 0), int(actor.get("y") or 0)
+    is_large = sp_kind == "town" or max(int(space_meta.get("width") or 0), int(space_meta.get("height") or 0)) >= 24
+    focused_peers: list[str] = []
+    if isinstance(actors_map, Mapping):
+        peer_rows: list[tuple[int, str]] = []
+        for pid, peer in actors_map.items():
+            if pid == aid or not isinstance(peer, Mapping):
+                continue
+            if peer.get("space_id") and str(peer.get("space_id")) != sid:
+                continue
+            if visible_peer_ids is not None and pid not in visible_peer_ids:
+                continue
+            pdist = max(abs(ax - int(peer.get("x") or 0)), abs(ay - int(peer.get("y") or 0)))
+            if visible_peer_ids is None and is_large and pdist > 12:
+                continue
+            pname = str(peer.get("name") or pid).strip()
+            dist_txt = "就在眼前" if pdist <= 1 else ("几步外" if pdist <= 5 else "不远处")
+            post_txt = "正在休息" if peer.get("posture") == "resting" else "站着"
+            peer_rows.append((pdist, f"{pname}（{dist_txt}，{post_txt}）"))
+        peer_rows.sort(key=lambda item: item[0])
+        focused_peers = [text for _d, text in peer_rows[:6]]
 
     focused = l0.get("focused_entities") or []
     focused_names = [str(e.get("name") or "").strip() for e in focused if str(e.get("name") or "").strip()]
@@ -1105,28 +1202,35 @@ def build_percept_frame(
     stage = str(l0.get("stage") or "settled")
     stage_cn = _STAGE_LABELS.get(stage, stage)
 
+    peer_line = f"\n- 眼前人物（社会注意焦点）：{'；'.join(focused_peers)}" if focused_peers else ""
     if l0.get("enabled"):
         prompt_block = (
             f"【{actor.get('name') or host_char} · L0 主观感知输入】\n"
             f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}\n"
-            f"- 适应阶段：{stage_cn}（熟悉度={l0['familiarity']:.2f}，已记住物件={l0['mental_map_count']}件）\n"
-            f"- 此刻注意力焦点（按显著度过滤）：{'；'.join(focused_sensory) if focused_sensory else '周围空荡荡的'}"
+            f"- 适应阶段：{stage_cn}（熟悉度={l0['familiarity']:.2f}，已记住物件={l0['mental_map_count']}件）"
+            f"{peer_line}\n"
+            f"- 此刻物体焦点（按显著度过滤）：{'；'.join(focused_sensory) if focused_sensory else '周围空荡荡的'}"
         )
     else:
         all_sensory = [_sensory_item_desc(e, actors_map=actors_map) for e in entities[:12]]
         prompt_block = (
             f"【{actor.get('name') or host_char} · 环境输入（L0 已关闭）】\n"
-            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}\n"
+            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}"
+            f"{peer_line}\n"
             f"- 周围物件：{'；'.join(all_sensory) if all_sensory else '周围空荡荡的'}"
         )
 
     return {
         **l0,
+        "novelty_weight": _clamp_f(cfg.get("novelty_weight"), 0.0, 1.0, 0.55),
+        "memory_decay": _clamp_f(cfg.get("memory_decay"), 0.10, 0.90, 0.45),
+        "habituation_rate": _clamp_f(cfg.get("habituation_rate"), 0.05, 1.0, 0.25),
         "space_name": sp_name,
         "stage_cn": stage_cn,
         "bio_hour": round(bio_hour, 2),
         "circadian_phase": circ_phase,
         "focused_names": focused_names,
+        "focused_peers": focused_peers,
         "focused_sensory": focused_sensory,
         "behavior_profile": behavior_profile,
         "prompt_block": prompt_block,

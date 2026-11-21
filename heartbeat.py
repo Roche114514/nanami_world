@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import persona_bridge, projector, schema, text_compiler
+from .cognitive_engine import CognitiveEngine
+from .live_simulation import LiveSimulation
 from .schema import clip_text, normalize_autonomy
 from .settings import WorldSettings
 
@@ -32,6 +34,11 @@ class WorldHeartbeat:
         self._project_root = Path(project_root)
         self._adapter_provider = adapter_provider
         self._chat_service_provider = chat_service_provider
+        self._cognitive = CognitiveEngine(engine, self._project_root, adapter_provider=adapter_provider)
+        self.live = LiveSimulation(
+            engine, settings_provider, self._cognitive, self._cognitive_talk, adapter_provider,
+            self.deliver_persona_events, self._respond_to_key_loan, chat_service_provider,
+        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_diary_ts: dict[str, float] = {}
@@ -47,6 +54,7 @@ class WorldHeartbeat:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self.live.stop()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
@@ -100,14 +108,17 @@ class WorldHeartbeat:
 
     def _sync_persona_vitals(self, settings: WorldSettings) -> None:
         for act in self._engine.list_actors():
+            if act.get("is_player"):
+                continue
             aid = act["actor_id"]
             sid = str(act.get("space_id") or "room_default")
+            realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
             host_name = str(act.get("host_character") or act.get("name") or "").strip()
             synced = persona_bridge.read_persona_state(
                 self._project_root,
                 host_name,
                 custom_persona_dir=settings.persona_data_dir,
-                space_id=sid,
+                space_id=realm_sid,
                 actor_id=aid,
             )
             if synced is None:
@@ -148,9 +159,10 @@ class WorldHeartbeat:
                 result = {"status": "unbound"}
                 if actor:
                     attempts += 1
+                    ev_realm_sid = self._engine.realm_space_id(event["space_id"]) if hasattr(self._engine, "realm_space_id") else event["space_id"]
                     result = persona_bridge.emit_world_event_to_persona(
                         self._project_root, str(actor.get("host_character") or actor["name"]),
-                        space_id=event["space_id"], actor_id=aid, event_payload=payload,
+                        space_id=ev_realm_sid, actor_id=aid, event_payload=payload,
                         custom_persona_dir=settings.persona_data_dir,
                     ) or {}
                 mood = result.get("moodV")
@@ -172,12 +184,15 @@ class WorldHeartbeat:
     ) -> tuple[list[str], list[dict[str, Any]]]:
         taken: list[str] = []
         decisions: list[dict[str, Any]] = []
-        snap = self._engine.snapshot_for_ui()
         eff_llm = settings.heartbeat_use_llm if use_llm is None else bool(use_llm)
 
-        for act in list(snap["actors"]):
+        for act in self._engine.list_actors():
+            if act.get("is_player"):
+                continue
             aid = act["actor_id"]
             if target_actor_id and aid != target_actor_id:
+                continue
+            if not force_autonomy and self.live.managed(aid):
                 continue
             aut = normalize_autonomy(act.get("autonomy"))
             if not aut.get("enabled", True) and not force_autonomy:
@@ -187,6 +202,16 @@ class WorldHeartbeat:
             if loan_decision:
                 decisions.append(loan_decision)
                 taken.extend(f"{aid}: {line}" for line in loan_decision["actions"])
+                continue
+
+            scene = self._engine.cognitive_scene(aid)
+            if scene is not None:
+                decision = self._cognitive.step(scene, settings, use_llm=eff_llm, talk=self._cognitive_talk)
+                decisions.append(decision)
+                taken.extend(f"{aid}: {line}" for line in decision["actions"])
+                self._log_autonomous_activity(
+                    aid, scene["space"]["space_id"], "；".join(decision["actions"]), decision,
+                )
                 continue
 
             sp_snap = self._engine.snapshot_for_ui(act["space_id"])
@@ -229,18 +254,8 @@ class WorldHeartbeat:
                     taken.append(f"{aid}: {log_line}")
                 self._maybe_write_diary(aid, act["name"], summary, vis, settings)
 
-            chat_svc = self._chat_service_provider() if self._chat_service_provider else None
-            if chat_svc is not None and not plan.get("skip_auto_chat_log") and (exec_logs or plan.get("record_thought_in_chat")):
-                try:
-                    chat_svc.append_autonomous_activity(
-                        aid,
-                        action_summary=summary,
-                        thought=str(plan.get("thought") or ""),
-                        emotion=str(plan.get("emotion") or ""),
-                        space_id=act["space_id"],
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.debug("nanami_world: 同步自主行动到世界对话历史失败", exc_info=True)
+            if not plan.get("skip_auto_chat_log") and (exec_logs or plan.get("record_thought_in_chat")):
+                self._log_autonomous_activity(aid, act["space_id"], summary, plan)
 
             decisions.append({
                 "actor_id": aid,
@@ -252,6 +267,25 @@ class WorldHeartbeat:
             })
 
         return taken, decisions
+
+    def _log_autonomous_activity(self, actor_id: str, space_id: str, summary: str, plan: dict[str, Any]) -> None:
+        if not summary and not plan.get("thought"):
+            return
+        chat = self._chat_service_provider() if self._chat_service_provider else None
+        if chat is not None:
+            try:
+                chat.append_autonomous_activity(
+                    actor_id, action_summary=summary, thought=str(plan.get("thought") or ""),
+                    emotion=str(plan.get("emotion") or ""), space_id=space_id,
+                )
+            except Exception:
+                logger.debug("nanami_world: 同步自主行动到世界对话历史失败", exc_info=True)
+
+    def _cognitive_talk(self, actor_id: str, peer_id: str, reason: str) -> list[str]:
+        return self._execute_plan_actions(
+            actor_id, [{"tool": "world_talk", "target_actor_id": peer_id, "reason": reason}],
+            local_social=True,
+        )
 
     def respond_to_key_loan(self, actor_id: str) -> dict[str, Any] | None:
         with self._step_lock:
@@ -302,7 +336,9 @@ class WorldHeartbeat:
             actor_id, peer_id, entity_id, willing=profile["norm_courtesy"] >= 0.35,
         )
 
-    def _execute_plan_actions(self, actor_id: str, raw_actions: list[dict[str, Any]]) -> list[str]:
+    def _execute_plan_actions(
+        self, actor_id: str, raw_actions: list[dict[str, Any]], *, local_social: bool = False,
+    ) -> list[str]:
         logs: list[str] = []
         for item in raw_actions[:3]:
             if not isinstance(item, dict):
@@ -328,13 +364,24 @@ class WorldHeartbeat:
                 actors_now = self._engine.list_actors()
                 me = next((a for a in actors_now if a["actor_id"] == actor_id), None)
                 peer = next((a for a in actors_now if a["actor_id"] == tgt_aid), None)
-                if not me or not peer or me["space_id"] != peer["space_id"]:
+                if not me or me.get("is_player") or not peer or me["space_id"] != peer["space_id"]:
+                    continue
+                if peer.get("is_player"):
+                    chat_svc = self._chat_service_provider() if self._chat_service_provider else None
+                    if chat_svc is not None:
+                        greeting = chat_svc.greet_player(actor_id, tgt_aid, reason=reason,
+                                                         use_llm=self._settings_provider().heartbeat_use_llm)
+                        if greeting:
+                            self.live.hold_for_user_chat(actor_id, greeting["wait_seconds"])
+                            logs.append(greeting["summary"])
                     continue
                 if max(abs(int(me["x"]) - int(peer["x"])), abs(int(me["y"]) - int(peer["y"]))) > 1:
+                    if local_social:
+                        continue
                     adj = self._find_adjacent_walkable(me, peer)
                     if adj is not None:
                         self._engine.execute_move(actor_id, adj[0], adj[1])
-                chat_svc = self._chat_service_provider() if self._chat_service_provider else None
+                chat_svc = self._chat_service_provider() if self._chat_service_provider and not local_social else None
                 if chat_svc is not None and hasattr(chat_svc, "conduct_actor_social_exchange"):
                     ex = chat_svc.conduct_actor_social_exchange(actor_id, tgt_aid, reason=reason)
                     logs.append(str(ex.get("summary") or f"{me['name']} 和 {peer['name']} 聊了几句"))
@@ -342,24 +389,26 @@ class WorldHeartbeat:
                     a_host = str(me.get("host_character") or me.get("name") or "").strip()
                     b_host = str(peer.get("host_character") or peer.get("name") or "").strip()
                     me_sid = str(me.get("space_id") or "room_default")
+                    me_realm = self._engine.realm_space_id(me_sid) if hasattr(self._engine, "realm_space_id") else me_sid
                     settings = self._settings_provider()
                     rels_a = persona_bridge.read_actor_relations(
                         self._project_root,
                         a_host,
-                        space_id=me_sid,
+                        space_id=me_realm,
                         world_data_root=self._engine.data_root,
                         custom_persona_dir=settings.persona_data_dir,
                         known_actors=[b_host],
                     )
                     edge_ab = rels_a.get(f"char:{b_host}") or {}
                     first_meet = not bool(edge_ab.get("known"))
-                    note = f"{me['name']}主动与{peer['name']}{'初次打招呼认识' if first_meet else '聊了几句'}。"
+                    note = (f"{me['name']}走近了{peer['name']}。"
+                            if local_social else f"{me['name']}主动与{peer['name']}{'初次打招呼认识' if first_meet else '聊了几句'}。")
                     persona_bridge.record_world_social_interaction(
                         self._project_root,
                         self._engine.data_root,
                         a_host,
                         b_host,
-                        space_id=me_sid,
+                        space_id=me_realm,
                         summary=note,
                         first_meet=first_meet,
                         call_a_to_b=peer["name"] if first_meet else "",
@@ -372,7 +421,7 @@ class WorldHeartbeat:
                         space_id=me["space_id"],
                         payload={"initiator": me["name"], "target": peer["name"], "first_meet": first_meet, "summary": note},
                     )
-                    self._engine.record_social_feedback(actor_id, me_sid, note, peer_id=tgt_aid)
+                    self._engine.record_social_feedback(actor_id, me_sid, note, peer_id=tgt_aid, spoken=not local_social)
                     logs.append(note)
             elif tool == "world_write":
                 eid = str(item.get("entity_id") or "").strip()
@@ -454,11 +503,12 @@ class WorldHeartbeat:
             actor_host,
             custom_persona_dir=settings.persona_data_dir,
         )
-        peer_hosts = [str(p.get("host_character") or p.get("name") or "").strip() for p in peers]
+        peer_hosts = [str(p.get("host_character") or p.get("name") or "").strip() for p in peers if not p.get("is_player")]
+        realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
         rels = persona_bridge.read_actor_relations(
             self._project_root,
             actor_host,
-            space_id=sid,
+            space_id=realm_sid,
             world_data_root=self._engine.data_root,
             custom_persona_dir=settings.persona_data_dir,
             known_actors=peer_hosts,
@@ -469,7 +519,8 @@ class WorldHeartbeat:
             p_aid = str(peer["actor_id"])
             p_name = str(peer.get("name") or p_aid).strip()
             p_host = str(peer.get("host_character") or p_name).strip()
-            edge = rels.get(f"char:{p_host}") or rels.get(f"char:{p_name}") or {}
+            edge = rels.get("user") if peer.get("is_player") else rels.get(f"char:{p_host}") or rels.get(f"char:{p_name}")
+            edge = edge or {}
 
             if int(edge.get("cool_off_turns") or 0) > 0:
                 continue
@@ -504,6 +555,8 @@ class WorldHeartbeat:
                 score -= 4.0
 
             dist = max(abs(int(actor["x"]) - int(peer["x"])), abs(int(actor["y"]) - int(peer["y"])))
+            if peer.get("is_player") and dist > 1:
+                continue
             adj = None if dist <= 1 else self._find_adjacent_walkable(actor, peer)
             if dist > 1 and adj is None:
                 continue
@@ -663,10 +716,11 @@ class WorldHeartbeat:
         peer_known = False
         other_actors = [a for a in (sp_snap.get("actors") or []) if a.get("actor_id") != aid]
         if other_actors:
+            realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
             rels_chk = persona_bridge.read_actor_relations(
                 self._project_root,
                 host_char,
-                space_id=sid,
+                space_id=realm_sid,
                 world_data_root=self._engine.data_root,
                 custom_persona_dir=settings.persona_data_dir,
                 known_actors=[str(a.get("host_character") or a.get("name") or "") for a in other_actors],
@@ -1033,31 +1087,33 @@ class WorldHeartbeat:
                 }
 
         # 10. 打开关着的门，或推门去联通空间探索，或在好看的风景格子间漫步欣赏
-        closed_door = next(
-            (
-                e for e in vis
-                if "portal" in (e.get("traits") or {})
-                and not (e.get("traits") or {})["portal"].get("is_open")
-                and e["entity_id"] not in recent[:2]
-            ),
-            None,
-        )
-        if closed_door and (curiosity >= 0.55 or force_autonomy):
-            return {
-                "goal": f"打开「{closed_door['name']}」",
-                "drive": "explore",
-                "thought": f"先把「{closed_door['name']}」打开吧，这样两边都能走过去。",
-                "emotion": "好奇",
-                "target_id": closed_door["entity_id"],
-                "actions": [{"tool": "world_act", "entity_id": closed_door["entity_id"], "action": "open"}],
-                "record_thought_in_chat": True,
-            }
+        is_town_realm = space.get("space_kind") in ("town", "building")
+        if not is_town_realm:
+            closed_door = next(
+                (
+                    e for e in vis
+                    if "portal" in (e.get("traits") or {})
+                    and not (e.get("traits") or {})["portal"].get("is_open")
+                    and e["entity_id"] not in recent[:2]
+                ),
+                None,
+            )
+            if closed_door and (curiosity >= 0.55 or force_autonomy):
+                return {
+                    "goal": f"打开「{closed_door['name']}」",
+                    "drive": "explore",
+                    "thought": f"先把「{closed_door['name']}」打开吧，这样两边都能走过去。",
+                    "emotion": "好奇",
+                    "target_id": closed_door["entity_id"],
+                    "actions": [{"tool": "world_act", "entity_id": closed_door["entity_id"], "action": "open"}],
+                    "record_thought_in_chat": True,
+                }
 
         portal = next(
             (
                 e for e in vis
-                if (e.get("traits") or {}).get("portal", {}).get("is_open")
-                and (e.get("traits") or {}).get("portal", {}).get("target_space_id")
+                if (e.get("traits") or {}).get("portal", {}).get("target_space_id")
+                and (is_town_realm or (e.get("traits") or {}).get("portal", {}).get("is_open"))
                 and e["entity_id"] not in recent[:2]
             ),
             None,
@@ -1122,46 +1178,48 @@ class WorldHeartbeat:
         recent: list[str],
     ) -> tuple[int, int, dict[str, Any] | None] | None:
         w = int(space["width"])
-        h = int(space["height"])
         ax, ay = int(actor["x"]), int(actor["y"])
         sid = space["space_id"]
         tiles = space.get("tiles") or {}
         cands: list[tuple[float, int, int, dict[str, Any] | None]] = []
+        vis_pos = [
+            e for e in vis
+            if e.get("z", 0) >= 0
+        ]
 
         with self._engine._lock:
-            for yy in range(h):
-                for xx in range(w):
-                    if abs(xx - ax) + abs(yy - ay) < 2:
-                        continue
-                    if not self._engine._is_floor_walkable_locked(space, xx, yy, ignore_actor_id=actor["actor_id"]):
-                        continue
-                    path = self._engine._bfs_locked(sid, (ax, ay), {(xx, yy)}, ignore_actor_id=actor["actor_id"])
-                    if not path:
-                        continue
-                    tid = tiles.get(f"{xx},{yy}", "")
-                    score = 1.0
-                    if tid in ("flower_grass", "tatami", "carpet_pink", "carpet_blue"):
-                        score += 3.0
-                    elif tid in ("cobble", "sand", "grass", "stone_tile"):
-                        score += 1.5
-                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        if tiles.get(f"{xx + dx},{yy + dy}") == "water":
-                            score += 2.2
-                    if yy <= 2 and abs(xx - w // 2) <= 1:
-                        score += 1.6
-                    near_ent = next(
-                        (
-                            e for e in vis
-                            if e.get("z", 0) >= 0
-                            and max(abs(xx - int(e["x"])), abs(yy - int(e["y"]))) <= 1
-                        ),
-                        None,
-                    )
-                    if near_ent:
-                        score += 1.5 if near_ent["entity_id"] not in recent else 0.2
-                    if f"cell:{xx},{yy}" in recent:
-                        score -= 3.5
-                    cands.append((score, xx, yy, near_ent))
+            reachable = self._engine._reachable_cells_locked(
+                sid,
+                (ax, ay),
+                max_steps=14,
+                ignore_actor_id=actor["actor_id"],
+            )
+            for (xx, yy), step_dist in reachable.items():
+                if step_dist < 2:
+                    continue
+                tid = tiles.get(f"{xx},{yy}", "")
+                score = 1.0
+                if tid in ("flower_grass", "tatami", "carpet_pink", "carpet_blue"):
+                    score += 3.0
+                elif tid in ("cobble", "sand", "grass", "stone_tile"):
+                    score += 1.5
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    if tiles.get(f"{xx + dx},{yy + dy}") == "water":
+                        score += 2.2
+                if yy <= 2 and abs(xx - w // 2) <= 1:
+                    score += 1.6
+                near_ent = next(
+                    (
+                        e for e in vis_pos
+                        if max(abs(xx - int(e["x"])), abs(yy - int(e["y"]))) <= 1
+                    ),
+                    None,
+                )
+                if near_ent:
+                    score += 1.5 if near_ent["entity_id"] not in recent else 0.2
+                if f"cell:{xx},{yy}" in recent:
+                    score -= 3.5
+                cands.append((score, xx, yy, near_ent))
 
         if not cands:
             return None

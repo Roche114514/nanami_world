@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from . import persona_bridge
+from .cognitive_engine import cognitive_summary
 from .engine import WorldEngine, compute_lighting
 from .schema import TILE_CATALOG
 
@@ -95,7 +96,14 @@ def project_terminal_data(
     space = snap["space"]
     lighting = compute_lighting(space, {e["entity_id"]: e for e in snap["entities"]}, time.time(), float(snap.get("clock_offset_minutes") or 0.0))
     period_cn = {"dawn": "清晨", "day": "白天", "dusk": "傍晚", "night": "夜晚"}.get(lighting["period"], "白天")
-    light_cn = "屋里暗着（没开灯）" if lighting["is_dark"] else ("台灯亮着" if lighting["has_lamp_on"] else "室内明亮")
+    if space.get("space_kind") == "town":
+        light_cn = (
+            ("夜色已深，街灯微亮" if lighting.get("lamp_positions") else "夜色偏暗")
+            if lighting["period"] == "night"
+            else "户外光线充足"
+        )
+    else:
+        light_cn = "屋里暗着（没开灯）" if lighting["is_dark"] else ("台灯亮着" if lighting["has_lamp_on"] else "室内明亮")
 
     vis = engine.visible_entities(actor_id)
     now = time.time()
@@ -114,7 +122,7 @@ def project_terminal_data(
             top_level.append(ent)
 
     near_lines: list[str] = []
-    far_lines: list[str] = []
+    far_items: list[tuple[int, int, str]] = []
     anchors: list[dict[str, Any]] = []
 
     for ent in top_level:
@@ -139,20 +147,31 @@ def project_terminal_data(
         if dist <= 1:
             near_lines.append(line)
         else:
-            far_lines.append(line)
+            is_portal = 0 if "portal" in (ent.get("traits") or {}) else 1
+            far_items.append((is_portal, dist, line))
+
+    is_big_town = space.get("space_kind") == "town" or max(int(space.get("width") or 0), int(space.get("height") or 0)) >= 24
+    far_omitted = 0
+    if is_big_town and len(far_items) > 14:
+        far_items.sort(key=lambda item: (item[0], item[1]))
+        far_omitted = len(far_items) - 14
+        far_items = far_items[:14]
+    far_lines = [item[2] for item in far_items]
 
     diffs = engine.consume_diffs(sid) if consume_diffs else engine.peek_diffs(sid)
+    seen_peer_ids = engine.visible_peer_ids(actor_id)
     peer_actors = [
         a for a in snap["actors"]
-        if a["space_id"] == sid and a["actor_id"] != actor_id
+        if a["space_id"] == sid and a["actor_id"] != actor_id and a["actor_id"] in seen_peer_ids
     ]
     actor_host = str(actor.get("host_character") or actor.get("name") or "").strip()
     peer_names = [str(a.get("host_character") or a.get("name") or "").strip() for a in peer_actors]
+    realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
     relations_map = (
         persona_bridge.read_actor_relations(
             engine.project_root,
             actor_host,
-            space_id=sid,
+            space_id=realm_sid,
             world_data_root=engine.data_root,
             known_actors=peer_names,
         )
@@ -202,8 +221,19 @@ def project_terminal_data(
         f"- 空间：{space['name']}（{space['width']}×{space['height']}，{lighting['clock']} {period_cn}，{light_cn}）｜你在 ({actor['x']}, {actor['y']}) {posture_cn}［脚下：{underfoot['name']}］",
         f"- 环境底色：{space['ambient_phrase']}",
     ]
+    parent_sp = snap.get("parent_space")
+    cur_zone = snap.get("current_zone")
+    if isinstance(parent_sp, dict) and parent_sp.get("name"):
+        dist_txt = f" · {space['district']}" if space.get("district") else ""
+        lines.append(f"- 所属城镇：{parent_sp['name']}{dist_txt}（从出口大门可回到街道）")
+    elif isinstance(cur_zone, dict) and cur_zone.get("name"):
+        z_desc = f"（{cur_zone['description']}）" if cur_zone.get("description") else ""
+        lines.append(f"- 所在街区：{cur_zone['name']}{z_desc}")
     if terrain_names:
         lines.append("- 地形与建材：" + "、".join(terrain_names[:10]))
+    if other_actor_lines:
+        lines.append("- 眼前/视线内的人物（可直接走近或搭话，用 world_approach / world_talk 填方括号 ID）：")
+        lines.extend(other_actor_lines)
     aut = actor.get("autonomy") if isinstance(actor.get("autonomy"), dict) else {}
     if aut.get("current_goal") or aut.get("last_action_summary"):
         aut_parts = [f"当前想「{aut.get('current_goal') or '四处打量'}」"]
@@ -212,6 +242,28 @@ def project_terminal_data(
         if aut.get("last_thought"):
             aut_parts.append(f"心声：「{aut['last_thought']}」")
         lines.append("- 自主状态与心愿：" + "｜".join(aut_parts))
+    cognition = cognitive_summary(actor)
+    if cognition:
+        if cognition["agenda"]:
+            lines.append("- 此刻萦绕的念头：" + cognition["agenda"])
+        if cognition.get("commitment"):
+            lines.append("- 许下的约定：" + cognition["commitment"])
+        if cognition["goal"]:
+            lines.append(f"- 当前持久目标：{cognition['goal']}（{cognition['phase']}）")
+        zones = [z["name"] for z in cognition["zones"] if z["visited"]]
+        if zones:
+            lines.append("- 走过的街区：" + "、".join(zones[:12]))
+        places = [
+            f"{place['name']}（{'去过' if place['visited'] else place['source']}）"
+            for place in cognition["places"]
+        ]
+        if places:
+            lines.append("- 记得的场所：" + "、".join(places[:12]))
+        c_peers = [f"{p['name']}（曾在{p['space']}）" for p in (cognition.get("peers") or []) if p.get("space")]
+        if c_peers:
+            lines.append("- 记得同伴所在：" + "、".join(c_peers[:8]))
+        if cognition["prediction_error"]:
+            lines.append("- 修正过的记忆：" + cognition["prediction_error"])
     if held_ent:
         h_verbs = [lbl for _c, lbl in engine.legal_verbs(held_ent, actor)]
         h_tags = engine.entity_state_tags(held_ent)
@@ -219,10 +271,6 @@ def project_terminal_data(
         lines.append(f"- 手里拿着：[{held_ent['entity_id']}] {held_ent['name']}{h_state}｜可用：{'、'.join(h_verbs)}")
     else:
         lines.append("- 手里：空")
-
-    if other_actor_lines:
-        lines.append("- 同屋的其他角色：")
-        lines.extend(other_actor_lines)
 
     if diffs:
         lines.append("- 刚发生的变化：" + "；".join(diffs[-4:]))
@@ -233,6 +281,8 @@ def project_terminal_data(
     if far_lines:
         lines.append("- 远处可见：")
         lines.extend(far_lines)
+        if far_omitted > 0:
+            lines.append(f"  - （其余 {far_omitted} 处较远物体略去，走近即可看清）")
     if not near_lines and not far_lines and not held_ent:
         lines.append("- 视野内：这里空荡荡的，还没有放进任何物品。")
 
