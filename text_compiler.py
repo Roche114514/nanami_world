@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
-from . import danganronpa_catalog, sprite_pack
+from . import danganronpa_catalog, sprite_pack, venue_semantics, weather
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -1579,4 +1579,482 @@ def compile_map_from_text(
         "map_spec": map_spec,
         "used_llm": False,
         "note": "未调用大模型，已按场景关键词生成配套地形与物件布局。",
+    }
+
+
+_TOWN_PALETTES: tuple[str, ...] = (
+    "warm_stardew",
+    "midnight_handheld",
+    "cyber_pastel",
+    "gameboy_pocket",
+    "ink_terminal",
+)
+_QUADRANT_SLOTS: tuple[str, ...] = ("nw", "ne", "sw", "se")
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+_TOWN_SYSTEM_PROMPT = """你是像素风文字世界的城镇总设计师。用户输入一句城镇设定描述，你必须只输出一个合法 JSON 对象（不要 markdown 围栏、不要任何坐标数字），由程序按确定性算法完成道路连通与建筑布局。
+
+可用 role 枚举（严格六选一）：
+- home（住宅/宿舍/旅馆/民宿）
+- cafe（咖啡馆/茶屋/餐馆/烘焙店）
+- shop（杂货铺/便利店/工坊/市集）
+- library（图书馆/书屋/书店/画室/学院教室）
+- arcade（电玩厅/游戏中心/社团娱乐室）
+- public（公共会馆/邮局/沙龙/休息厅）
+
+可用 zone_slot 枚举：nw（西北区）、ne（东北区）、sw（西南区）、se（东南区）；center 仅用于 zones。
+可用地表 tile_id（均可行走）：grass, flower_grass, sand, cobble, stone_tile, wood_floor, dark_wood, tatami, carpet_pink, carpet_blue
+可用边界/墙体 tile_id：hedge, water, brick_wall, wood_wall, white_wall, glass_wall
+可用 palette_id：warm_stardew, midnight_handheld, cyber_pastel, gameboy_pocket, ink_terminal
+可用 weather：clear, cloudy, rain, sakura, snow
+
+JSON 输出结构：
+{
+  "name": "城镇名称(<=12字)",
+  "theme": "seaside|snow_onsen|neon_market|forest_academy|sakura",
+  "ambient_phrase": "一句话城镇白描(<=55字)",
+  "palette_id": "warm_stardew",
+  "allowed_weathers": ["clear", "cloudy", "rain"],
+  "initial_weather": "clear",
+  "ground_tile": "grass",
+  "road_tile": "cobble",
+  "plaza_tile": "stone_tile",
+  "border_tile": "hedge",
+  "accent_tile": "flower_grass",
+  "has_water_feature": true,
+  "zones": [
+    {"slot": "nw", "name": "区名(<=10字)", "description": "一句话(<=30字)"},
+    {"slot": "ne", "name": "...", "description": "..."},
+    {"slot": "center", "name": "...", "description": "..."},
+    {"slot": "sw", "name": "...", "description": "..."},
+    {"slot": "se", "name": "...", "description": "..."}
+  ],
+  "buildings": [
+    {
+      "name": "建筑名(<=12字)",
+      "role": "home|cafe|shop|library|arcade|public",
+      "zone_slot": "nw|ne|sw|se",
+      "roof_color": "#c9647a",
+      "wall_tile": "brick_wall",
+      "interior_floor_tile": "wood_floor",
+      "interior_wall_tile": "wood_wall",
+      "interior_palette": "warm_stardew",
+      "interior_ambient": "室内白描(<=55字)",
+      "icon": "🏠",
+      "note_text": "可选屋内留言(<=60字)"
+    }
+  ]
+}
+注意：至少包含 1 栋 home（住处）和 1 栋 cafe 或 shop（饮食补给场所），各区建筑尽量均衡分布。"""
+
+
+def _valid_hex(val: Any, fallback: str) -> str:
+    txt = str(val or "").strip()
+    return txt if _HEX_COLOR_RE.fullmatch(txt) else fallback
+
+
+def _pick_walkable_tile(val: Any, fallback: str) -> str:
+    tid = str(val or "").strip()
+    if tid in TILE_CATALOG and TILE_CATALOG[tid].get("walkable", False):
+        return tid
+    return fallback
+
+
+def _pick_wall_tile(val: Any, fallback: str) -> str:
+    tid = str(val or "").strip()
+    if tid in TILE_CATALOG and TILE_CATALOG[tid].get("is_wall", False):
+        return tid
+    return fallback
+
+
+def _pick_border_tile(val: Any, fallback: str) -> str:
+    tid = str(val or "").strip()
+    if tid in TILE_CATALOG and not TILE_CATALOG[tid].get("walkable", True):
+        return tid
+    return fallback
+
+
+def _town_theme_preset(theme_key: str) -> dict[str, Any]:
+    presets: dict[str, dict[str, Any]] = {
+        "seaside": {
+            "name": "汐风海港镇",
+            "theme": "seaside",
+            "ambient_phrase": "海浪拍岸、铺满金沙与石板长堤的汐风海港小镇，飘着咖啡与海盐香气。",
+            "palette_id": "warm_stardew",
+            "allowed_weathers": ["clear", "cloudy", "rain"],
+            "initial_weather": "clear",
+            "ground_tile": "sand",
+            "road_tile": "cobble",
+            "plaza_tile": "stone_tile",
+            "border_tile": "water",
+            "accent_tile": "flower_grass",
+            "has_water_feature": True,
+            "zones": {
+                "nw": ("西岸民宿区", "迎着海风的木屋民宿与港湾小舍。"),
+                "ne": ("东岸商店街", "海景咖啡馆与补给渔货小店林立。"),
+                "center": ("灯塔中央广场", "石砖广场中心立着指引全镇去向的布告栏。"),
+                "sw": ("南滩观潮湾", "金沙海湾、篝火草坪与海风旧书屋所在。"),
+                "se": ("港区文娱角", "入夜依旧热闹的海港游艺厅与会馆。"),
+            },
+            "buildings": [
+                {"name": "潮汐民宿", "role": "home", "zone_slot": "nw", "roof_color": "#5b89a6", "wall_tile": "white_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "white_wall", "interior_ambient": "推窗能听见海浪声的木质民宿小屋。"},
+                {"name": "贝壳宿舍", "role": "home", "zone_slot": "nw", "roof_color": "#72998e", "wall_tile": "wood_wall", "interior_floor_tile": "tatami", "interior_wall_tile": "wood_wall", "interior_ambient": "铺着清爽榻榻米的港湾伙伴宿舍。"},
+                {"name": "海风咖啡屋", "role": "cafe", "zone_slot": "ne", "roof_color": "#c9885b", "wall_tile": "white_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "white_wall", "interior_ambient": "飘着现磨咖啡与海盐焦糖香气的观海咖啡屋。"},
+                {"name": "渔港杂货铺", "role": "shop", "zone_slot": "ne", "roof_color": "#5e7ea6", "wall_tile": "wood_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "brick_wall", "interior_ambient": "摆满旅人点心、热饮与小道具的海港杂货铺。"},
+                {"name": "海风二手书屋", "role": "library", "zone_slot": "sw", "roof_color": "#5a827e", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "靠海而建的静谧木质书屋，窗外是金沙碧海。"},
+                {"name": "港湾游艺厅", "role": "arcade", "zone_slot": "se", "roof_color": "#8b63a8", "wall_tile": "brick_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "wood_wall", "interior_ambient": "闪着暖色霓虹与街机屏幕微光的海港游艺厅。", "interior_palette": "midnight_handheld"},
+                {"name": "灯塔海滨会馆", "role": "public", "zone_slot": "se", "roof_color": "#6f8699", "wall_tile": "white_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "镇民聚集交流与作画休憩的海滨会馆。"},
+                {"name": "码头烘焙屋", "role": "cafe", "zone_slot": "sw", "roof_color": "#c27a57", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "white_wall", "interior_ambient": "刚出炉面包与热可可飘香的码头小店。"},
+            ],
+        },
+        "snow_onsen": {
+            "name": "雪见温泉街",
+            "theme": "snow_onsen",
+            "ambient_phrase": "细雪轻落石街的冬日温泉小镇，暖灯木廊间冒着热茶与温泉水汽。",
+            "palette_id": "ink_terminal",
+            "allowed_weathers": ["snow", "cloudy", "clear"],
+            "initial_weather": "snow",
+            "ground_tile": "stone_tile",
+            "road_tile": "cobble",
+            "plaza_tile": "stone_tile",
+            "border_tile": "hedge",
+            "accent_tile": "grass",
+            "has_water_feature": True,
+            "zones": {
+                "nw": ("西麓汤宿区", "安静暖和的日式温泉旅馆与旅人木屋。"),
+                "ne": ("东街茶食街", "热气腾腾的茶屋、甜品铺与冬日补给铺。"),
+                "center": ("温泉石泉广场", "中心广场的石砖旁竖着街道布告栏与铸铁灯。"),
+                "sw": ("南溪冰雪庭院", "露天汤池、暖火草坪与松风静读斋。"),
+                "se": ("竹影游憩区", "避寒休息厅与室内休闲游艺屋所在。"),
+            },
+            "buildings": [
+                {"name": "汤宿温泉旅馆", "role": "home", "zone_slot": "nw", "roof_color": "#8f5446", "wall_tile": "wood_wall", "interior_floor_tile": "tatami", "interior_wall_tile": "wood_wall", "interior_ambient": "暖木香气与柔软榻榻米相伴的温泉旅馆。", "interior_palette": "warm_stardew"},
+                {"name": "雪松小屋", "role": "home", "zone_slot": "nw", "roof_color": "#6c7f68", "wall_tile": "wood_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "窗台透着鹅黄灯光的温暖雪松木屋。", "interior_palette": "warm_stardew"},
+                {"name": "雪见茶屋", "role": "cafe", "zone_slot": "ne", "roof_color": "#a86d4c", "wall_tile": "white_wall", "interior_floor_tile": "tatami", "interior_wall_tile": "wood_wall", "interior_ambient": "能喝到现煮热茶、拉面与暖点心的雪见茶屋。", "interior_palette": "warm_stardew"},
+                {"name": "温泉小卖部", "role": "shop", "zone_slot": "ne", "roof_color": "#5e7488", "wall_tile": "wood_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "wood_wall", "interior_ambient": "摆满热饮、小点心和钥匙小物的街角店铺。"},
+                {"name": "松风书斋", "role": "library", "zone_slot": "sw", "roof_color": "#556b68", "wall_tile": "wood_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "安静烤着暖意、伴雪看书的木质书斋。"},
+                {"name": "竹影休息馆", "role": "arcade", "zone_slot": "se", "roof_color": "#6f5d80", "wall_tile": "brick_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "wood_wall", "interior_ambient": "放着桌游、掌机和软沙发的室内游艺休息馆。", "interior_palette": "warm_stardew"},
+                {"name": "冬夜美术沙龙", "role": "public", "zone_slot": "se", "roof_color": "#7b6c63", "wall_tile": "white_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "white_wall", "interior_ambient": "摆着画架与留声机的温暖沙龙角落。"},
+                {"name": "暖炉拉面亭", "role": "cafe", "zone_slot": "sw", "roof_color": "#b06554", "wall_tile": "brick_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "wood_wall", "interior_ambient": "热汤拉面香气四溢的小镇夜间食亭。", "interior_palette": "warm_stardew"},
+            ],
+        },
+        "neon_market": {
+            "name": "星海霓虹商业街",
+            "theme": "neon_market",
+            "ambient_phrase": "闪烁着霓虹招牌、石砖步道与通宵咖啡香的都市夜色商业镇。",
+            "palette_id": "midnight_handheld",
+            "allowed_weathers": ["rain", "cloudy", "clear"],
+            "initial_weather": "cloudy",
+            "ground_tile": "stone_tile",
+            "road_tile": "cobble",
+            "plaza_tile": "carpet_blue",
+            "border_tile": "glass_wall",
+            "accent_tile": "carpet_pink",
+            "has_water_feature": False,
+            "zones": {
+                "nw": ("西区公寓楼", "整洁安静的都市公寓与程序员宿舍。"),
+                "ne": ("霓虹夜市街", "24 小时亮着暖光的夜光咖啡与便利店。"),
+                "center": ("星海中央广场", "星夜地毯铺就的十字中枢与数字布告栏。"),
+                "sw": ("南西数据公园", "城市绿地、街灯长椅与数字阅览资料馆。"),
+                "se": ("南东电玩中心", "赛博游戏机厅与像素艺术沙龙核心区。"),
+            },
+            "buildings": [
+                {"name": "星海公寓", "role": "home", "zone_slot": "nw", "roof_color": "#556ea6", "wall_tile": "glass_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "white_wall", "interior_ambient": "干净安静的夜间公寓，摆着掌机与暖灯。"},
+                {"name": "阁楼宿舍", "role": "home", "zone_slot": "nw", "roof_color": "#6a5f94", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "可随时补觉休息的小镇伙伴宿舍。"},
+                {"name": "夜光咖啡bar", "role": "cafe", "zone_slot": "ne", "roof_color": "#c96f89", "wall_tile": "glass_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "glass_wall", "interior_ambient": "黑胶唱片缓缓转动、咖啡机亮着橙灯的夜店咖啡吧。"},
+                {"name": "深夜便利店", "role": "shop", "zone_slot": "ne", "roof_color": "#4f8aa3", "wall_tile": "glass_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "全天候备好点心与热可可的明亮便利店。"},
+                {"name": "数据档案馆", "role": "library", "zone_slot": "sw", "roof_color": "#4b6982", "wall_tile": "glass_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "white_wall", "interior_ambient": "静谧的玻璃幕墙阅览与资料查阅馆。"},
+                {"name": "霓虹街机中心", "role": "arcade", "zone_slot": "se", "roof_color": "#a85ec9", "wall_tile": "brick_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "dark_wood", "interior_ambient": "摆满复古街机、游戏电脑与霓虹海报的游戏中心。", "interior_palette": "cyber_pastel"},
+                {"name": "像素创客沙龙", "role": "public", "zone_slot": "se", "roof_color": "#6b809e", "wall_tile": "glass_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "交流创意与绘制草图的公共创客沙龙。"},
+                {"name": "糖果甜品站", "role": "cafe", "zone_slot": "sw", "roof_color": "#cc7ca6", "wall_tile": "white_wall", "interior_floor_tile": "carpet_pink", "interior_wall_tile": "white_wall", "interior_ambient": "充满草莓奶油香气的小巧甜品店。", "interior_palette": "cyber_pastel"},
+            ],
+        },
+        "forest_academy": {
+            "name": "林间学院镇",
+            "theme": "forest_academy",
+            "ambient_phrase": "绿树与花径环绕的学院小镇，红砖图书馆、社团教室与茶香彼此呼应。",
+            "palette_id": "warm_stardew",
+            "allowed_weathers": ["clear", "cloudy", "rain", "sakura"],
+            "initial_weather": "clear",
+            "ground_tile": "grass",
+            "road_tile": "cobble",
+            "plaza_tile": "stone_tile",
+            "border_tile": "hedge",
+            "accent_tile": "flower_grass",
+            "has_water_feature": True,
+            "zones": {
+                "nw": ("西苑宿舍区", "红砖绿篱掩映的学生与教职员宿舍。"),
+                "ne": ("东廊食坊街", "飘着松饼与热茶香的校庭咖啡与小卖部。"),
+                "center": ("学园钟楼广场", "石砖交汇的中央广场与校内布告栏。"),
+                "sw": ("南林湖畔园区", "池畔草地、篝火与大藏书图书馆所在。"),
+                "se": ("南东社团楼", "下课后聚集打游戏与画画的社团活动楼。"),
+            },
+            "buildings": [
+                {"name": "红砖宿舍楼", "role": "home", "zone_slot": "nw", "roof_color": "#b55d66", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "温暖干净的学院宿舍，阳光能照到书桌和床铺。"},
+                {"name": "导师木屋", "role": "home", "zone_slot": "nw", "roof_color": "#739468", "wall_tile": "wood_wall", "interior_floor_tile": "tatami", "interior_wall_tile": "wood_wall", "interior_ambient": "书架与绿植并立的林间安静住处。"},
+                {"name": "校庭咖啡馆", "role": "cafe", "zone_slot": "ne", "roof_color": "#c78556", "wall_tile": "brick_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "white_wall", "interior_ambient": "飘着现磨咖啡与草莓奶油蛋糕香气的学院咖啡馆。"},
+                {"name": "学园小卖部", "role": "shop", "zone_slot": "ne", "roof_color": "#5d7fa3", "wall_tile": "wood_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "贩售小点心、热饮与实用文具的学院小卖部。"},
+                {"name": "林间大图书馆", "role": "library", "zone_slot": "sw", "roof_color": "#527d78", "wall_tile": "brick_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "wood_wall", "interior_ambient": "藏书丰富、木梯与阅读桌排列齐整的林间图书馆。"},
+                {"name": "游戏社活动室", "role": "arcade", "zone_slot": "se", "roof_color": "#875fa3", "wall_tile": "brick_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "wood_wall", "interior_ambient": "放满电脑、掌机与街机的放学后社团活动室。", "interior_palette": "midnight_handheld"},
+                {"name": "林间美术教室", "role": "public", "zone_slot": "se", "roof_color": "#94795d", "wall_tile": "white_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "white_wall", "interior_ambient": "立着木质画架与留声机的明亮美术活动室。"},
+                {"name": "温室茶亭", "role": "cafe", "zone_slot": "sw", "roof_color": "#6b9c75", "wall_tile": "glass_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "玻璃花房里摆着热茶与点心的温室茶亭。"},
+            ],
+        },
+        "sakura": {
+            "name": "春樱和风镇",
+            "theme": "sakura",
+            "ambient_phrase": "春风拂过樱林与鹅卵石街的恬静小镇，各处建筑都推门即入。",
+            "palette_id": "warm_stardew",
+            "allowed_weathers": ["clear", "cloudy", "rain", "sakura"],
+            "initial_weather": "sakura",
+            "ground_tile": "grass",
+            "road_tile": "cobble",
+            "plaza_tile": "stone_tile",
+            "border_tile": "hedge",
+            "accent_tile": "flower_grass",
+            "has_water_feature": True,
+            "zones": {
+                "nw": ("北西居住区", "清静舒适的住宅木屋与旅人宿舍街区。"),
+                "ne": ("北东商店街", "茶点铺与日常杂货铺相映成趣的商业街区。"),
+                "center": ("樱花中央广场", "石板主干道交汇的中央广场与小镇布告栏。"),
+                "sw": ("南西水畔林园", "湖畔公园、暖火草坪与静谧书屋所在。"),
+                "se": ("南东游憩坊", "怀旧电玩屋与邻里公共会馆聚集的休闲区。"),
+            },
+            "buildings": [
+                {"name": "和风木屋", "role": "home", "zone_slot": "nw", "roof_color": "#c9647a", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "温暖舒适的和风木屋，摆着软床与热茶。"},
+                {"name": "旅人宿舍", "role": "home", "zone_slot": "nw", "roof_color": "#729968", "wall_tile": "wood_wall", "interior_floor_tile": "tatami", "interior_wall_tile": "wood_wall", "interior_ambient": "铺着清新榻榻米的整洁旅人宿舍。"},
+                {"name": "樱花茶点铺", "role": "cafe", "zone_slot": "ne", "roof_color": "#c9885b", "wall_tile": "white_wall", "interior_floor_tile": "dark_wood", "interior_wall_tile": "white_wall", "interior_ambient": "充满咖啡香、甜品与黑胶旋律的街角茶点铺。"},
+                {"name": "街角杂货铺", "role": "shop", "zone_slot": "ne", "roof_color": "#5e7ea6", "wall_tile": "wood_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "brick_wall", "interior_ambient": "整齐放着点心、热饮与各式小道具的街角杂货铺。"},
+                {"name": "静谧书屋", "role": "library", "zone_slot": "sw", "roof_color": "#5a827e", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "墨香与林间微风流淌的安静书屋。"},
+                {"name": "怀旧电玩屋", "role": "arcade", "zone_slot": "se", "roof_color": "#8a5ea6", "wall_tile": "brick_wall", "interior_floor_tile": "carpet_blue", "interior_wall_tile": "wood_wall", "interior_ambient": "放着老式街机与游戏主机的街角电玩屋。", "interior_palette": "midnight_handheld"},
+                {"name": "邻里会馆", "role": "public", "zone_slot": "se", "roof_color": "#807a6e", "wall_tile": "white_wall", "interior_floor_tile": "stone_tile", "interior_wall_tile": "white_wall", "interior_ambient": "可供镇民自由聊天、看画休息的明亮会馆。"},
+                {"name": "湖畔小食堂", "role": "cafe", "zone_slot": "sw", "roof_color": "#b86b5e", "wall_tile": "brick_wall", "interior_floor_tile": "wood_floor", "interior_wall_tile": "wood_wall", "interior_ambient": "供应热腾腾拉面与红茶的暖心小食堂。"},
+            ],
+        },
+    }
+    return dict(presets.get(theme_key) or presets["sakura"])
+
+
+def _detect_town_theme(prompt_text: str) -> str:
+    low = str(prompt_text or "").casefold()
+    if any(k in low for k in ("海", "港", "岛", "沙滩", "渔", "潮", "湾", "海滨", "sea", "beach", "harbor")):
+        return "seaside"
+    if any(k in low for k in ("雪", "冬", "温泉", "冰", "汤", "snow", "onsen", "winter")):
+        return "snow_onsen"
+    if any(k in low for k in ("赛博", "霓虹", "未来", "都市", "夜市", "电玩", "cyber", "neon")):
+        return "neon_market"
+    if any(k in low for k in ("学院", "校园", "森林", "林间", "魔法", "书院", "academy", "forest", "school")):
+        return "forest_academy"
+    return "sakura"
+
+
+def _sanitize_town_spec(
+    raw: Mapping[str, Any] | None,
+    *,
+    width: int,
+    height: int,
+    building_count: int,
+    prompt_text: str,
+) -> dict[str, Any]:
+    src = raw if isinstance(raw, Mapping) else {}
+    theme = str(src.get("theme") or _detect_town_theme(prompt_text)).strip().lower()
+    if theme not in ("seaside", "snow_onsen", "neon_market", "forest_academy", "sakura"):
+        theme = _detect_town_theme(prompt_text)
+    preset = _town_theme_preset(theme)
+
+    palette_id = str(src.get("palette_id") or preset["palette_id"]).strip()
+    if palette_id not in _TOWN_PALETTES:
+        palette_id = str(preset["palette_id"])
+
+    raw_weathers = src.get("allowed_weathers")
+    allowed_weathers: list[str] = []
+    if isinstance(raw_weathers, (list, tuple)):
+        for w in raw_weathers:
+            wc = str(w or "").strip().lower()
+            if wc in weather.VALID_WEATHERS and wc not in allowed_weathers:
+                allowed_weathers.append(wc)
+    if not allowed_weathers:
+        allowed_weathers = list(preset["allowed_weathers"])
+
+    init_w = str(src.get("initial_weather") or preset["initial_weather"]).strip().lower()
+    if init_w not in allowed_weathers:
+        init_w = allowed_weathers[0]
+
+    ground_tile = _pick_walkable_tile(src.get("ground_tile"), str(preset["ground_tile"]))
+    road_tile = _pick_walkable_tile(src.get("road_tile"), str(preset["road_tile"]))
+    plaza_tile = _pick_walkable_tile(src.get("plaza_tile"), str(preset["plaza_tile"]))
+    accent_tile = _pick_walkable_tile(src.get("accent_tile"), str(preset["accent_tile"]))
+    border_tile = _pick_border_tile(src.get("border_tile"), str(preset["border_tile"]))
+    has_water = bool(src.get("has_water_feature", preset["has_water_feature"]))
+
+    zones_by_slot: dict[str, dict[str, str]] = {
+        slot: {"slot": slot, "name": zn, "description": zd}
+        for slot, (zn, zd) in preset["zones"].items()
+    }
+    if isinstance(src.get("zones"), list):
+        for z in src["zones"]:
+            if not isinstance(z, Mapping):
+                continue
+            slot = str(z.get("slot") or "").strip().lower()
+            if slot in zones_by_slot:
+                zones_by_slot[slot] = {
+                    "slot": slot,
+                    "name": clip_text(z.get("name"), 12, zones_by_slot[slot]["name"]),
+                    "description": clip_text(z.get("description"), 42, zones_by_slot[slot]["description"]),
+                }
+
+    raw_bldgs = [b for b in (src.get("buildings") or []) if isinstance(b, Mapping)]
+    target_n = max(3, min(8, int(building_count)))
+    quad_counts: dict[str, int] = {q: 0 for q in _QUADRANT_SLOTS}
+    sanitized_bldgs: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    def _pick_slot(preferred: str) -> str:
+        p = str(preferred or "").strip().lower()
+        if p in quad_counts and quad_counts[p] < 2:
+            return p
+        return min(_QUADRANT_SLOTS, key=lambda q: quad_counts[q])
+
+    def _add_clean_bldg(item: Mapping[str, Any], idx_hint: int) -> None:
+        raw_name = clip_text(item.get("name"), 16, f"建筑{idx_hint + 1}")
+        name = raw_name
+        suffix = 2
+        while name in seen_names:
+            name = clip_text(f"{raw_name[:10]}{suffix}", 16, f"建筑{idx_hint + suffix}")
+            suffix += 1
+        seen_names.add(name)
+
+        role = venue_semantics.normalize_venue_role(
+            item.get("role"), category=item.get("category"), name=name,
+        )
+        slot = _pick_slot(str(item.get("zone_slot") or _QUADRANT_SLOTS[idx_hint % 4]))
+        quad_counts[slot] += 1
+        int_pal = str(item.get("interior_palette") or palette_id).strip()
+        if int_pal not in _TOWN_PALETTES:
+            int_pal = palette_id
+        default_wall = "brick_wall" if role in ("home", "library", "arcade") else "wood_wall"
+        default_floor = "tatami" if (role == "home" and idx_hint % 2 == 1) else ("dark_wood" if role == "cafe" else "wood_floor")
+        sanitized_bldgs.append({
+            "name": name,
+            "role": role,
+            "category": venue_semantics.default_category_for_role(role),
+            "restock_profile": venue_semantics.restock_profile_for_building({"role": role, "name": name}),
+            "affordances": venue_semantics.building_affordance_hints({"role": role, "name": name}),
+            "zone_slot": slot,
+            "roof_color": _valid_hex(item.get("roof_color"), "#c9647a"),
+            "wall_tile": _pick_wall_tile(item.get("wall_tile"), default_wall),
+            "interior_floor_tile": _pick_walkable_tile(item.get("interior_floor_tile"), default_floor),
+            "interior_wall_tile": _pick_wall_tile(item.get("interior_wall_tile"), "wood_wall"),
+            "interior_palette": int_pal,
+            "interior_ambient": clip_text(item.get("interior_ambient"), 60, f"「{name}」的室内空间，推门可回到街道。"),
+            "icon": clip_text(item.get("icon"), 4, venue_semantics.default_icon_for_role(role)),
+            "note_text": clip_text(item.get("note_text"), 80, ""),
+        })
+
+    for idx, rb in enumerate(raw_bldgs[:target_n]):
+        _add_clean_bldg(rb, idx)
+
+    for idx, fb in enumerate(preset["buildings"]):
+        if len(sanitized_bldgs) >= target_n:
+            break
+        if fb["name"] in seen_names:
+            continue
+        _add_clean_bldg(fb, len(sanitized_bldgs) + idx)
+
+    if not any(b["role"] == "home" for b in sanitized_bldgs):
+        candidate = next((b for b in reversed(sanitized_bldgs) if not venue_semantics.is_food_building(b)), sanitized_bldgs[0])
+        candidate["role"] = "home"
+        candidate["category"] = "home"
+        candidate["restock_profile"] = ""
+        candidate["affordances"] = ["rest"]
+        candidate["icon"] = venue_semantics.default_icon_for_role("home")
+
+    if not any(venue_semantics.is_food_building(b) for b in sanitized_bldgs):
+        candidate = next((b for b in reversed(sanitized_bldgs) if b["role"] != "home"), sanitized_bldgs[-1])
+        candidate["role"] = "cafe"
+        candidate["category"] = "cafe"
+        candidate["restock_profile"] = "cafe"
+        candidate["affordances"] = ["social", "food"]
+        candidate["icon"] = venue_semantics.default_icon_for_role("cafe")
+
+    return {
+        "name": clip_text(src.get("name"), 16, str(preset["name"])),
+        "theme": theme,
+        "width": clamp_int(width, 28, 64, 40),
+        "height": clamp_int(height, 22, 48, 30),
+        "ambient_phrase": clip_text(src.get("ambient_phrase"), 60, str(preset["ambient_phrase"])),
+        "palette_id": palette_id,
+        "allowed_weathers": allowed_weathers,
+        "initial_weather": init_w,
+        "ground_tile": ground_tile,
+        "road_tile": road_tile,
+        "plaza_tile": plaza_tile,
+        "border_tile": border_tile,
+        "accent_tile": accent_tile,
+        "has_water_feature": has_water,
+        "zones": [zones_by_slot[s] for s in ("nw", "ne", "center", "sw", "se")],
+        "buildings": sanitized_bldgs,
+    }
+
+
+def _fallback_town_spec_from_text(prompt_text: str, width: int, height: int, building_count: int) -> dict[str, Any]:
+    theme = _detect_town_theme(prompt_text)
+    preset = _town_theme_preset(theme)
+    return _sanitize_town_spec(
+        preset,
+        width=width,
+        height=height,
+        building_count=building_count,
+        prompt_text=prompt_text,
+    )
+
+
+def compile_town_spec_from_text(
+    prompt_text: str,
+    *,
+    width: int = 40,
+    height: int = 30,
+    building_count: int = 6,
+    use_llm: bool = True,
+    adapter_provider: Callable[[], Any] | None = None,
+    timeout_sec: float = 18.0,
+) -> dict[str, Any]:
+    """根据一句自然语言描述编译分层城镇设计蓝本（语义归 LLM，几何与连通性交由算法确定性布局）。"""
+    clean_prompt = clip_text(prompt_text, 240, "一座温馨宁静的像素风格小镇")
+    tw = clamp_int(width, 28, 64, 40)
+    th = clamp_int(height, 22, 48, 30)
+    b_cnt = clamp_int(building_count, 3, 8, 6)
+
+    if use_llm:
+        user_msg = (
+            f"城镇设计需求：{clean_prompt}\n"
+            f"城镇规模参考：{tw}×{th}，建筑数量建议 {b_cnt} 栋（严禁输出任何 x/y 坐标）。\n"
+            "请严格只输出一个合法 JSON 对象。"
+        )
+        parsed = _ask_llm_json(
+            _TOWN_SYSTEM_PROMPT,
+            user_msg,
+            adapter_provider=adapter_provider,
+            timeout_sec=timeout_sec,
+            max_tokens=1600,
+        )
+        if isinstance(parsed, dict) and parsed.get("buildings"):
+            spec = _sanitize_town_spec(
+                parsed,
+                width=tw,
+                height=th,
+                building_count=b_cnt,
+                prompt_text=clean_prompt,
+            )
+            return {
+                "town_spec": spec,
+                "used_llm": True,
+                "note": f"已由大模型设计「{spec['name']}」的街区主题与 {len(spec['buildings'])} 栋建筑，程序已完成确定性路网与连通性生成。",
+            }
+
+    spec = _fallback_town_spec_from_text(clean_prompt, tw, th, b_cnt)
+    return {
+        "town_spec": spec,
+        "used_llm": False,
+        "note": f"未调用大模型，已按「{spec['name']}」主题模板确定性生成街区路网与 {len(spec['buildings'])} 栋可进入建筑。",
     }

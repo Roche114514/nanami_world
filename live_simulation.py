@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from . import persona_bridge, text_compiler
+from . import persona_bridge, text_compiler, weather
 from .schema import clamp_float, clip_text
 
 if TYPE_CHECKING:
@@ -470,6 +470,9 @@ class LiveSimulation:
             nonlocal walk_speed
             profile = (scene.get("percept") or {}).get("behavior_profile", {})
             walk_speed += 0.8 * (profile.get("arousal_baseline", 0.5) - 0.5)
+            if scene.get("space", {}).get("space_kind") == "town":
+                w_mod = weather.weather_cognitive_modifiers(scene.get("weather"), profile, is_outdoor=True)
+                walk_speed *= w_mod["outdoor_walk_speed_mult"]
             kwargs["stride"] = max(2, round(walk_speed * 0.8))
             path = self.engine.plan_actor_route(*args, **kwargs)
             if len(path) > 1:
@@ -665,10 +668,13 @@ class LiveSimulation:
         ) or "无"
         objs = ", ".join(f"{nm}({eid})" for eid, nm in (brief.get("objects") or {}).items()) or "无"
         choices = "; ".join(f"{g}[{d}]={u:.2f}" for g, d, u in (brief.get("choices") or ())) or "无"
+        extra_env = "｜".join(x for x in (brief.get("weather"), brief.get("routine")) if x)
+        env_line = f"\n天气与节律：{extra_env}" if extra_env else ""
         return (
             f"角色：{brief.get('name')}｜触发原因：{brief.get('reason')}｜当前目标：{brief.get('active_goal') or '无'}\n"
             f"刚才经历：{brief.get('experience') or '日常行进'}\n"
-            f"身体状态：精力={vit.get('energy', 0):.2f} 困意={vit.get('sleep_pressure', 0):.2f} 心情={vit.get('mood_v', 0):+.2f}\n"
+            f"身体状态：精力={vit.get('energy', 0):.2f} 困意={vit.get('sleep_pressure', 0):.2f} 心情={vit.get('mood_v', 0):+.2f}"
+            f"{env_line}\n"
             f"内驱力：{drv}\n"
             f"记得场所：{places}\n街区：{zones}\n记住的同伴：{peers}\n关注物件：{objs}\n候选行动：{choices}"
         )

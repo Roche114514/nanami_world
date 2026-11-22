@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
-from . import danganronpa_catalog, persona_bridge, projector, sprite_pack, text_compiler
+from . import danganronpa_catalog, persona_bridge, projector, schedule, sprite_pack, text_compiler
 from .cognitive_engine import cognitive_summary
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,7 @@ def _ok_with_snap(
                     actors_map={a["actor_id"]: a for a in (snap.get("actors") or [])},
                     custom_persona_dir=custom_persona_dir,
                     advance_exposure=0.0,
+                    weather=snap.get("weather"),
                 )
                 snap["active_l0"] = {
                     "enabled": bool(l0_now.get("enabled")),
@@ -88,15 +89,57 @@ def _ok_with_snap(
                     "stage_cn": str(l0_now.get("stage_cn") or ""),
                     "focused_names": list(l0_now.get("focused_names") or []),
                     "mental_map_count": int(l0_now.get("mental_map_count") or 0),
+                    "bio_hour": float(l0_now.get("bio_hour") or 12.0),
+                    "chronotype_offset": float(l0_now.get("chronotype_offset") or 0.0),
+                    "circadian_strength": float(l0_now.get("circadian_strength") or 0.75),
+                    "circadian_phase": str(l0_now.get("circadian_phase") or "daytime"),
                 }
+                if not act.get("is_player"):
+                    realm_sp = next((s for s in (snap.get("spaces") or ()) if s.get("space_id") == realm_sid), {})
+                    realm_buildings = realm_sp.get("buildings") or ()
+                    home_sid = str(act.get("resolved_home_space_id") or engine.get_actor_home_space(aid, eff_sid))
+                    sched = schedule.build_actor_schedule(
+                        act,
+                        l0_now.get("behavior_profile") or {},
+                        l0_now,
+                        realm_buildings,
+                        home_space_id=home_sid,
+                    )
+                    s_ctx = schedule.active_schedule_context(
+                        sched,
+                        float(l0_now.get("bio_hour", 12.0)),
+                        circadian_strength=float(sched.get("circadian_strength", 0.75)),
+                        effortful_control=float((l0_now.get("behavior_profile") or {}).get("effortful_control", 0.70)),
+                    )
+                    home_candidates = [
+                        {
+                            "space_id": str(b.get("interior_space_id") or ""),
+                            "name": str(b.get("name") or ""),
+                            "category": str(b.get("category") or ""),
+                            "icon": str(b.get("icon") or "🏠"),
+                        }
+                        for b in realm_buildings
+                        if str(b.get("interior_space_id") or "").strip()
+                    ]
+                    snap["active_schedule"] = {
+                        **sched,
+                        "active_slot_id": str((s_ctx.get("slot") or {}).get("slot_id") or ""),
+                        "bio_clock": str(s_ctx.get("bio_clock") or ""),
+                        "home_candidates": home_candidates,
+                    }
+                else:
+                    snap["active_schedule"] = {}
             except Exception:
                 snap["active_l0"] = {}
+                snap["active_schedule"] = {}
         else:
             snap["actor_relations"] = {}
             snap["active_l0"] = {}
+            snap["active_schedule"] = {}
     else:
         snap["actor_relations"] = {}
         snap["active_l0"] = {}
+        snap["active_schedule"] = {}
 
     terminal = projector.project_terminal_data(engine, aid, consume_diffs=False) if aid else {"text": "（尚未导入角色）", "anchors": []}
     chat_history = world_chat.get_history(aid, space_id=eff_sid) if (world_chat is not None and aid) else []
@@ -859,10 +902,16 @@ def register_pages(
                 extra["player_greeting"] = world_chat.pending_player_greeting(str(v.get("space_id") or ""))
         if not live:
             return {"ok": True, "live": {}, **extra}
-        version = "|".join(f"{row['actor_id']}:{row['world_revision']}" for row in [live, *live["peers"]]
-                           if row["space_id"] == live["space_id"])
-        live["world_version"] = version
         sid = live["space_id"]
+        cur_w = engine.get_weather(sid)
+        cur_lt = engine.get_lighting(sid)
+        version = "|".join([
+            *(f"{row['actor_id']}:{row['world_revision']}" for row in [live, *live["peers"]]
+              if row["space_id"] == sid),
+            f"w:{cur_w.get('transition_seq', 0)}",
+            f"p:{cur_lt.get('period', '')}:{'1' if cur_lt.get('is_dark') else '0'}",
+        ])
+        live["world_version"] = version
         out = {"ok": True, "live": live, **extra}
         if sid == v.get("space_id") and version != v.get("world_version"):
             out["changes"] = engine.live_space_changes(sid)
@@ -1019,6 +1068,65 @@ def register_pages(
             },
             space_id=applied["space"]["space_id"],
         )
+
+    def _act_generate_town(v: dict[str, Any]) -> dict[str, Any]:
+        _ensure_default_host_actor()
+        cfg = settings_store.get()
+        prompt_text = str(v.get("prompt_text") or "").strip()
+        w = int(v.get("width") or 40)
+        h = int(v.get("height") or 30)
+        b_cnt = int(v.get("building_count") or 6)
+        use_llm = bool(v.get("use_llm", cfg.auto_compile_llm))
+        place_actor = bool(v.get("place_actor", True))
+        req_aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id()
+        adapter_prov = getattr(world_chat, "_adapter_provider", None) if world_chat else None
+        compiled = text_compiler.compile_town_spec_from_text(
+            prompt_text,
+            width=w,
+            height=h,
+            building_count=b_cnt,
+            use_llm=use_llm,
+            adapter_provider=adapter_prov,
+        )
+        town = engine.generate_town(
+            compiled["town_spec"],
+            town_id=str(v.get("town_id") or "").strip(),
+            move_actor_id=req_aid if place_actor else "",
+        )
+        return _snap_ok(
+            {
+                "town": town,
+                "town_spec": compiled["town_spec"],
+                "used_llm": compiled["used_llm"],
+                "note": compiled["note"],
+            },
+            space_id=town["town_space_id"],
+        )
+
+    def _act_add_town_building(v: dict[str, Any]) -> dict[str, Any]:
+        req_sid = str(v.get("town_space_id") or v.get("space_id") or "").strip()
+        if not req_sid:
+            req_sid = str(engine.snapshot_for_ui().get("active_space_id") or "")
+        town_sid = engine.realm_space_id(req_sid) if hasattr(engine, "realm_space_id") else req_sid
+        res = engine.add_town_building(
+            town_sid,
+            name=str(v.get("name") or "").strip() or "新建筑",
+            role=str(v.get("role") or "public").strip(),
+            zone_id=str(v.get("zone_id") or "").strip(),
+            ext_w=int(v.get("ext_w") or 6),
+            ext_h=int(v.get("ext_h") or 5),
+            interior_ambient=str(v.get("interior_ambient") or "").strip(),
+            note_text=str(v.get("note_text") or "").strip(),
+        )
+        return _snap_ok({"building": res, "validation": res.get("validation")}, space_id=town_sid)
+
+    def _act_validate_town(v: dict[str, Any]) -> dict[str, Any]:
+        req_sid = str(v.get("town_space_id") or v.get("space_id") or "").strip()
+        if not req_sid:
+            req_sid = str(engine.snapshot_for_ui().get("active_space_id") or "")
+        town_sid = engine.realm_space_id(req_sid) if hasattr(engine, "realm_space_id") else req_sid
+        validation = engine.validate_town(town_sid)
+        return {"ok": True, "validation": validation}
 
     def _act_get_pixel_pack_status(_v: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, **sprite_pack.list_cache_status(engine.data_root)}
@@ -1186,6 +1294,21 @@ def register_pages(
         heartbeat.live.hold_for_user_chat(aid, 20.0)
         return {"ok": True, "greeting": greeting}
 
+    def _act_set_world_weather(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "")
+        mode = str(v.get("mode") or "auto")
+        w = engine.set_weather(sid, mode, intensity=v.get("intensity"))
+        return _snap_ok({"weather": w}, space_id=sid)
+
+    def _act_set_actor_home(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "")
+        aid = str(v.get("actor_id") or "").strip() or engine.resolve_actor_id(space_id=sid)
+        if not aid:
+            raise ValueError("当前没有可设置住处的角色。")
+        home_sid = str(v.get("home_space_id") or "")
+        resolved = engine.set_actor_home_space(aid, home_sid, realm_space_id=sid)
+        return _snap_ok({"home_space_id": resolved}, space_id=sid)
+
     action_specs: list[tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
         ("get_world_snapshot", "刷新世界快照", _act_get_snapshot),
         ("place_from_blueprint", "放入物品", _act_place_from_bp),
@@ -1235,12 +1358,17 @@ def register_pages(
         ("paint_tiles", "搭建或拆除地形方块", _act_paint_tiles),
         ("expand_space", "无限拓展地图边界", _act_expand_space),
         ("generate_world_map", "LLM 生成像素地图", _act_generate_world_map),
+        ("generate_town", "分层生成主题小镇", _act_generate_town),
+        ("add_town_building", "在城镇内加盖可进入建筑", _act_add_town_building),
+        ("validate_town", "校验城镇连通性与建筑布局", _act_validate_town),
         ("player_spawn", "生成或切换主控玩家小人", _act_player_spawn),
         ("player_move", "主控玩家单步移动", _act_player_move),
         ("player_interact", "主控玩家眼前交互", _act_player_interact),
         ("player_inventory", "主控背包、箱子与赠礼", _act_player_inventory),
         ("user_chat_presence", "同步玩家面对面交谈状态", _act_user_chat_presence),
         ("open_player_greeting", "接收角色的当面招呼", _act_open_player_greeting),
+        ("set_world_weather", "切换世界天气", _act_set_world_weather),
+        ("set_actor_home", "指派角色住处", _act_set_actor_home),
     ]
 
     actions = [

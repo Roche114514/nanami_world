@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import persona_bridge
+from . import persona_bridge, schedule
 from .cognitive_engine import cognitive_summary
 from .engine import WorldEngine, compute_lighting
 from .schema import TILE_CATALOG
@@ -215,12 +215,35 @@ def project_terminal_data(
                 seen_tids.add(tid)
                 terrain_names.append(str(TILE_CATALOG[tid]["name"]))
 
+    w_view = snap.get("weather") or engine.get_weather(sid)
+    w_desc = str(w_view.get("description") or "").strip()
+    w_part = f"，{w_desc}" if w_desc else ""
     posture_cn = "正躺着休息" if actor.get("posture") == "resting" else "站着"
     lines: list[str] = [
         "【世界现实】（以下是你此刻所在文字世界的客观事实，严禁编造或使用清单之外的物品；这不是任务清单，不必每句都刻意报幕）",
-        f"- 空间：{space['name']}（{space['width']}×{space['height']}，{lighting['clock']} {period_cn}，{light_cn}）｜你在 ({actor['x']}, {actor['y']}) {posture_cn}［脚下：{underfoot['name']}］",
+        f"- 空间：{space['name']}（{space['width']}×{space['height']}，{lighting['clock']} {period_cn}，{light_cn}{w_part}）｜你在 ({actor['x']}, {actor['y']}) {posture_cn}［脚下：{underfoot['name']}］",
         f"- 环境底色：{space['ambient_phrase']}",
     ]
+    if not actor.get("is_player"):
+        l0_cfg = persona_bridge.read_world_perception_config(engine.project_root, actor_host)
+        bp = persona_bridge.read_persona_behavior_profile(engine.project_root, actor_host)
+        realm_buildings = next(
+            (s.get("buildings") or () for s in (snap.get("spaces") or ()) if s.get("space_id") == realm_sid),
+            (),
+        )
+        home_sid = engine.get_actor_home_space(actor_id, sid)
+        sched = schedule.build_actor_schedule(actor, bp, l0_cfg, realm_buildings, home_space_id=home_sid)
+        hour_f = float(lighting.get("hour_float", lighting.get("hour", 12.0)))
+        chrono = float(l0_cfg.get("chronotype_offset") or 0.0) if l0_cfg.get("enabled", True) else 0.0
+        sched_ctx = schedule.active_schedule_context(
+            sched,
+            (hour_f - chrono) % 24.0,
+            circadian_strength=float(l0_cfg.get("circadian_strength", 0.75)),
+            effortful_control=float(bp.get("effortful_control", 0.70)),
+        )
+        home_txt = f"｜住处：「{sched['home_name']}」" if sched.get("home_name") else ""
+        if sched_ctx.get("prompt_line"):
+            lines.append(f"- 节律与作息：{sched_ctx['prompt_line']}{home_txt}")
     parent_sp = snap.get("parent_space")
     cur_zone = snap.get("current_zone")
     if isinstance(parent_sp, dict) and parent_sp.get("name"):
@@ -235,6 +258,12 @@ def project_terminal_data(
         lines.append("- 眼前/视线内的人物（可直接走近或搭话，用 world_approach / world_talk 填方括号 ID）：")
         lines.extend(other_actor_lines)
     aut = actor.get("autonomy") if isinstance(actor.get("autonomy"), dict) else {}
+    if not actor.get("is_player"):
+        hunger_val = float(aut.get("hunger", 0.30))
+        if hunger_val >= 0.85:
+            lines.append("- 身体体感：肚子很饿，想找点吃的")
+        elif hunger_val >= 0.65:
+            lines.append("- 身体体感：有点饿了")
     if aut.get("current_goal") or aut.get("last_action_summary"):
         aut_parts = [f"当前想「{aut.get('current_goal') or '四处打量'}」"]
         if aut.get("last_action_summary"):

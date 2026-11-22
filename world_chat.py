@@ -977,6 +977,7 @@ class WorldChatService:
             actors_map={a["actor_id"]: a for a in (sp_snap_chat.get("actors") or [])},
             custom_persona_dir=custom_pdir,
             advance_exposure=0.05,
+            weather=sp_snap_chat.get("weather"),
         )
         l0_block = l0_frame["prompt_block"] + "\n\n" if l0_frame.get("enabled") else ""
 
@@ -1360,12 +1361,14 @@ class WorldChatService:
             if not scene or scene["space"]["space_id"] != sid:
                 return {"turns": [], "used_llm": False}
             sp_meta, light_meta, vis_a = scene["space"], scene["lighting"], scene["visible"]
+            weather_now = scene.get("weather")
             view_a = f"两人在「{sp_meta['name']}」近距离碰面。"
         else:
             view_a = projector.project_view(self._engine, initiator_id, consume_diffs=False)
             sp_snap = self._engine.snapshot_for_ui(sid)
             sp_meta = sp_snap.get("space") or {}
             light_meta = sp_snap.get("lighting") or {}
+            weather_now = sp_snap.get("weather")
             vis_a = self._engine.visible_entities(initiator_id)
         actors_map_now = {a["actor_id"]: a for a in actors if a.get("space_id") == sid}
         vis_b = self._engine.visible_entities(target_actor_id)
@@ -1380,6 +1383,7 @@ class WorldChatService:
             custom_persona_dir=custom_pdir,
             peer_known=not first_meet,
             advance_exposure=0.12,
+            weather=weather_now,
         )
         l0_b = persona_bridge.build_percept_frame(
             self._engine.data_root,
@@ -1392,6 +1396,7 @@ class WorldChatService:
             custom_persona_dir=custom_pdir,
             peer_known=not first_meet,
             advance_exposure=0.12,
+            weather=weather_now,
         )
         action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in vis_a[:16]) or "无"
         room_clean_nouns = "、".join(dict.fromkeys((l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]])) or "空房间"
@@ -1449,8 +1454,10 @@ class WorldChatService:
                 budget += 1
             if min(e_a, e_b) < 0.24 or max(s_a, s_b) > 0.80:
                 budget = 1
-            elif min(e_a, e_b) < 0.34 or max(s_a, s_b) > 0.70 or max(h_a, h_b) > 0.78:
+            elif min(e_a, e_b) < 0.34 or max(s_a, s_b) > 0.70:
                 budget = min(budget - 2, 2)
+            elif max(h_a, h_b) >= 0.90:
+                budget = max(2, budget - 1)
             if st_a in ("guarded", "cold") or st_b in ("guarded", "cold") or rep_max >= 0.50:
                 budget = min(budget - 1, 2)
             budget = max(1, min(6, budget))
@@ -1463,7 +1470,9 @@ class WorldChatService:
                     tags.append("精力充沛")
                 else:
                     tags.append("状态平稳")
-                if h > 0.72:
+                if h >= 0.85:
+                    tags.append("肚子很饿")
+                elif h >= 0.65:
                     tags.append("有点饿")
                 if m >= 0.30:
                     tags.append("心情很好")
@@ -1758,7 +1767,15 @@ class WorldChatService:
                     if pname and pname in joined_lines:
                         collected_sa = dict(collected_sa or {})
                         collected_sa["shared_place_id"] = pid
-                        collected_sa.setdefault("shared_drive", "social")
+                        inferred_drive = (
+                            "food"
+                            if any(
+                                kw in joined_lines
+                                for kw in ("热饮", "喝杯", "喝茶", "咖啡", "吃点东西", "吃东西", "拉面", "蛋糕", "点心", "甜品")
+                            )
+                            else "social"
+                        )
+                        collected_sa.setdefault("shared_drive", inferred_drive)
                         break
 
         speech_act_pair = _build_speech_act_pair(

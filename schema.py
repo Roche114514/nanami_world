@@ -10,6 +10,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from . import venue_semantics
+
 VALID_TRAITS: tuple[str, ...] = (
     "portable",
     "surface",
@@ -523,13 +525,16 @@ def normalize_effects(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     src = raw if isinstance(raw, Mapping) else {}
     sat = [clip_text(x, 16, "") for x in (src.get("satisfies") or []) if clip_text(x, 16, "")]
     domain = src.get("domain")
-    return {
+    out = {
         "energy_delta": clamp_float(src.get("energy_delta"), -0.5, 0.5, 0.0),
         "sleep_pressure_delta": clamp_float(src.get("sleep_pressure_delta"), -0.5, 0.5, 0.0),
         "mood_v_delta": clamp_float(src.get("mood_v_delta"), -0.5, 0.5, 0.02),
         "satisfies": sat[:6],
         "domain": clip_text(domain, 24, "") or None,
     }
+    if src.get("hunger_delta") is not None:
+        out["hunger_delta"] = round(clamp_float(src.get("hunger_delta"), -1.0, 0.5, 0.0), 3)
+    return out
 
 
 def normalize_combine_rules(raw: Any) -> list[dict[str, Any]]:
@@ -684,6 +689,23 @@ def normalize_buildings(raw: Any, width: int, height: int) -> list[dict[str, Any
         h = clamp_int(item.get("h"), 1, max_h - y, 1)
         door_x = clamp_int(item.get("door_x"), 0, max_w - 1, x)
         door_y = clamp_int(item.get("door_y"), 0, max_h - 1, min(max_h - 1, y + h - 1))
+        category = clip_text(item.get("category"), 16, "house")
+        role = venue_semantics.normalize_venue_role(item.get("role"), category=category, name=name)
+        raw_restock = str(item.get("restock_profile") or "").strip().lower()
+        if "restock_profile" in item and raw_restock in venue_semantics.VALID_RESTOCK_PROFILES:
+            restock_profile = raw_restock
+        else:
+            restock_profile = venue_semantics.restock_profile_for_building(
+                {"role": role, "category": category, "name": name}
+            )
+        affordances = venue_semantics.building_affordance_hints(
+            {
+                "role": role,
+                "category": category,
+                "name": name,
+                "affordances": item.get("affordances"),
+            }
+        )
         out.append({
             "building_id": bid,
             "name": name,
@@ -696,8 +718,11 @@ def normalize_buildings(raw: Any, width: int, height: int) -> list[dict[str, Any
             "door_y": door_y,
             "roof_color": _hex_color(item.get("roof_color"), "#a85646"),
             "interior_space_id": str(item.get("interior_space_id") or "").strip(),
-            "category": clip_text(item.get("category"), 16, "house"),
-            "icon": clip_text(item.get("icon"), 4, "🏠"),
+            "category": category,
+            "role": role,
+            "restock_profile": restock_profile,
+            "affordances": affordances,
+            "icon": clip_text(item.get("icon"), 4, venue_semantics.default_icon_for_role(role)),
         })
     return out
 
@@ -1019,6 +1044,18 @@ def normalize_last_act(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_home_spaces(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in list(raw.items())[:32]:
+        realm_id = str(k or "").strip()
+        home_id = str(v or "").strip()
+        if realm_id and home_id:
+            out[realm_id] = home_id
+    return out
+
+
 def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     name = clip_text(raw.get("name"), 20, "七海千秋")
     aid = str(raw.get("actor_id") or "").strip() or slugify(name, prefix="actor")
@@ -1088,6 +1125,7 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         },
         "vitals": vitals,
         "autonomy": autonomy,
+        "home_spaces": _normalize_home_spaces(raw.get("home_spaces")),
         "world_states": world_states,
     }
 

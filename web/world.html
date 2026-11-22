@@ -512,9 +512,11 @@
     <span class="brand">◈ NANAMI_WORLD · 世界大厅</span>
     <span class="pill" id="hub-world-count">0 个世界</span>
     <span class="pill" id="hub-light-pill"><span class="dot" id="hub-light-dot"></span><span id="hub-light-text">12:00 白天</span></span>
+    <span class="pill" id="hub-weather-pill">☀️ 晴朗</span>
     <div class="spacer"></div>
     <button class="px-btn" id="btn-hub-import-actor">👤 导入角色</button>
     <button class="px-btn primary" id="btn-hub-default-town">🏘️ 创建默认示范小镇</button>
+    <button class="px-btn" id="btn-hub-gen-town">🏙️ 生成主题小镇</button>
     <button class="px-btn" id="btn-hub-gen-world">🗺️ LLM 生成新世界</button>
     <button class="px-btn" id="btn-hub-new-world">➕ 新建空白世界</button>
     <button class="px-btn" id="btn-hub-popout" title="在独立浏览器窗口中打开世界大厅">↗ 独立窗口</button>
@@ -535,6 +537,7 @@
     <button class="px-btn" id="btn-go-hub" title="返回世界选择大厅">🌍 世界列表</button>
     <span class="brand" id="cur-world-title">◈ NANAMI_WORLD</span>
     <span class="pill" id="pill-light"><span class="dot" id="light-dot"></span><span id="light-text">12:00 白天</span></span>
+    <button class="px-btn" id="btn-weather-pill" title="查看或切换当前区域天气与环境雨声">☀️ 晴朗</button>
     <button class="px-btn" id="btn-popout-world" title="在独立窗口中打开当前世界">↗ 独立窗口</button>
     <button class="px-btn" id="btn-stage-fullscreen" title="全屏查看世界画布（Esc 退出）">⛶ 全屏</button>
 
@@ -752,6 +755,16 @@
           <div id="cognitive-error" class="muted" style="margin-top:4px;font-size:11px;"></div>
         </div>
 
+        <div id="schedule-status" class="sec-box hidden">
+          <div class="sec-title"><span>昼夜节律与作息</span><span id="sched-chrono" style="color:var(--accent-2);font-size:10px;"></span></div>
+          <div id="sched-bio-line" style="font-size:11px;color:var(--muted);font-family:var(--px-font);margin-bottom:6px;"></div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px;">
+            <span style="font-size:11px;color:var(--muted);white-space:nowrap;">住处归属</span>
+            <select id="sched-home-select" class="px-sel" style="flex:1 1 auto;min-width:0;font-size:11px;padding:2px 6px;"></select>
+          </div>
+          <div id="sched-slots-list" style="display:flex;flex-direction:column;gap:4px;"></div>
+        </div>
+
         <div class="sec-box">
           <div class="sec-title"><span>💞 态度与情感指针（本世界独立）</span><span id="rel-count-label">0</span></div>
           <div id="actor-relations-list" style="display:flex;flex-direction:column;gap:5px;max-height:210px;overflow:auto;"></div>
@@ -803,6 +816,8 @@ const state = {
   greetingOpening: false,
   greetingAwaitingInput: false,
   soundEnabled: localStorage.getItem("nanami_world_sound") !== "0",
+  rainSoundEnabled: localStorage.getItem("nanami_world_rain_sound") !== "0",
+  _weatherRafPhase: 0,
   playerId: "player_avatar",
   playerPrompt: { kind: "", target_id: "", name: "", label: "" },
   playerInventory: null,
@@ -838,6 +853,10 @@ const SoundFX = (() => {
   let ctx = null;
   let lastStepAt = 0;
   let lastTalkAt = 0;
+  let rainBuf = null;
+  let rainSrc = null;
+  let rainFilter = null;
+  let rainGain = null;
   const ensure = () => {
     if (!state.soundEnabled) return null;
     try {
@@ -851,6 +870,16 @@ const SoundFX = (() => {
     } catch {
       return null;
     }
+  };
+  const stopRain = () => {
+    try {
+      if (rainGain && ctx) rainGain.gain.setTargetAtTime(0, ctx.currentTime, 0.06);
+      if (rainSrc) {
+        const old = rainSrc;
+        rainSrc = null;
+        setTimeout(() => { try { old.stop(); old.disconnect(); } catch {} }, 180);
+      }
+    } catch {}
   };
   const tone = (freq, dur, type = "square", vol = 0.05, slideTo = 0, delay = 0) => {
     const c = ensure();
@@ -898,6 +927,42 @@ const SoundFX = (() => {
       const base = 420 + ((String(seedStr).charCodeAt(0) || 0) % 5) * 45;
       tone(base, 0.045, "square", 0.03, base * 1.12, 0);
       tone(base * 1.18, 0.04, "square", 0.025, base * 1.25, 0.045);
+    },
+    syncWeather(code, isOutdoor) {
+      if (code !== "rain" || !state.soundEnabled || !state.rainSoundEnabled) {
+        stopRain();
+        return;
+      }
+      const c = ensure();
+      if (!c) return;
+      try {
+        if (!rainBuf) {
+          const len = Math.floor(c.sampleRate * 2);
+          rainBuf = c.createBuffer(1, len, c.sampleRate);
+          const data = rainBuf.getChannelData(0);
+          let last = 0;
+          for (let i = 0; i < len; i++) {
+            const w = Math.random() * 2 - 1;
+            last = (last + 0.04 * w) / 1.04;
+            data[i] = last * 2.2;
+          }
+        }
+        if (!rainSrc) {
+          rainSrc = c.createBufferSource();
+          rainSrc.buffer = rainBuf;
+          rainSrc.loop = true;
+          rainFilter = c.createBiquadFilter();
+          rainFilter.type = "lowpass";
+          rainGain = c.createGain();
+          rainGain.gain.setValueAtTime(0, c.currentTime);
+          rainSrc.connect(rainFilter);
+          rainFilter.connect(rainGain);
+          rainGain.connect(c.destination);
+          rainSrc.start();
+        }
+        rainFilter.frequency.setTargetAtTime(isOutdoor ? 850 : 420, c.currentTime, 0.12);
+        rainGain.gain.setTargetAtTime(isOutdoor ? 0.012 : 0.005, c.currentTime, 0.12);
+      } catch {}
     },
   };
 })();
@@ -949,6 +1014,7 @@ function renderViewShell() {
     document.title = state.snap.space.name + " · 七海千秋";
   } else {
     document.title = "世界大厅 · 七海千秋";
+    SoundFX.syncWeather("clear", false);
   }
 
   const isRoam = state.uiMode === "roam";
@@ -2609,6 +2675,67 @@ function pdDrawIcon(ctx, cx, topY, icon) {
   ctx.restore();
 }
 
+function drawWeatherOverlay(ctx, W, H, wCode, intensity, nowMs) {
+  ctx.save();
+  const scale = Math.max(0.35, Math.min(1.0, intensity || 0.5));
+  if (wCode === "cloudy") {
+    ctx.fillStyle = "rgba(205, 218, 236, 0.08)";
+    for (let i = 0; i < 3; i++) {
+      const bw = Math.round(W * 0.32);
+      const bh = Math.round(H * 0.14);
+      const bx = ((i * 397 + nowMs * 0.014) % (W + bw)) - bw;
+      const by = Math.round(H * (0.14 + i * 0.28));
+      ctx.fillRect(bx, by, bw, bh);
+    }
+    ctx.restore();
+    return;
+  }
+  if (wCode === "rain") {
+    const count = Math.round(28 + 22 * scale);
+    ctx.strokeStyle = "rgba(176, 216, 255, 0.42)";
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < count; i++) {
+      const sx = (i * 173 + 29) % W;
+      const sy = (i * 251 + nowMs * (0.28 + (i % 4) * 0.04)) % H;
+      const x0 = (sx - (sy * 0.18) % W + W) % W;
+      ctx.beginPath();
+      ctx.moveTo(x0, sy);
+      ctx.lineTo(x0 - 4, sy + 11);
+      ctx.stroke();
+      if ((i + Math.floor(nowMs / 160)) % 9 === 0) {
+        ctx.fillStyle = "rgba(200, 232, 255, 0.35)";
+        ctx.fillRect(x0 - 6, sy + 12, 4, 1);
+      }
+    }
+    ctx.restore();
+    return;
+  }
+  if (wCode === "sakura") {
+    const count = Math.round(14 + 12 * scale);
+    for (let i = 0; i < count; i++) {
+      const t = nowMs * 0.001 + i * 1.37;
+      const px = ((i * 197 + nowMs * 0.025 + Math.sin(t) * 18) % W + W) % W;
+      const py = ((i * 131 + nowMs * 0.038) % H + H) % H;
+      ctx.fillStyle = i % 2 === 0 ? "rgba(255, 182, 208, 0.85)" : "rgba(255, 214, 230, 0.80)";
+      ctx.fillRect(Math.round(px), Math.round(py), 4, 3);
+    }
+    ctx.restore();
+    return;
+  }
+  if (wCode === "snow") {
+    const count = Math.round(20 + 18 * scale);
+    ctx.fillStyle = "rgba(240, 248, 255, 0.82)";
+    for (let i = 0; i < count; i++) {
+      const t = nowMs * 0.001 + i * 0.91;
+      const sx = ((i * 163 + Math.sin(t) * 14) % W + W) % W;
+      const sy = ((i * 199 + nowMs * (0.028 + (i % 3) * 0.01)) % H + H) % H;
+      const sz = i % 3 === 0 ? 3 : 2;
+      ctx.fillRect(Math.round(sx), Math.round(sy), sz, sz);
+    }
+  }
+  ctx.restore();
+}
+
 function renderViewport() {
   const snap = state.snap;
   if (!snap) return;
@@ -2648,9 +2775,11 @@ function renderViewport() {
   const buildingsList = Array.isArray(space.buildings) ? space.buildings : [];
   const previous = state.terrainCache;
   const period = lighting.period || "day";
-  const cacheKey = previous?.space === space && previous?.palette === pal && previous?.period === period ? previous.key : [
+  const wData = snap.weather || {};
+  const wCode = wData.current || "clear";
+  const cacheKey = previous?.space === space && previous?.palette === pal && previous?.period === period && previous?.weatherCode === wCode ? previous.key : [
     space.space_id, cols, rows, wallRows, space.space_kind || "room",
-    pal.palette_id || "", period,
+    pal.palette_id || "", period, wCode,
     JSON.stringify(spaceTiles), JSON.stringify(zonesList), JSON.stringify(buildingsList),
   ].join("|");
   if (!state.terrainCache || state.terrainCache.key !== cacheKey || !state.terrainCache.canvas) {
@@ -2697,19 +2826,46 @@ function renderViewport() {
       if (winTileA.meta.is_wall && winTileB.meta.is_wall) {
         const winX = winCellX * TILE;
         const skyMap = { dawn: "#e89f8e", day: "#89cff0", dusk: "#c97968", night: "#1c2447" };
+        let winSky = skyMap[lighting.period] || "#89cff0";
+        if (lighting.period !== "night") {
+          if (wCode === "rain") winSky = "#5c6f8c";
+          else if (wCode === "cloudy") winSky = "#8c9bb0";
+          else if (wCode === "snow") winSky = "#9eb3cc";
+        }
         octx.fillStyle = pal.sprite_base.outline || "#21181b";
         octx.fillRect(winX + 4, 4, TILE * 2 - 8, TILE - 10);
-        octx.fillStyle = skyMap[lighting.period] || "#89cff0";
+        octx.fillStyle = winSky;
         octx.fillRect(winX + 8, 8, TILE * 2 - 16, TILE - 18);
         if (lighting.period === "night") {
           octx.fillStyle = "#fff5b8";
           octx.fillRect(winX + 16, 14, 3, 3);
           octx.fillRect(winX + 44, 18, 3, 3);
           octx.fillRect(winX + 64, 12, 4, 4);
-        } else {
+        } else if (wCode === "clear" || wCode === "sakura") {
           octx.fillStyle = "rgba(255,255,255,0.65)";
           octx.fillRect(winX + 16, 13, 18, 5);
           octx.fillRect(winX + 48, 16, 14, 4);
+        }
+        if (wCode === "rain") {
+          octx.strokeStyle = "rgba(190, 224, 255, 0.75)";
+          octx.lineWidth = 1.2;
+          for (let ri = 0; ri < 5; ri++) {
+            const rx = winX + 14 + ri * 14;
+            octx.beginPath();
+            octx.moveTo(rx, 11);
+            octx.lineTo(rx - 4, 24);
+            octx.stroke();
+          }
+        } else if (wCode === "snow") {
+          octx.fillStyle = "#eef6ff";
+          for (const [sx, sy] of [[16, 13], [30, 22], [54, 15], [68, 24]]) {
+            octx.fillRect(winX + sx, sy, 2, 2);
+          }
+        } else if (wCode === "sakura") {
+          octx.fillStyle = "#ffb6cf";
+          for (const [sx, sy] of [[18, 15], [56, 20], [66, 12]]) {
+            octx.fillRect(winX + sx, sy, 3, 2);
+          }
         }
         octx.fillStyle = pal.sprite_base.outline || "#21181b";
         octx.fillRect(winX + TILE - 2, 6, 4, TILE - 14);
@@ -2773,7 +2929,7 @@ function renderViewport() {
       octx.fillText(signText, sx + sw / 2, sy + 9);
       octx.restore();
     }
-    state.terrainCache = { key: cacheKey, canvas: off, space, palette: pal, period };
+    state.terrainCache = { key: cacheKey, canvas: off, space, palette: pal, period, weatherCode: wCode };
   }
   ctx.drawImage(state.terrainCache.canvas, 0, 0);
 
@@ -3002,7 +3158,7 @@ function renderViewport() {
     }
   }
 
-  // 4. 夜晚光影暗罩与台灯暖光圈
+  // 4. 夜晚光影暗罩与台灯暖光圈 + 轻天气粒子
   if (lighting.is_dark) {
     ctx.fillStyle = pal.room.night_mask || "rgba(14, 18, 42, 0.48)";
     ctx.fillRect(0, 0, W, H);
@@ -3015,6 +3171,15 @@ function renderViewport() {
       grad.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
+    }
+  }
+  if (space.space_kind === "town") {
+    if (wData.day_tint && period !== "night") {
+      ctx.fillStyle = wData.day_tint;
+      ctx.fillRect(0, 0, W, H);
+    }
+    if (wCode === "rain" || wCode === "sakura" || wCode === "snow" || wCode === "cloudy") {
+      drawWeatherOverlay(ctx, W, H, wCode, Number(wData.intensity || 0.5), nowMs);
     }
   }
 
@@ -3325,6 +3490,9 @@ function renderWorldHub() {
   const pMap = { dawn: "清晨", day: "白天", dusk: "傍晚", night: "夜晚" };
   el("hub-light-dot").className = "dot" + (lt.is_dark ? " dark" : "");
   el("hub-light-text").textContent = (lt.clock || "12:00") + " " + (pMap[lt.period] || "白天");
+  const hw = snap.weather || {};
+  const hubWPill = el("hub-weather-pill");
+  if (hubWPill) hubWPill.textContent = (hw.icon || "☀️") + " " + (hw.label || "晴朗");
 
   const actors = snap.actors || [];
   el("hub-actor-summary").textContent = actors.length
@@ -3451,6 +3619,14 @@ function renderTopbar() {
   const pMap = { dawn: "清晨", day: "白天", dusk: "傍晚", night: "夜晚" };
   el("light-dot").className = "dot" + (lt.is_dark ? " dark" : "");
   el("light-text").textContent = (lt.clock || "12:00") + " " + (pMap[lt.period] || "白天") + (lt.is_dark ? " · 暗" : "");
+  const wInfo = snap.weather || {};
+  const wBtn = el("btn-weather-pill");
+  if (wBtn) {
+    const lockTag = wInfo.mode && wInfo.mode !== "auto" ? "·锁" : "";
+    wBtn.textContent = (wInfo.icon || "☀️") + " " + (wInfo.label || "晴朗") + lockTag;
+    wBtn.title = (wInfo.description || "天气晴朗") + "（点击切换天气或雨声）";
+  }
+  SoundFX.syncWeather(wInfo.current || "clear", (sp.space_kind || "room") === "town");
 
   const sel = el("actor-select");
   sel.innerHTML = "";
@@ -3786,6 +3962,70 @@ function renderCognitiveStatus(cognition) {
   el("cognitive-error").textContent = cognition.prediction_error || "";
 }
 
+function renderScheduleStatus(act, sched) {
+  const box = el("schedule-status");
+  if (!box) return;
+  const slots = Array.isArray(sched?.slots) ? sched.slots : [];
+  if (!act || act.is_player || !slots.length) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  el("sched-chrono").textContent = sched.chronotype_label || "标准时型";
+  const cStr = Number(sched.circadian_strength ?? 0.75).toFixed(2);
+  el("sched-bio-line").textContent = "生理时钟 " + (sched.bio_clock || "12:00") + " · 节律强度 " + cStr;
+
+  const sel = el("sched-home-select");
+  if (sel) {
+    sel.innerHTML = "";
+    const autoOpt = document.createElement("option");
+    autoOpt.value = "";
+    const hasCustom = Boolean(act.home_spaces && state.snap && act.home_spaces[state.snap.realm_space_id || state.snap.space?.space_id]);
+    autoOpt.textContent = "自动分配" + (!hasCustom && sched.home_name ? ("（" + sched.home_name + "）") : "");
+    sel.appendChild(autoOpt);
+    const cands = Array.isArray(sched.home_candidates) ? sched.home_candidates : [];
+    for (const c of cands) {
+      const opt = document.createElement("option");
+      opt.value = c.space_id;
+      opt.textContent = (c.icon || "🏠") + " " + c.name;
+      if (hasCustom && c.space_id === sched.home_space_id) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.disabled = cands.length === 0;
+    sel.onchange = () => {
+      const sid = state.snap?.space?.space_id || "";
+      runAction("set_actor_home", { actor_id: act.actor_id, space_id: sid, home_space_id: sel.value })
+        .then(() => toast("已更新「" + act.name + "」的住处归属"))
+        .catch((e) => toast(e.message, true));
+    };
+  }
+
+  const list = el("sched-slots-list");
+  if (list) {
+    list.replaceChildren();
+    for (const s of slots) {
+      const row = document.createElement("div");
+      const active = s.slot_id && s.slot_id === sched.active_slot_id;
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 6px;font-size:11px;border:1px solid "
+        + (active ? "var(--accent)" : "var(--border)") + ";background:" + (active ? "#2d2133" : "var(--panel-2)") + ";";
+      const left = document.createElement("span");
+      left.style.fontFamily = "var(--px-font)";
+      left.style.color = active ? "var(--accent)" : "var(--muted)";
+      left.textContent = (s.display_start || "00:00") + "–" + (s.display_end || "00:00");
+      const mid = document.createElement("span");
+      mid.style.flex = "1 1 auto";
+      mid.style.color = active ? "var(--text)" : "var(--muted)";
+      mid.textContent = (active ? "▶ " : "") + (s.label || "");
+      const right = document.createElement("span");
+      right.style.fontSize = "10px";
+      right.style.color = active ? "var(--accent-2)" : "var(--muted)";
+      right.textContent = s.preferred_place_name || (s.preferred_domains || []).slice(0, 1).join("");
+      row.append(left, mid, right);
+      list.appendChild(row);
+    }
+  }
+}
+
 function renderStatusPanel() {
   const snap = state.snap;
   const act = snap.actors.find((a) => a.actor_id === snap.active_actor_id);
@@ -3828,6 +4068,7 @@ function renderStatusPanel() {
   }
 
   renderCognitiveStatus(act && snap.active_cognition);
+  renderScheduleStatus(act, snap.active_schedule);
   const relBox = el("actor-relations-list");
   if (relBox) {
     const relMap = snap.actor_relations || {};
@@ -5662,15 +5903,146 @@ function openGenerateMapModal(defaultMode) {
   });
 }
 
+function openGenerateTownModal() {
+  const presets = [
+    ["🌊 汐风海港镇", "海风轻拂的渔港与金沙海湾小镇，有海景咖啡馆、港口民宿、二手书屋和灯塔会馆"],
+    ["❄️ 雪见温泉街", "细雪轻落的冬日温泉小镇，有榻榻米汤宿旅馆、热茶拉面屋、松风书斋与暖炉食亭"],
+    ["🌃 星海霓虹商业镇", "霓虹闪烁的都市夜景商业街区，有星海公寓、深夜便利店、夜光咖啡吧和大型电玩中心"],
+    ["🌲 林间学院镇", "绿树与花径环绕的学院小镇，有红砖宿舍楼、校庭咖啡馆、林间图书馆与美术活动室"],
+  ];
+  const presetHtml = presets.map(([lbl], idx) => '<button type="button" class="px-btn town-preset-btn" data-tidx="' + idx + '" style="font-size:11px;padding:3px 7px;">' + esc(lbl) + "</button>").join("");
+
+  showModal("🏙️ 分层生成全新主题小镇",
+    '<div class="form-grid">'
+    + '<div class="field full"><label>快速小镇主题（点击填入）</label><div style="display:flex;flex-wrap:wrap;gap:6px;">' + presetHtml + "</div></div>"
+    + '<div class="field full"><label>小镇氛围与建筑需求（语义由模型或主题模板策划，道路与门洞连通由程序严格生成）</label><textarea class="px-txt" id="town-gen-prompt" rows="3" maxlength="240" placeholder="如：一座飘雪的温泉小镇，有旅馆、茶屋、书斋和杂货店。">' + esc(presets[0][1]) + "</textarea></div>"
+    + '<div class="field"><label>城镇规模</label><select class="px-sel" id="town-gen-size"><option value="32x24">32×24（精致小镇）</option><option value="40x30" selected>40×30（标准小镇）</option><option value="48x36">48×36（宽阔大镇）</option></select></div>'
+    + '<div class="field"><label>初始建筑数量</label><select class="px-sel" id="town-gen-count"><option value="4">4 栋</option><option value="6" selected>6 栋</option><option value="8">8 栋</option></select></div>'
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "开始生成小镇",
+        cls: "primary",
+        onClick: (btn) => {
+          const prompt = el("town-gen-prompt").value.trim();
+          if (!prompt) return toast("请输入小镇设定描述", true);
+          const [wStr, hStr] = String(el("town-gen-size").value || "40x30").split("x");
+          const bCount = Number(el("town-gen-count").value || 6);
+          btn.disabled = true;
+          btn.textContent = "规划街区与建筑中...";
+          runAction("generate_town", {
+            prompt_text: prompt,
+            width: Number(wStr || 40),
+            height: Number(hStr || 30),
+            building_count: bCount,
+            place_actor: true,
+          }).then((res) => {
+            closeModal();
+            const tw = res.town || {};
+            const newSid = tw.town_space_id || (res.snapshot && res.snapshot.space && res.snapshot.space.space_id) || "";
+            if (newSid) {
+              state.selectedEntityId = "";
+              state.selectedBlueprintId = "";
+              state.windowSpaceId = newSid;
+              state.view = "world";
+              renderViewShell();
+              if (state.uiMode === "roam") {
+                runAction("player_spawn", { space_id: newSid }).then((pRes) => {
+                  applyPlayerInventory(pRes.inventory);
+                  setTimeout(() => focusActiveActor(), 100);
+                }).catch(() => {});
+              } else {
+                setTimeout(() => focusActiveActor(), 100);
+              }
+            }
+            const bNum = Array.isArray(tw.buildings) ? tw.buildings.length : 0;
+            toast((res.note || ("已生成「" + (tw.name || "主题小镇") + "」")) + "（共 " + bNum + " 栋可进入建筑）");
+          }).catch((e) => {
+            btn.disabled = false;
+            btn.textContent = "开始生成小镇";
+            toast(e.message, true);
+          });
+        },
+      },
+    ]);
+
+  document.querySelectorAll(".town-preset-btn").forEach((b) => {
+    b.onclick = () => {
+      const idx = Number(b.dataset.tidx || 0);
+      if (presets[idx]) el("town-gen-prompt").value = presets[idx][1];
+    };
+  });
+}
+
+function openAddTownBuildingModal(townSid) {
+  const snap = state.snap;
+  if (!snap) return;
+  const realmSpace = (snap.spaces || []).find((s) => s.space_id === townSid) || snap.space || {};
+  const zones = Array.isArray(realmSpace.zones) ? realmSpace.zones : [];
+  const zoneOptions = ['<option value="">自动寻找最合适的空闲街区</option>'].concat(
+    zones
+      .filter((z) => z && z.zone_id && z.zone_id !== "center" && z.zone_id !== "central_plaza")
+      .map((z) => '<option value="' + esc(z.zone_id) + '">' + esc(z.name || z.zone_id) + "</option>"),
+  ).join("");
+
+  showModal("🏗️ 在「" + esc(realmSpace.name || townSid) + "」加盖可进入建筑",
+    '<div class="form-grid">'
+    + '<div class="field"><label>建筑名称</label><input class="px-inp" id="tb-name" maxlength="16" placeholder="如：海风茶屋 / 旧书店"></div>'
+    + '<div class="field"><label>建筑功能定位（自动决定作息/补货/家具）</label><select class="px-sel" id="tb-role">'
+    + '<option value="cafe">☕ 咖啡/茶屋食铺</option>'
+    + '<option value="shop">🏪 杂货铺/补给店</option>'
+    + '<option value="home">🏠 住处/宿舍旅馆</option>'
+    + '<option value="library">📚 书屋/图书馆</option>'
+    + '<option value="arcade">🕹️ 游戏/活动室</option>'
+    + '<option value="public" selected>🏛️ 公共会馆/沙龙</option>'
+    + "</select></div>"
+    + '<div class="field full"><label>首选所在街区</label><select class="px-sel" id="tb-zone">' + zoneOptions + "</select></div>"
+    + '<div class="field full"><label>室内氛围简述（可选）</label><input class="px-inp" id="tb-ambient" maxlength="60" placeholder="例如：窗边摆着鲜花与暖黄台灯的小巧茶屋。"></div>'
+    + "</div>",
+    [
+      { label: "取消", onClick: closeModal },
+      {
+        label: "自动选址建造",
+        cls: "primary",
+        onClick: (btn) => {
+          const bName = el("tb-name").value.trim();
+          if (!bName) return toast("请输入建筑名称", true);
+          btn.disabled = true;
+          btn.textContent = "选址与铺路中...";
+          runAction("add_town_building", {
+            town_space_id: townSid,
+            name: bName,
+            role: el("tb-role").value,
+            zone_id: el("tb-zone").value,
+            interior_ambient: el("tb-ambient").value.trim(),
+          }).then((res) => {
+            closeModal();
+            const bldg = res.building || {};
+            toast("已在本镇建成「" + (bldg.name || bName) + "」并自动接通道路与门洞");
+          }).catch((e) => {
+            btn.disabled = false;
+            btn.textContent = "自动选址建造";
+            toast(e.message, true);
+          });
+        },
+      },
+    ]);
+}
+
 function openWorldMenuModal() {
   const snap = state.snap;
   if (!snap) return;
   const sp = snap.space || {};
+  const realmSpace = (snap.spaces || []).find((s) => s.space_id === (snap.realm_space_id || sp.space_id)) || sp;
+  const isTownRealm = realmSpace && realmSpace.space_kind === "town";
   const canDelete = (snap.spaces || []).length > 1;
   const hasDefTown = (snap.spaces || []).some((s) => s.space_id === "town_sakura");
   showModal("⚙ 世界管理与工具 — " + (sp.name || "当前世界"),
     '<div class="menu-grid">'
     + '<button class="menu-item-btn primary" id="wm-default-town"><b>🏘️ ' + (hasDefTown ? "进入樱町示范小镇" : "创建并进入樱町示范小镇") + '</b><span>5 个街区 + 6 栋推门可进入的建筑子世界</span></button>'
+    + '<button class="menu-item-btn" id="wm-gen-town"><b>🏙️ 分层生成新主题小镇</b><span>海港/雪国/霓虹/学院等整座城镇与可进入建筑</span></button>'
+    + (isTownRealm ? '<button class="menu-item-btn" id="wm-add-building"><b>🏗️ 在本镇加盖一栋建筑</b><span>自动避让道路选址，连同内室与布告栏一并建成</span></button>' : "")
     + '<button class="menu-item-btn" id="wm-gen-map"><b>🗺️ LLM 生成 / 改造地图</b><span>输入场景描述一键生成家具与地形</span></button>'
     + '<button class="menu-item-btn" id="wm-import-actor"><b>👤 导入角色包</b><span>从宿主或自定义立绘导入角色</span></button>'
     + '<button class="menu-item-btn" id="wm-palette"><b>🎨 切换 / 编辑调色板</b><span>调整世界色彩风格或导入 Lospec</span></button>'
@@ -5687,6 +6059,10 @@ function openWorldMenuModal() {
     closeModal();
     openDefaultTown(false);
   };
+  el("wm-gen-town").onclick = openGenerateTownModal;
+  if (isTownRealm && el("wm-add-building")) {
+    el("wm-add-building").onclick = () => openAddTownBuildingModal(realmSpace.space_id);
+  }
   el("wm-gen-map").onclick = () => openGenerateMapModal("replace_current");
   el("wm-import-actor").onclick = openImportActorModal;
   el("wm-palette").onclick = openPaletteModal;
@@ -5857,7 +6233,9 @@ async function pollLive(generation) {
     if (result.changes?.space_id === state.windowSpaceId && interactGenAtPoll === (state._interactGen | 0)) {
       state.snap.entities = result.changes.entities;
       state.snap.lighting = result.changes.lighting;
+      if (result.changes.weather) state.snap.weather = result.changes.weather;
       state.liveWorldRevision = live.world_version;
+      renderTopbar();
       renderInspector();
     }
     if (Array.isArray(result.chat_history) && state.chatHistory.at(-1)?.id !== result.chat_history.at(-1)?.id) {
@@ -5929,6 +6307,7 @@ function init() {
 
   /* ── 世界大厅绑定 ── */
   el("btn-hub-default-town").onclick = () => openDefaultTown(false);
+  el("btn-hub-gen-town").onclick = openGenerateTownModal;
   el("btn-hub-new-world").onclick = () => openCreateSpaceModal(true);
   el("btn-hub-gen-world").onclick = () => openGenerateMapModal("new_space");
   el("btn-hub-import-actor").onclick = openImportActorModal;
@@ -6059,7 +6438,52 @@ function init() {
       }, { passive: false });
     }
   })();
+function openWeatherModal() {
+  const snap = state.snap;
+  if (!snap || !snap.space) return;
+  const w = snap.weather || { mode: "auto", current: "clear", label: "晴朗", icon: "☀️", description: "晴空万里" };
+  const modes = [
+    ["auto", "🔄 自动演替", "按世界时钟在晴/阴/雨/樱间自然切换"],
+    ["clear", "☀️ 晴朗", "晴空万里，视野开阔"],
+    ["cloudy", "⛅ 多云", "微阴多云，凉爽宜人"],
+    ["rain", "🌧️ 细雨", "户外视野略缩，角色更易进屋饮暖"],
+    ["sakura", "🌸 飘樱", "樱花瓣随微风飘落"],
+    ["snow", "❄️ 轻雪", "冬日细雪飘落"],
+  ];
+  const btns = modes.map(([m, title, desc]) =>
+    '<button class="menu-item-btn' + (w.mode === m ? " primary" : "") + '" data-wmode="' + esc(m) + '"><b>'
+    + esc(title) + "</b><span>" + esc(desc) + "</span></button>"
+  ).join("");
+  showModal("🌦️ 天气控制 — " + (snap.space.name || "当前区域"),
+    '<div style="font-size:12px;margin-bottom:8px;">当前状态：<b>' + esc((w.icon || "☀️") + " " + (w.label || "晴朗")) + "</b> · "
+    + esc(w.description || "") + "</div>"
+    + '<div class="menu-grid">' + btns + "</div>"
+    + '<label class="trait-chip" style="margin-top:10px;"><input type="checkbox" id="chk-rain-sound"'
+    + (state.rainSoundEnabled ? " checked" : "") + "> 🌧️ 雨天播放极轻环境雨声（需开启右上角🔊音效）</label>",
+    [{ label: "关闭", onClick: closeModal }],
+  );
+  document.querySelectorAll('[data-wmode]').forEach((b) => {
+    b.onclick = () => {
+      const mode = b.dataset.wmode || "auto";
+      runAction("set_world_weather", { space_id: snap.space.space_id, mode })
+        .then(() => { closeModal(); toast("天气已切换"); })
+        .catch((e) => toast(e.message, true));
+    };
+  });
+  const rainChk = el("chk-rain-sound");
+  if (rainChk) {
+    rainChk.onchange = () => {
+      state.rainSoundEnabled = Boolean(rainChk.checked);
+      localStorage.setItem("nanami_world_rain_sound", state.rainSoundEnabled ? "1" : "0");
+      const curW = (state.snap && state.snap.weather) || {};
+      const isOut = (state.snap && state.snap.space && state.snap.space.space_kind) === "town";
+      SoundFX.syncWeather(curW.current || "clear", isOut);
+    };
+  }
+}
+
   el("btn-world-menu").onclick = openWorldMenuModal;
+  if (el("btn-weather-pill")) el("btn-weather-pill").onclick = openWeatherModal;
   document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
     btn.onclick = () => setUiMode(btn.dataset.uimode || "play");
   });
@@ -6259,6 +6683,9 @@ function init() {
       localStorage.setItem("nanami_world_sound", state.soundEnabled ? "1" : "0");
       syncSoundBtn();
       if (state.soundEnabled) SoundFX.action();
+      const curW = (state.snap && state.snap.weather) || {};
+      const isOut = (state.snap && state.snap.space && state.snap.space.space_kind) === "town";
+      SoundFX.syncWeather(curW.current || "clear", isOut);
     };
   }
   const sendChatPresence = (active) => {
@@ -6604,8 +7031,13 @@ function init() {
     lastRafAt = now;
     if (state.snap && !state.eyeMode && !state.drag && state.view === "world" && el("modal-mask").classList.contains("hidden")) {
       const roamMoved = state.uiMode === "roam" ? updateRoamMotion(dt) : false;
+      const wCodeNow = state.snap.weather?.current || "clear";
+      const activeWeatherAnim = state.snap.space?.space_kind === "town" && (wCodeNow === "rain" || wCodeNow === "sakura" || wCodeNow === "snow");
       if (PD_LOOP.moving || roamMoved) {
         renderViewport();
+      } else if (activeWeatherAnim && !document.hidden) {
+        const wPh = Math.floor(now / 45);
+        if (wPh !== state._weatherRafPhase) { state._weatherRafPhase = wPh; renderViewport(); }
       } else if (PD_LOOP.resting || state.uiMode === "roam") {
         const ph = Math.floor(now / 350);
         if (ph !== state._pdPhase) { state._pdPhase = ph; renderViewport(); }

@@ -619,6 +619,7 @@ class WorldHeartbeat:
             actors_map={a["actor_id"]: a for a in (sp_snap.get("actors") or [])},
             custom_persona_dir=settings_now.persona_data_dir,
             advance_exposure=0.0,
+            weather=sp_snap.get("weather"),
         )
         sys_prompt = (
             f"你是{actor['name']}。此刻你在自己的像素世界里自由活动。\n"
@@ -737,6 +738,7 @@ class WorldHeartbeat:
             custom_persona_dir=settings.persona_data_dir,
             peer_known=peer_known,
             advance_exposure=0.18 if vis else 0.10,
+            weather=sp_snap.get("weather"),
         )
 
         # 1. 夜晚或室内变暗自动开灯
@@ -761,7 +763,7 @@ class WorldHeartbeat:
                 }
 
         # 2. 结合世界昼夜作息 + L0 Borbély 时型偏移判断是否该休息
-        hour = float(lighting.get("hour", 12))
+        hour = float(lighting.get("hour_float", lighting.get("hour", 12)))
         chrono = float(l0_frame.get("chronotype_offset") or 0.0) if l0_frame.get("enabled") else 0.0
         c_str = float(l0_frame.get("circadian_strength") or 0.75) if l0_frame.get("enabled") else 0.75
         bio_hour = (hour - chrono) % 24.0

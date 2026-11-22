@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from . import persona_bridge, text_compiler
+from . import persona_bridge, schedule, text_compiler, venue_semantics, weather
 from .schema import clip_text, inscription_is_new
 
 
@@ -34,16 +34,7 @@ def _is_notice_board(entity: Mapping[str, Any], space: Mapping[str, Any]) -> boo
 
 
 def _building_hints(building: Mapping[str, Any]) -> list[str]:
-    category = building.get("category")
-    if category in ("home", "house"):
-        return ["rest"]
-    if category == "arcade":
-        return ["game"]
-    if category in ("shop", "cafe"):
-        return ["social", "food"] if "咖啡" in building["name"] or category == "cafe" else ["food"]
-    if category in ("public", "library") and (category == "library" or "图书" in building["name"]):
-        return ["reading"]
-    return []
+    return venue_semantics.building_affordance_hints(building)
 
 
 def _activation(samples: list[float], now: float, decay: float) -> float:
@@ -140,11 +131,14 @@ class CognitiveEngine:
             if newest.get("peer_beliefs"):
                 self._apply_peer_beliefs(state, scene, newest["peer_beliefs"], source=newest.get("source") or "language")
 
+        applied_ids = {str(x) for x in (state.get("applied_commitments") or ()) if x}
+        if state.get("applied_commitment_id"):
+            applied_ids.add(str(state["applied_commitment_id"]))
         raw_commit = (state.get("modulation") or {}).get("commitment")
+        raw_cid = str(raw_commit.get("id") or "") if isinstance(raw_commit, Mapping) else ""
         pending_commitment: dict[str, Any] | None = (
             dict(raw_commit)
-            if isinstance(raw_commit, Mapping) and raw_commit.get("id")
-            and raw_commit.get("id") != state.get("applied_commitment_id")
+            if raw_cid and raw_cid not in applied_ids
             else None
         )
 
@@ -184,9 +178,17 @@ class CognitiveEngine:
             custom_persona_dir=settings.persona_data_dir,
             peer_known=same_space_known,
             advance_exposure=0.18 * scene.get("exposure_scale", 1.0),
+            weather=scene.get("weather"),
         )
         profile = percept["behavior_profile"]
         scene["percept"] = percept
+        scene["schedule"] = schedule.build_actor_schedule(
+            actor,
+            profile,
+            percept,
+            scene.get("realm_buildings") or (),
+            home_space_id=str(scene.get("home_space_id") or ""),
+        )
         focus = {e["entity_id"] for e in percept["focused_entities"]}
         self._observe_position(state, scene, scene.get("walked") or [(actor["x"], actor["y"])])
         self._observe_entities(state, scene, focus)
@@ -220,9 +222,10 @@ class CognitiveEngine:
             realm_places = scene.get("realm_places") or {}
             spid = sa.get("shared_place_id")
             pg = sa.get("personal_goal") if isinstance(sa.get("personal_goal"), Mapping) else {}
+            target_is_lodging = bool(spid and self._place_is_lodging(str(spid), scene))
             personal_arrival = (
                 pg.get("kind") == "visit" and pg.get("target") == spid
-                and (pg.get("drive") == "rest" or pg.get("action") == "escort")
+                and (pg.get("action") == "escort" or (pg.get("drive") == "rest" and target_is_lodging))
             )
             if spid in realm_places and not personal_arrival:
                 self._ensure_portal_known(state, scene, spid, "social", now, partner=speaker)
@@ -297,15 +300,47 @@ class CognitiveEngine:
                     intention = None
 
         if pending_commitment is not None:
-            state["applied_commitment_id"] = pending_commitment["id"]
+            cid = str(pending_commitment["id"])
+            prev_cid = str(state.get("applied_commitment_id") or "")
+            seen_cids = [str(x) for x in (state.get("applied_commitments") or ()) if x]
+            for item_cid in (prev_cid, cid):
+                if item_cid:
+                    seen_cids = [x for x in seen_cids if x != item_cid]
+                    seen_cids.append(item_cid)
+            state["applied_commitments"] = seen_cids[-12:]
             arrival_in_progress = self._is_agreed_arrival(intention)
             new_arrival = self._is_agreed_arrival(pending_commitment)
-            may_replace = (
-                not arrival_in_progress or new_arrival or pending_commitment.get("source") == "language"
+            speech_visit_in_progress = bool(
+                intention and intention.get("source") == "speech_act" and intention.get("kind") == "visit"
             )
+            if arrival_in_progress:
+                may_replace = new_arrival or pending_commitment.get("source") == "language"
+            elif speech_visit_in_progress:
+                may_replace = pending_commitment.get("source") in ("language", "speech_act")
+            else:
+                may_replace = True
             going_to_rest = new_arrival and pending_commitment.get("drive") == "rest"
-            speech_act_ok = pending_commitment.get("source") == "speech_act" and vit["energy"] >= 0.25 and vit["sleep_pressure"] < 0.85
-            if may_replace and (state["drives"]["rest"] < 0.82 or speech_act_ok or going_to_rest) and state["drives"]["food"] < 0.85:
+            going_to_food = (
+                pending_commitment.get("drive") == "food"
+                or (
+                    pending_commitment.get("kind") == "visit"
+                    and self._place_is_food_venue(str(pending_commitment.get("target") or ""), state, scene)
+                )
+            )
+            has_food_candidate = any(c["drive"] == "food" for c in candidates)
+            speech_act_ok = (
+                pending_commitment.get("source") == "speech_act"
+                and vit["energy"] >= 0.25 and vit["sleep_pressure"] < 0.85
+            )
+            rest_ok = state["drives"]["rest"] < 0.82 or speech_act_ok or going_to_rest
+            food_ok = (
+                state["drives"]["food"] < 0.85
+                or speech_act_ok
+                or going_to_food
+                or going_to_rest
+                or not has_food_candidate
+            )
+            if may_replace and rest_ok and food_ok:
                 resolved = self._resolve_commitment(state, scene, pending_commitment, peers, seen_peer_ids=seen_peer_ids)
                 if resolved is not None:
                     low_urgency = intention is None or intention.get("drive") in ("explore", "curiosity", "comfort", "notice")
@@ -317,6 +352,7 @@ class CognitiveEngine:
                         if intention is not None and not low_urgency and intention.get("key") != resolved.get("key"):
                             state["suspended_intention"] = intention
                         intention = resolved
+                        state["applied_commitment_id"] = cid
                         state["arbitration"] = "社会脑/语言主导" if resolved.get("source") in ("language", "speech_act") else "前额叶主导"
 
         shield = 0.65 * profile["effortful_control"] + 0.55 * profile["hysteresis_inertia"]
@@ -381,6 +417,8 @@ class CognitiveEngine:
                 if picked.get("pfc_committed"):
                     state["arbitration"] = "社会脑/语言主导" if picked.get("source") in ("language", "speech_act") else "前额叶主导"
                 elif picked["drive"] == "rest" and state["drives"]["rest"] >= 0.72:
+                    state["arbitration"] = "生理稳态主导"
+                elif picked["drive"] == "food" and state["drives"]["food"] >= 0.82:
                     state["arbitration"] = "生理稳态主导"
                 previous_error = state.get("prediction_error")
                 status, logs = self._execute(picked, state, scene, talk, candidates)
@@ -876,8 +914,9 @@ class CognitiveEngine:
         results, fallback_results = [], []
         modulation = state.get("modulation") or {}
         vitals = actor["vitals"]
+        in_crisis = min(vitals["energy"], 1 - vitals["sleep_pressure"]) <= 0.15
         bias_scale = 0.0
-        if min(vitals["energy"], 1 - vitals["sleep_pressure"], 1 - drives["food"]) <= 0.15:
+        if in_crisis:
             state["arbitration"] = "生理稳态主导"
         else:
             recent_exchange = (now - float(state.get("last_exchange_at", -1e9))) <= 8.0
@@ -901,6 +940,28 @@ class CognitiveEngine:
                 bias_scale = base_control * arb * decay
 
         pref_zone = str(modulation.get("preferred_zone") or "").strip() if modulation else ""
+        w_mod = weather.weather_cognitive_modifiers(scene.get("weather"), profile, is_outdoor=(not inside))
+        sched_ctx = schedule.active_schedule_context(
+            scene.get("schedule"),
+            float(percept.get("bio_hour", 12.0)),
+            circadian_strength=float(percept.get("circadian_strength", 0.75)),
+            effortful_control=float(profile["effortful_control"]),
+            arbitration=str(state.get("arbitration") or "稳态/习惯"),
+            has_active_modulation=bool(modulation and bias_scale > 0),
+            in_crisis=in_crisis,
+        )
+        scene["schedule_ctx"] = sched_ctx
+        building_cats = {
+            str(b.get("interior_space_id") or ""): str(b.get("category") or "").strip().lower()
+            for b in (scene.get("realm_buildings") or ())
+            if isinstance(b, Mapping) and b.get("interior_space_id")
+        }
+        building_roles = {
+            str(b.get("interior_space_id") or ""): venue_semantics.building_role(b)
+            for b in (scene.get("realm_buildings") or ())
+            if isinstance(b, Mapping) and b.get("interior_space_id")
+        }
+        home_sid = str(scene.get("home_space_id") or sched_ctx.get("home_space_id") or "")
 
         def add(kind: str, target: str, drive: str, goal: str, x: int, y: int,
                 practical: float, information: float, *, action: str = "", target_space: str = "",
@@ -939,6 +1000,24 @@ class CognitiveEngine:
             impression = state.get("semantic", {}).get(target, {})
             if drive in impression.get("domains", []):
                 utility += 0.18 * impression.get("salience", 0.0)
+            utility += schedule.routine_candidate_bonus(
+                sched_ctx,
+                kind=kind,
+                target=target,
+                drive=drive,
+                target_category=building_cats.get(target, ""),
+                target_role=building_roles.get(target, ""),
+                is_home_space=(bool(home_sid) and target == home_sid),
+                is_inside_home=(bool(home_sid) and sid == home_sid),
+            )
+            if kind == "explore":
+                utility += w_mod["outdoor_explore_delta"]
+            elif kind == "visit":
+                utility += w_mod["shelter_visit_bonus"]
+            elif kind == "exit":
+                utility += w_mod["exit_rain_penalty"]
+            elif kind == "entity" and drive in ("reading", "game", "rest"):
+                utility += w_mod["cozy_indoor_bonus"]
             item = {
                 "kind": kind, "key": key, "target": target, "space": sid, "x": x, "y": y,
                 "goal": goal, "drive": drive, "utility": round(utility, 4), "action": action,
@@ -962,8 +1041,9 @@ class CognitiveEngine:
                               and self.engine.chebyshev_distance(actor, ent) <= 1 for ent in scene["visible"])
             if food and drives["food"] >= 0.52 and not nearby_food:
                 snack = food[0]
+                warm_b = w_mod["warm_drink_bonus"] if (snack["traits"].get("thermal") or {}).get("temp") in ("hot", "warm") else 0.0
                 add("pack_action", snack["entity_id"], "food", f"吃随身的「{snack['name']}」",
-                    actor["x"], actor["y"], 1.0 + self._domain_value("food", state, scene), 0, action="consume")
+                    actor["x"], actor["y"], 1.0 + self._domain_value("food", state, scene) + warm_b, 0, action="consume")
             for carried in items:
                 activity = carried["traits"].get("activity")
                 if activity and activity["battery"] != 0:
@@ -975,6 +1055,7 @@ class CognitiveEngine:
             if not food and not held_id and len(items) < pack["capacity"] and drives["food"] < 0.52:
                 snack = next((item for item in scene["visible"] if item["z"] >= 0
                               and item["traits"].get("consumable", {}).get("uses_left", 0) > 0
+                              and item["traits"].get("consumable", {}).get("on_empty") == "vanish"
                               and self.engine.can_stow(item["entity_id"])), None)
                 if snack:
                     add("pack_action", snack["entity_id"], "food", f"带上「{snack['name']}」",
@@ -1014,6 +1095,8 @@ class CognitiveEngine:
             for drive, action in self._affordances(ent, space):
                 information = 0.15
                 value = self._domain_value(drive, state, scene)
+                if action == "consume" and (ent["traits"].get("thermal") or {}).get("temp") in ("hot", "warm"):
+                    value += w_mod["warm_drink_bonus"]
                 if action == "read":
                     read_this = state["read"].get(eid)
                     if read_this == self._read_signature(entries):
@@ -1073,7 +1156,8 @@ class CognitiveEngine:
         if rest < 0.72 and not actor["vitals"]["disengaged"]:
             user_relation = relations.get("user", {})
             if (
-                drives["food"] < 0.72 and now - state.get("last_player_greeting", -1e9) >= 2
+                (drives["food"] < 0.90 or not any(c["drive"] == "food" and c["kind"] in ("entity", "pack_action") for c in fallback_results))
+                and now - state.get("last_player_greeting", -1e9) >= 2
                 and user_relation.get("attitude_stance") not in ("cold", "guarded")
                 and not user_relation.get("cool_off_turns")
             ):
@@ -1403,6 +1487,32 @@ class CognitiveEngine:
             and (plan.get("drive") == "rest" or plan.get("action") == "escort")
         )
 
+    @staticmethod
+    def _place_is_lodging(target: str, scene: Mapping[str, Any]) -> bool:
+        if not target:
+            return False
+        if target == str(scene.get("home_space_id") or ""):
+            return True
+        for b in scene.get("realm_buildings") or ():
+            if isinstance(b, Mapping) and str(b.get("interior_space_id") or "") == target:
+                return venue_semantics.is_lodging_building(b)
+        space_name = (scene.get("space") or {}).get("name") if (scene.get("space") or {}).get("space_id") == target else ""
+        name = str((scene.get("realm_places") or {}).get(target) or space_name or "")
+        return venue_semantics.is_lodging_building(None, name=name)
+
+    @staticmethod
+    def _place_is_food_venue(target: str, state: Mapping[str, Any], scene: Mapping[str, Any]) -> bool:
+        if not target:
+            return False
+        for b in scene.get("realm_buildings") or ():
+            if isinstance(b, Mapping) and str(b.get("interior_space_id") or "") == target:
+                if venue_semantics.is_food_building(b):
+                    return True
+        if "food" in ((state.get("places") or {}).get(target) or {}).get("affordances", {}):
+            return True
+        name = str((scene.get("realm_places") or {}).get(target) or "")
+        return venue_semantics.is_food_building(None, name=name)
+
     def _escort_to_door(
         self, intention: dict[str, Any], state: dict[str, Any], scene: dict[str, Any],
     ) -> tuple[str, list[str]]:
@@ -1442,7 +1552,11 @@ class CognitiveEngine:
             (e, action) for e in scene["visible"] for domain, action in self._affordances(e, scene["space"])
             if domain == drive and action != "read"
         ]
-        agreed_rest = drive == "rest" and self._is_agreed_arrival(intention)
+        agreed_rest = (
+            drive == "rest"
+            and self._is_agreed_arrival(intention)
+            and self._place_is_lodging(str(intention.get("target") or ""), scene)
+        )
         if agreed_rest:
             beds = [(e, action) for e, action in options if "bedroom" in e.get("tags", ())]
             if beds:
@@ -1609,6 +1723,8 @@ class CognitiveEngine:
             "zones": brief_zones,
             "peers": brief_peers,
             "objects": unfamiliar,
+            "weather": str((scene.get("weather") or {}).get("description") or ""),
+            "routine": str((scene.get("schedule_ctx") or {}).get("prompt_line") or ""),
         })
 
     @staticmethod

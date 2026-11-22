@@ -1,8 +1,17 @@
-# 七海千秋 · 文字世界（nanami_world v0.3.0）
+# 七海千秋 · 文字世界（nanami_world v0.4.0）
 
 面向 **Shinsekai（>= 2.6.0）** 的独立像素风自定义文字世界插件。
 
 对大语言模型来说，世界由语言构成；对人类来说，前端是一个可高度自定义调色板的俯视像素小屋。你只需输入一句话即可同时编译出**规范化的智能物件属性**与**透明底像素贴图**，把真实存在于账本中的物品摆进离散坐标格网里，让角色在物质守恒与物理边界内自主感知与互动。
+
+---
+
+## v0.4.0 更新
+
+- **天气与作息**。城镇共享五种天气，天气会影响户外视野和热饮冷却。NPC 按人格生物钟和城镇设施安排日程。
+- **饥饿与补货**。不同食物提供不同饱腹效果，营业场所每天模拟时间 06:00 自动补货。
+- **主题小镇与扩建**。从一句描述生成主题小镇，在现有小镇加盖建筑，并验证广场、建筑入口和室内设施之间的通路。
+- **共同出行**。角色会继续履行刚达成的出行约定，到达后按场所用途行动。
 
 ---
 
@@ -50,11 +59,11 @@
 
 ## 复现验证
 
-在本仓库目录运行以下命令。将环境变量 `SHINSEKAI_TEST_ROOT` 指向包含 `sdk` 的 Shinsekai 安装目录。仓库位于安装目录的 `plugins` 或 `github` 下时，测试会自动找到宿主。人格回写集成测试还需要 Node.js 和同批更新的 `nanami_persona`。
+在 Shinsekai 安装目录运行以下命令。示例检出路径为 `github/nanami_world`，检出到其他位置时请替换为实际路径。若仓库位于安装目录之外，将环境变量 `SHINSEKAI_TEST_ROOT` 指向包含 `sdk` 的 Shinsekai 安装目录。人格回写集成测试还需要 Node.js 和已安装的 `nanami_persona`。
 
 ```text
-python -B -m unittest discover -s tests -p "test_nanami_*.py" -v
-python -B tests/experiment_nanami_town.py
+python -B -m unittest discover -s github/nanami_world/tests -p "test_nanami_*.py" -v
+python -B github/nanami_world/tests/experiment_nanami_town.py
 ```
 
 视野实验使用隔离存档和离线规则比较现有投影与遮挡原型。

@@ -341,6 +341,7 @@
     },
     "effects": {
       "energy_delta": 0.06,
+      "hunger_delta": -0.18,
       "sleep_pressure_delta": -0.04,
       "mood_v_delta": 0.08,
       "satisfies": ["warmth", "comfort"],
@@ -421,6 +422,7 @@
     },
     "effects": {
       "energy_delta": 0.08,
+      "hunger_delta": -0.28,
       "sleep_pressure_delta": 0.0,
       "mood_v_delta": 0.10,
       "satisfies": ["hunger", "comfort"],
@@ -1310,6 +1312,7 @@
     },
     "effects": {
       "energy_delta": 0.14,
+      "hunger_delta": -0.18,
       "sleep_pressure_delta": -0.14,
       "mood_v_delta": 0.07,
       "satisfies": ["warmth", "energy"],
@@ -1390,6 +1393,7 @@
     },
     "effects": {
       "energy_delta": 0.1,
+      "hunger_delta": -0.38,
       "sleep_pressure_delta": -0.02,
       "mood_v_delta": 0.14,
       "satisfies": ["comfort", "pleasure"],
@@ -1492,6 +1496,7 @@
     },
     "effects": {
       "energy_delta": 0.16,
+      "hunger_delta": -0.55,
       "sleep_pressure_delta": 0.04,
       "mood_v_delta": 0.12,
       "satisfies": ["warmth", "comfort"],

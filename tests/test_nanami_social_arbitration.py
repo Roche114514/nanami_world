@@ -805,6 +805,210 @@ class SocialArbitrationTests(unittest.TestCase):
         self.assertGreaterEqual(len(visited_blocks), 4, visited_blocks)
         self.assertGreaterEqual(len(visited_cells), 10, visited_cells)
 
+    def test_hungry_actor_honors_shared_cafe_agreement_and_cafe_rest_skips_bed_search(self) -> None:
+        now = datetime.now()
+        noon = now.replace(hour=14, minute=0, second=0, microsecond=0)
+        self.engine._world["clock_offset_minutes"] = (noon - now).total_seconds() / 60
+
+        hinata = self.engine.import_actor(name="日向创", host_character="日向创")["actor_id"]
+        town = self.engine.create_default_town(move_actor_id=hinata)["town_space_id"]
+        cafe = f"{town}__cafe"
+        library = f"{town}__library"
+        nanami = self.engine.import_actor(name="七海千秋", host_character="七海千秋", space_id=town, x=20, y=15)["actor_id"]
+        self.engine.place_actor(hinata, town, 19, 15)
+
+        # Deplete all consumables across the town realm to mirror a food-scarce runtime world.
+        for sid_x in (town, cafe, library, f"{town}__shop", f"{town}__home", f"{town}__guest", f"{town}__arcade"):
+            if sid_x not in self.engine._world["spaces"]:
+                continue
+            for ent in self.engine.snapshot_for_ui(sid_x)["entities"]:
+                cons = (ent.get("traits") or {}).get("consumable")
+                if isinstance(cons, dict):
+                    traits = dict(ent["traits"])
+                    traits["consumable"] = {**cons, "uses_left": 0}
+                    self.engine.update_entity_spec(ent["entity_id"], traits=traits)
+
+        now_min = float(self.engine.cognitive_scene(hinata)["minutes"])
+        self.engine.update_actor_autonomy(hinata, {
+            "hunger": 1.0,
+            "cognition": {
+                "applied_commitment_id": "ref:old_lib",
+                "modulation": {
+                    "id": 100,
+                    "realm": town,
+                    "at": now_min,
+                    "half_life": 12.0,
+                    "strength": 1.0,
+                    "source": "pfc",
+                    "commitment": {
+                        "id": "ref:old_lib",
+                        "source": "pfc",
+                        "priority": "high",
+                        "kind": "visit",
+                        "target": library,
+                        "drive": "reading",
+                    },
+                },
+            },
+        })
+
+        cafe_chat = {
+            "intent_a": "这雨下得不大，要不要去微风咖啡馆喝杯热饮？",
+            "intent_b": "嗯，正好有点饿，过去坐坐吧。",
+            "memory_note": "两人决定一起去微风咖啡馆喝热饮。",
+            "speech_act": {
+                "shared_place_id": cafe,
+                "shared_drive": "food",
+                "goal_b": {"kind": "visit", "target": cafe, "drive": "rest"},
+                "tone": "warm",
+            },
+            "end_chat": True,
+        }
+        with patch("plugins.nanami_world.text_compiler._ask_llm_json", return_value=cafe_chat):
+            chat_res = self.chat.conduct_actor_social_exchange(hinata, nanami, generated_only=True)
+        sa_a = (chat_res.get("speech_act") or {}).get("a") or {}
+        sa_b = (chat_res.get("speech_act") or {}).get("b") or {}
+        self.assertEqual(sa_a.get("shared_place_id"), cafe)
+        self.assertEqual(sa_b.get("shared_place_id"), cafe)
+
+        def decide(aid: str, modulation: dict | None = None) -> dict:
+            scene = self.engine.cognitive_scene(aid, include_rooms=True)
+            scene["engage"] = lambda *args: True
+            if modulation is not None:
+                scene["modulation"] = modulation
+            return self.heartbeat._cognitive.step(scene, self.settings, use_llm=False, talk=lambda *args: [])
+
+        res_h = decide(hinata)
+        res_n = decide(nanami)
+        for aid_x, res_x in ((hinata, res_h), (nanami, res_n)):
+            cog_x = next(a for a in self.engine.list_actors() if a["actor_id"] == aid_x)["autonomy"]["cognition"]
+            self.assertTrue(str(cog_x.get("applied_commitment_id") or "").startswith("sa:"), (aid_x, cog_x))
+            self.assertEqual((cog_x.get("active_intention") or {}).get("target"), cafe, (aid_x, res_x))
+            self.assertIn("一起去「微风咖啡馆」", res_x["goal"])
+
+        cog_h = next(a for a in self.engine.list_actors() if a["actor_id"] == hinata)["autonomy"]["cognition"]
+        self.assertIn("ref:old_lib", cog_h.get("applied_commitments") or ())
+        self.assertEqual(cog_h["applied_commitments"][-1], cog_h["applied_commitment_id"])
+
+        # Subsequent step must NOT replay stale ref:old_lib, and a fresh mid-walk pfc reflection must NOT hijack cafe.
+        res_h2 = decide(hinata)
+        self.assertIn("一起去「微风咖啡馆」", res_h2["goal"])
+        fresh_pfc = {
+            "id": 200,
+            "realm": town,
+            "at": float(self.engine.cognitive_scene(hinata)["minutes"]),
+            "half_life": 12.0,
+            "strength": 1.0,
+            "source": "pfc",
+            "commitment": {
+                "id": "ref:new_lib",
+                "source": "pfc",
+                "priority": "high",
+                "kind": "visit",
+                "target": library,
+                "drive": "reading",
+            },
+        }
+        res_h3 = decide(hinata, fresh_pfc)
+        self.assertIn("一起去「微风咖啡馆」", res_h3["goal"])
+
+        for _ in range(18):
+            if self.engine.live_actor_frame(hinata)["space_id"] != cafe:
+                decide(hinata)
+            if self.engine.live_actor_frame(nanami)["space_id"] != cafe:
+                decide(nanami)
+            if (
+                self.engine.live_actor_frame(hinata)["space_id"] == cafe
+                and self.engine.live_actor_frame(nanami)["space_id"] == cafe
+            ):
+                break
+        self.assertEqual(self.engine.live_actor_frame(hinata)["space_id"], cafe)
+        self.assertEqual(self.engine.live_actor_frame(nanami)["space_id"], cafe)
+
+        # Case 2: Visiting cafe with drive="rest" must NOT trigger bedroom 5-corner _look_for_bed wandering.
+        self.engine.update_actor_autonomy(nanami, {
+            "cognition": {
+                "active_intention": {
+                    "kind": "visit",
+                    "key": f"visit:{cafe}:{cafe}:",
+                    "target": cafe,
+                    "space": cafe,
+                    "x": 6,
+                    "y": 4,
+                    "goal": "和日向创一起去「微风咖啡馆」",
+                    "drive": "rest",
+                    "utility": 8.0,
+                    "action": "",
+                    "phase": "activity",
+                    "pfc_committed": True,
+                    "source": "speech_act",
+                },
+            },
+        })
+        for _ in range(8):
+            decide(nanami)
+            cog_n = next(a for a in self.engine.list_actors() if a["actor_id"] == nanami)["autonomy"]["cognition"]
+            intent_n = cog_n.get("active_intention") or {}
+            self.assertNotIn("bed_search_index", intent_n)
+            if self.engine.live_actor_frame(nanami)["posture"] == "resting":
+                break
+        self.assertEqual(self.engine.live_actor_frame(nanami)["posture"], "resting")
+
+        # Case 3: Fallback hot-drink inference without LLM speech_act + hungry non-food pfc guardrail with food available.
+        hungry = self.engine.import_actor(name="饿肚子测试", host_character="饿肚子测试", space_id=town, x=15, y=15)["actor_id"]
+        snack = self.engine.place_from_blueprint("default_snack", town, 15, 16)
+        door_lib = next(e for e in self.engine.snapshot_for_ui(town)["entities"]
+                        if e["traits"].get("portal", {}).get("target_space_id") == library)
+        self.engine.update_actor_autonomy(hungry, {
+            "hunger": 0.95,
+            "cognition": {
+                "portals": {
+                    f"{town}:{library}": {
+                        "space": town, "target": library, "name": "湖畔图书馆",
+                        "x": door_lib["x"], "y": door_lib["y"], "entity": door_lib["entity_id"],
+                        "source": "direct", "confidence": 1.0, "samples": [0.0],
+                    },
+                },
+            },
+        })
+        pfc_hungry_lib = {
+            "id": 300,
+            "realm": town,
+            "at": float(self.engine.cognitive_scene(hungry)["minutes"]),
+            "half_life": 12.0,
+            "strength": 1.0,
+            "source": "pfc",
+            "commitment": {
+                "id": "ref:lib_when_hungry",
+                "source": "pfc",
+                "priority": "high",
+                "kind": "visit",
+                "target": library,
+                "drive": "reading",
+            },
+        }
+        res_hungry = decide(hungry, pfc_hungry_lib)
+        cog_hungry = next(a for a in self.engine.list_actors() if a["actor_id"] == hungry)["autonomy"]["cognition"]
+        self.assertEqual(res_hungry["drive"], "food")
+        self.assertNotEqual(cog_hungry.get("applied_commitment_id"), "ref:lib_when_hungry")
+        self.assertNotEqual((cog_hungry.get("active_intention") or {}).get("target"), library)
+        self.assertIsNotNone(snack)
+
+        # Fallback speech_act drive inference from cafe hot-drink phrasing.
+        pal_a = self.engine.import_actor(name="测试甲", space_id=town, x=10, y=15)["actor_id"]
+        pal_b = self.engine.import_actor(name="测试乙", space_id=town, x=11, y=15)["actor_id"]
+        fallback_chat = {
+            "intent_a": "一起去微风咖啡馆喝热饮吧。",
+            "intent_b": "好呀，走吧。",
+            "memory_note": "决定一起去微风咖啡馆喝热饮。",
+            "end_chat": True,
+        }
+        with patch("plugins.nanami_world.text_compiler._ask_llm_json", return_value=fallback_chat):
+            fb_res = self.chat.conduct_actor_social_exchange(pal_a, pal_b, generated_only=True)
+        fb_sa = (fb_res.get("speech_act") or {}).get("a") or {}
+        self.assertEqual(fb_sa.get("shared_place_id"), cafe)
+        self.assertEqual(fb_sa.get("shared_drive"), "food")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

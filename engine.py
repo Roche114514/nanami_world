@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import persona_bridge
+from . import persona_bridge, schedule, venue_semantics, weather
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -343,6 +343,11 @@ def compute_lighting(space: Mapping[str, Any], entities: Mapping[str, Mapping[st
     return {
         "period": period,
         "clock": clock_str,
+        "hour": dt.hour,
+        "minute": dt.minute,
+        "hour_float": round(dt.hour + dt.minute / 60.0, 3),
+        "sim_day": dt.toordinal(),
+        "light_mode": mode,
         "has_lamp_on": bool(lit_lamps),
         "is_dark": is_dark,
         "lamp_positions": [{"x": int(e.get("x", 0)), "y": int(e.get("y", 0))} for e in lit_lamps],
@@ -457,6 +462,8 @@ class WorldEngine:
             "puzzle_memories": {},
             "key_loans": {},
             "gift_offers": {},
+            "weather_by_realm": {},
+            "shop_restock_day_by_realm": {},
             "next_entity_num": 1,
             "spaces": {space["space_id"]: space},
             "actors": {},
@@ -519,19 +526,40 @@ class WorldEngine:
                 held.update(parent_id=f"inventory:{aid}", inventory_slot=slot, space_id=actor["space_id"], z=-1)
                 actor["holding_id"] = None
 
+        sim_min = max(0.0, float(raw.get("simulation_minutes") or 0.0))
+        weather_by_realm: dict[str, dict[str, Any]] = {}
+        raw_weather = raw.get("weather_by_realm")
+        if isinstance(raw_weather, Mapping):
+            for r_sid, w_raw in raw_weather.items():
+                clean_r = str(r_sid or "").strip()
+                if clean_r in spaces:
+                    weather_by_realm[clean_r] = weather.normalize_weather_state(w_raw, sim_minutes=sim_min)
+        shop_restock_day_by_realm: dict[str, int] = {}
+        raw_restock = raw.get("shop_restock_day_by_realm")
+        if isinstance(raw_restock, Mapping):
+            for r_sid, day_val in raw_restock.items():
+                clean_r = str(r_sid or "").strip()
+                if clean_r in spaces:
+                    try:
+                        shop_restock_day_by_realm[clean_r] = int(day_val)
+                    except (TypeError, ValueError):
+                        continue
+
         return {
             "version": 1,
             "active_space_id": active_sid,
             "active_actor_id": active_aid,
             "last_tick_ts": float(raw.get("last_tick_ts") or time.time()),
             "clock_offset_minutes": float(raw.get("clock_offset_minutes") or 0.0),
-            "simulation_minutes": max(0.0, float(raw.get("simulation_minutes") or 0.0)),
+            "simulation_minutes": sim_min,
             "next_seq": max(1, int(raw.get("next_seq") or 1)),
             "event_source": str(raw.get("event_source") or uuid4().hex),
             "persona_events": dict(raw.get("persona_events") or {}),
             "puzzle_memories": dict(raw.get("puzzle_memories") or {}),
             "key_loans": dict(raw.get("key_loans") or {}),
             "gift_offers": dict(raw.get("gift_offers") or {}),
+            "weather_by_realm": weather_by_realm,
+            "shop_restock_day_by_realm": shop_restock_day_by_realm,
             "next_entity_num": max(1, int(raw.get("next_entity_num") or 1)),
             "spaces": spaces,
             "actors": actors,
@@ -912,6 +940,201 @@ class WorldEngine:
                 return {}
             _realm, places = self._realm_places_locked(sid)
             return places
+
+    def _weather_state_locked(self, realm_id: str) -> dict[str, Any]:
+        sim_min = float(self._world.get("simulation_minutes") or 0.0)
+        w_map = self._world.setdefault("weather_by_realm", {})
+        raw = w_map.get(realm_id)
+        if not isinstance(raw, Mapping):
+            st = weather.default_weather_state(sim_min)
+            w_map[realm_id] = st
+            return st
+        st = weather.normalize_weather_state(raw, sim_minutes=sim_min)
+        w_map[realm_id] = st
+        return st
+
+    def _weather_view_locked(self, space_id: str) -> dict[str, Any]:
+        sid = str(space_id or self._world.get("active_space_id") or "").strip()
+        sp = self._world["spaces"].get(sid) or {}
+        realm = self._realm_space_id_locked(sid) if sid else ""
+        st = self._weather_state_locked(realm) if realm else weather.default_weather_state()
+        is_outdoor = sp.get("space_kind") == "town"
+        return weather.weather_view(st, is_outdoor=is_outdoor)
+
+    def get_weather(self, space_id: str = "") -> dict[str, Any]:
+        with self._lock:
+            sid = str(space_id or self._world.get("active_space_id") or "").strip()
+            return self._weather_view_locked(sid)
+
+    def get_lighting(self, space_id: str = "") -> dict[str, Any]:
+        with self._lock:
+            sid = str(space_id or self._world.get("active_space_id") or "").strip()
+            if sid not in self._world["spaces"]:
+                sid = next(iter(self._world["spaces"]))
+            space = self._world["spaces"][sid]
+            return compute_lighting(
+                space,
+                self._world["entities"],
+                time.time(),
+                float(self._world.get("clock_offset_minutes") or 0.0),
+            )
+
+    def _record_weather_transition_locked(
+        self,
+        realm_id: str,
+        prev_code: str,
+        next_state: Mapping[str, Any],
+    ) -> None:
+        new_code = str(next_state.get("current") or "clear")
+        meta = weather.WEATHER_META.get(new_code, weather.WEATHER_META["clear"])
+        self._append_event_locked(
+            "weather_changed",
+            space_id=realm_id,
+            payload={
+                "from": prev_code,
+                "to": new_code,
+                "intensity": float(next_state.get("intensity") or 0.0),
+                "mode": str(next_state.get("mode") or "auto"),
+            },
+        )
+        self._push_diff_locked(realm_id, f"天气转变为{meta['label']}（{meta['outdoor_desc']}）")
+        seen_child_sids: set[str] = set()
+        for act in self._world["actors"].values():
+            if act.get("is_player"):
+                continue
+            asid = str(act.get("space_id") or "")
+            if self._realm_space_id_locked(asid) != realm_id:
+                continue
+            sp = self._world["spaces"].get(asid) or {}
+            is_outdoor = sp.get("space_kind") == "town"
+            if not is_outdoor and asid not in seen_child_sids:
+                seen_child_sids.add(asid)
+                self._push_diff_locked(asid, f"{meta['indoor_desc']}。")
+            spec = weather.weather_persona_event_spec(
+                new_code,
+                float(next_state.get("intensity") or 0.0),
+                is_outdoor=is_outdoor,
+                prev_code=prev_code,
+            )
+            if spec:
+                self._queue_persona_event_locked(
+                    act,
+                    spec["kind"],
+                    None,
+                    "weather",
+                    spec["label"],
+                    epa=spec["epa"],
+                    need=spec["need"],
+                )
+
+    def set_weather(
+        self,
+        space_id: str = "",
+        mode: str = "auto",
+        *,
+        intensity: float | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            sid = str(space_id or self._world.get("active_space_id") or "").strip()
+            if sid not in self._world["spaces"]:
+                raise ValueError(f"空间不存在：{sid}")
+            clean_mode = str(mode or "auto").strip().lower()
+            if clean_mode not in weather.VALID_WEATHER_MODES:
+                raise ValueError(f"不支持的天气模式：{mode}")
+            realm = self._realm_space_id_locked(sid)
+            prev = self._weather_state_locked(realm)
+            prev_code = prev["current"]
+            sim_min = float(self._world.get("simulation_minutes") or 0.0)
+
+            if clean_mode == "auto":
+                nxt = {
+                    **prev,
+                    "mode": "auto",
+                    "next_change_sim_min": round(sim_min + 180.0, 3),
+                }
+                if intensity is not None and prev_code != "clear":
+                    nxt["intensity"] = round(clamp_float(intensity, 0.15, 1.0, prev["intensity"]), 3)
+            else:
+                def_int = 0.0 if clean_mode == "clear" else (0.6 if clean_mode in ("rain", "snow") else 0.5)
+                eff_int = 0.0 if clean_mode == "clear" else clamp_float(
+                    intensity if intensity is not None else def_int, 0.15, 1.0, def_int,
+                )
+                nxt = {
+                    **prev,
+                    "mode": clean_mode,
+                    "current": clean_mode,
+                    "intensity": round(eff_int, 3),
+                    "changed_sim_min": round(sim_min, 3),
+                    "next_change_sim_min": round(sim_min + 240.0, 3),
+                    "transition_seq": int(prev.get("transition_seq") or 0) + (1 if clean_mode != prev_code else 0),
+                }
+
+            self._world.setdefault("weather_by_realm", {})[realm] = nxt
+            if nxt["current"] != prev_code:
+                self._record_weather_transition_locked(realm, prev_code, nxt)
+            self._save_world_locked()
+            return self._weather_view_locked(sid)
+
+    def _resolve_actor_home_locked(self, actor: Mapping[str, Any], realm_id: str) -> str:
+        hs_map = actor.get("home_spaces") if isinstance(actor.get("home_spaces"), Mapping) else {}
+        explicit = str(hs_map.get(realm_id) or "").strip()
+        realm_sp = self._world["spaces"].get(realm_id) or {}
+        realm_buildings = realm_sp.get("buildings") or ()
+        valid_sids = {
+            sid for sid in self._world["spaces"]
+            if sid != realm_id and self._realm_space_id_locked(sid) == realm_id
+        }
+        return schedule.default_home_space_id(
+            str(actor.get("name") or ""),
+            str(actor.get("host_character") or ""),
+            realm_buildings,
+            explicit_home=explicit,
+            valid_space_ids=valid_sids,
+        )
+
+    def get_actor_home_space(self, actor_id: str, space_id: str = "") -> str:
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            if not actor:
+                raise ValueError(f"角色不存在：{actor_id}")
+            sid = str(space_id or actor.get("space_id") or "").strip()
+            realm = self._realm_space_id_locked(sid) if sid in self._world["spaces"] else sid
+            return self._resolve_actor_home_locked(actor, realm)
+
+    def set_actor_home_space(
+        self,
+        actor_id: str,
+        home_space_id: str,
+        *,
+        realm_space_id: str = "",
+    ) -> str:
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            if not actor:
+                raise ValueError(f"角色不存在：{actor_id}")
+            base_sid = str(realm_space_id or actor.get("space_id") or self._world.get("active_space_id") or "").strip()
+            realm = self._realm_space_id_locked(base_sid)
+            clean_home = str(home_space_id or "").strip()
+            hs_map = actor.setdefault("home_spaces", {})
+            if not clean_home:
+                hs_map.pop(realm, None)
+            else:
+                if (
+                    clean_home not in self._world["spaces"]
+                    or self._realm_space_id_locked(clean_home) != realm
+                    or clean_home == realm
+                ):
+                    raise ValueError("指派的住处必须是同一城镇域内的建筑室内空间。")
+                hs_map[realm] = clean_home
+            resolved = self._resolve_actor_home_locked(actor, realm)
+            self._append_event_locked(
+                "actor_home_updated",
+                actor_id=actor_id,
+                space_id=realm,
+                payload={"home_space_id": resolved, "explicit": bool(clean_home)},
+            )
+            self._save_world_locked()
+            return resolved
 
     @staticmethod
     def get_zone_at(space: Mapping[str, Any], x: int, y: int) -> dict[str, Any] | None:
@@ -1333,6 +1556,10 @@ class WorldEngine:
                 if isinstance(ws, dict):
                     for dsid in delete_ids:
                         ws.pop(dsid, None)
+                hs = act.get("home_spaces")
+                if isinstance(hs, dict):
+                    for hk in [k for k, v in hs.items() if k in delete_ids or v in delete_ids]:
+                        hs.pop(hk, None)
 
             removed_ids: list[str] = []
             for eid, ent in list(self._world["entities"].items()):
@@ -1365,6 +1592,8 @@ class WorldEngine:
 
             for dsid in delete_ids:
                 self._world["puzzle_memories"].pop(dsid, None)
+                self._world.get("weather_by_realm", {}).pop(dsid, None)
+                self._world.get("shop_restock_day_by_realm", {}).pop(dsid, None)
                 persona_bridge.delete_world_relations(self._data_root, dsid)
             self._world["persona_events"] = {
                 eid: event for eid, event in self._world["persona_events"].items() if event["space_id"] not in delete_ids
@@ -1409,6 +1638,29 @@ class WorldEngine:
     def create_building_subworld(self, town_space_id: str, **kwargs: Any) -> dict[str, Any]:
         from . import town_builder
         return town_builder.build_building_subworld(self, town_space_id, **kwargs)
+
+    def generate_town(
+        self,
+        town_spec: Mapping[str, Any],
+        *,
+        town_id: str = "",
+        move_actor_id: str = "",
+    ) -> dict[str, Any]:
+        from . import town_builder
+        return town_builder.build_generated_town(
+            self,
+            town_spec,
+            town_id=town_id,
+            move_actor_id=move_actor_id,
+        )
+
+    def add_town_building(self, town_space_id: str, **kwargs: Any) -> dict[str, Any]:
+        from . import town_builder
+        return town_builder.add_building_to_town(self, town_space_id, **kwargs)
+
+    def validate_town(self, town_space_id: str) -> dict[str, Any]:
+        from . import town_builder
+        return town_builder.validate_town_layout(self, town_space_id)
 
     def _expand_space_locked(
         self,
@@ -2588,7 +2840,7 @@ class WorldEngine:
     def _queue_persona_event_locked(
         self, actor: Mapping[str, Any], kind: str, entity: Mapping[str, Any] | None, action: str, message: str,
         *, ok: bool = True, peer: Mapping[str, Any] | None = None, mood_delta: float = 0.0,
-        outcome: str = "",
+        outcome: str = "", epa: Mapping[str, float] | None = None, need: str = "",
     ) -> dict[str, Any]:
         participants = [{"actor_id": actor["actor_id"], "name": actor["name"], "role": "initiator"}]
         if peer is not None:
@@ -2612,9 +2864,15 @@ class WorldEngine:
             "label": clip_text(message, 80),
             "effect_mood_delta": mood_delta,
         }
+        if isinstance(epa, Mapping):
+            clean_epa = {k: float(v) for k, v in epa.items() if k in ("e", "p", "a")}
+            if clean_epa:
+                payload["epa"] = clean_epa
+        if need:
+            payload["need"] = str(need)
         cognition = actor.get("autonomy", {}).get("cognition") or {}
         impression = cognition.get("semantic", {}).get(payload["entity_id"], {})
-        if ok and impression.get("epa"):
+        if ok and "epa" not in payload and impression.get("epa"):
             payload["epa"] = impression["epa"]
         event = self._append_event_locked(
             "actor_action_outcome", actor_id=actor["actor_id"], space_id=actor["space_id"], payload=payload,
@@ -2959,6 +3217,8 @@ class WorldEngine:
                 "lighting": compute_lighting(
                     space, self._world["entities"], time.time(), self._world["clock_offset_minutes"],
                 ),
+                "weather": self._weather_view_locked(sid),
+                "home_space_id": self._resolve_actor_home_locked(actor, realm),
             }
 
     def live_actor_frame(self, actor_id: str) -> dict[str, Any] | None:
@@ -2980,6 +3240,8 @@ class WorldEngine:
             packet = cog.get("modulation") or {}
             active_int = cog.get("active_intention") or {}
             frame["is_player"] = bool(actor.get("is_player", False))
+            realm_sid = self._realm_space_id_locked(actor["space_id"])
+            frame["home_space_id"] = "" if frame["is_player"] else self._resolve_actor_home_locked(actor, realm_sid)
             frame["reflection_state"] = {
                 "id": packet.get("id"), "strength": packet.get("strength", 1.0),
                 "preempt_seq": int(cog.get("preempt_seq", 0)),
@@ -3020,9 +3282,14 @@ class WorldEngine:
                     item["sprite"] = self._sprite_with_data_url(item["sprite"])
                     item["state_tags"] = self.entity_state_tags(item)
                     entities.append(item)
-            result = {"space_id": space_id, "entities": entities, "lighting": compute_lighting(
-                space, world_entities, time.time(), self._world["clock_offset_minutes"],
-            )}
+            result = {
+                "space_id": space_id,
+                "entities": entities,
+                "lighting": compute_lighting(
+                    space, world_entities, time.time(), self._world["clock_offset_minutes"],
+                ),
+                "weather": self._weather_view_locked(space_id),
+            }
             if entity_ids is not None:
                 present = {ent["entity_id"] for ent in entities}
                 result["removed_entity_ids"] = [eid for eid in entity_ids if eid not in present]
@@ -4078,6 +4345,9 @@ class WorldEngine:
         is_night = False
         vision_radius = 12
         if use_spatial and space:
+            if space.get("space_kind") == "town":
+                w_view = self._weather_view_locked(sid)
+                vision_radius = max(6, 12 + int(w_view.get("visibility_delta") or 0))
             w = int(space.get("width") or 0)
             h = int(space.get("height") or 0)
             open_doors: set[tuple[int, int]] = set()
@@ -4405,6 +4675,22 @@ class WorldEngine:
         if entity is not None:
             self._face_entity_locked(actor, entity)
 
+    @staticmethod
+    def _infer_consumable_hunger_delta(entity: Mapping[str, Any]) -> float:
+        eff = entity.get("effects") or {}
+        if eff.get("hunger_delta") is not None:
+            return float(eff["hunger_delta"])
+        name = str(entity.get("name") or "")
+        verb = str((entity.get("traits") or {}).get("consumable", {}).get("consume_verb") or "")
+        tags = set(entity.get("tags") or ())
+        if any(w in name for w in ("拉面", "猪扒饭", "猪排饭", "便当", "饭", "面", "正餐", "咖喱", "汉堡", "三明治")):
+            return -0.55
+        if any(w in name for w in ("蛋糕", "甜品", "派", "布丁", "松饼")):
+            return -0.38
+        if verb == "喝" or "drink" in tags or any(w in name for w in ("茶", "咖啡", "热饮", "奶茶", "苏打", "果汁", "饮料", "水")):
+            return -0.18
+        return -0.28
+
     def _apply_effects_locked(self, actor: dict[str, Any], entity: Mapping[str, Any]) -> None:
         eff = entity.get("effects") or {}
         vit = actor["vitals"]
@@ -4417,10 +4703,11 @@ class WorldEngine:
         aut = normalize_autonomy(actor.get("autonomy"))
         traits = entity.get("traits") or {}
         if "consumable" in traits:
-            aut["hunger"] = round(clamp_float(aut["hunger"] - 0.38, 0.0, 1.0, 0.2), 3)
+            delta = self._infer_consumable_hunger_delta(entity)
+            aut["hunger"] = round(clamp_float(aut["hunger"] + delta, 0.0, 1.0, 0.2), 3)
         if "activity" in traits:
             aut["curiosity"] = round(clamp_float(aut["curiosity"] - 0.28, 0.0, 1.0, 0.3), 3)
-            aut["hunger"] = round(clamp_float(aut["hunger"] + 0.05, 0.0, 1.0, 0.3), 3)
+            aut["hunger"] = round(clamp_float(aut["hunger"] + 0.01, 0.0, 1.0, 0.3), 3)
         actor["autonomy"] = aut
 
     def update_actor_autonomy(
@@ -4778,6 +5065,19 @@ class WorldEngine:
                     self._refresh_actor_expression_locked(actor, action_kind="consume")
                     self._append_event_locked("entity_consumed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "verb": verb, "uses_left": 0, "vanished": True})
                     return report(f"{prefix}把「{full_name}」{verb}光了，现在彻底没了。", ok=True)
+                if left == 0 and not actor.get("is_player") and ent.get("parent_id") == f"inventory:{actor_id}":
+                    if actor.get("holding_id") == eid:
+                        actor["holding_id"] = None
+                    self._world["entities"].pop(eid, None)
+                    self._cancel_key_loans_locked((eid,))
+                    self._refresh_actor_expression_locked(actor, action_kind="consume")
+                    self._append_event_locked(
+                        "entity_consumed",
+                        actor_id=actor_id,
+                        space_id=sid,
+                        payload={"entity_id": eid, "verb": verb, "uses_left": 0, "vanished": True, "discarded_empty": True},
+                    )
+                    return report(f"{prefix}把随身的「{full_name}」{verb}完了，顺手收起了空器皿。", ok=True)
                 if left == 0:
                     if empty_name:
                         ent["name"] = empty_name
@@ -5088,6 +5388,162 @@ class WorldEngine:
             return f"{prefix}{fb}"
 
     # ── L1 物理时钟推进（0 Token）────────────────────────────────────────
+    def _realm_business_day_locked(self, realm_space: Mapping[str, Any], cur_now: float) -> int:
+        light = compute_lighting(
+            realm_space,
+            self._world["entities"],
+            cur_now,
+            float(self._world.get("clock_offset_minutes") or 0.0),
+        )
+        return int(light["sim_day"]) if float(light["hour_float"]) >= 6.0 else int(light["sim_day"]) - 1
+
+    def _restock_shops_locked(self, realm_sid: str, cur_now: float) -> list[str]:
+        realm_space = self._world["spaces"].get(realm_sid)
+        buildings = realm_space.get("buildings") if realm_space else None
+        if not realm_space or not isinstance(buildings, list) or not buildings:
+            return []
+        shops: list[tuple[Mapping[str, Any], str, str, str]] = []
+        for b in buildings:
+            if not isinstance(b, Mapping):
+                continue
+            shop_sid = str(b.get("interior_space_id") or "").strip()
+            if not shop_sid or shop_sid not in self._world["spaces"]:
+                continue
+            profile = venue_semantics.restock_profile_for_building(b)
+            if profile not in ("cafe", "shop"):
+                continue
+            shop_name = str(b.get("name") or self._world["spaces"][shop_sid].get("name") or shop_sid)
+            shops.append((b, shop_sid, shop_name, profile))
+        if not shops:
+            return []
+
+        business_day = self._realm_business_day_locked(realm_space, cur_now)
+        restock_map = self._world.setdefault("shop_restock_day_by_realm", {})
+        sim_now = float(self._world.get("simulation_minutes") or 0.0)
+        if realm_sid not in restock_map:
+            restock_map[realm_sid] = business_day
+            if sim_now < 60.0:
+                return []
+            targets = [
+                (b, s_sid, s_name, s_prof)
+                for b, s_sid, s_name, s_prof in shops
+                if not any(
+                    e.get("space_id") == s_sid
+                    and not str(e.get("parent_id") or "").startswith(("inventory:", "actor:"))
+                    and int(((e.get("traits") or {}).get("consumable") or {}).get("uses_left") or 0) > 0
+                    for e in self._world["entities"].values()
+                )
+            ]
+        elif business_day > int(restock_map[realm_sid]):
+            restock_map[realm_sid] = business_day
+            targets = shops
+        else:
+            return []
+
+        restocked: list[str] = []
+        for bldg, shop_sid, shop_name, restock_profile in targets:
+            shop_space = self._world["spaces"].get(shop_sid)
+            if not shop_space:
+                continue
+            changed = False
+            for ent in self._world["entities"].values():
+                if ent.get("space_id") != shop_sid or str(ent.get("parent_id") or "").startswith(("inventory:", "actor:")):
+                    continue
+                traits = ent.get("traits") or {}
+                cm = traits.get("consumable")
+                th = traits.get("thermal")
+                needs_refill = isinstance(cm, dict) and int(cm.get("uses_left") or 0) < int(cm.get("max_uses") or 1)
+                needs_heat = isinstance(th, dict) and str(th.get("temp") or "cold") != "hot"
+                if not (needs_refill or needs_heat):
+                    continue
+                if isinstance(cm, dict):
+                    cm["uses_left"] = int(cm.get("max_uses") or 2)
+                    bp_id = str(ent.get("blueprint_id") or "")
+                    bp = self._custom_blueprints.get(bp_id) or self._builtin_blueprints.get(bp_id)
+                    if bp:
+                        ent["name"] = str(bp.get("name") or ent["name"])
+                        ent["brief"] = str(bp.get("brief") or ent.get("brief") or "")
+                    else:
+                        full_name, _ = infer_consumable_names(ent["name"], str(cm.get("empty_name") or ""))
+                        if full_name:
+                            ent["name"] = full_name
+                        if ent.get("brief") == cm.get("empty_brief"):
+                            ent["brief"] = full_name or ent["name"]
+                if isinstance(th, dict):
+                    th["temp"] = "hot"
+                    th["temp_updated_ts"] = cur_now
+                changed = True
+
+            staples = venue_semantics.restock_staples_for_profile(restock_profile)
+            surfaces = [
+                e for e in self._world["entities"].values()
+                if e.get("space_id") == shop_sid
+                and int(e.get("z", 0)) == 0
+                and "surface" in (e.get("traits") or {})
+            ]
+            surface_cells: list[tuple[int, int]] = []
+            for surf in surfaces:
+                surface_cells.extend(self._entity_cells(surf))
+            for bp_id in staples:
+                if bp_id not in self._builtin_blueprints:
+                    continue
+                has_live = any(
+                    e.get("space_id") == shop_sid
+                    and not str(e.get("parent_id") or "").startswith(("inventory:", "actor:"))
+                    and e.get("blueprint_id") == bp_id
+                    and int(((e.get("traits") or {}).get("consumable") or {}).get("uses_left") or 0) > 0
+                    for e in self._world["entities"].values()
+                )
+                if has_live:
+                    continue
+                bp = self._builtin_blueprints[bp_id]
+                placed = False
+                for cx, cy in surface_cells:
+                    try:
+                        p_id, px, py, pz = self._resolve_placement_locked(
+                            shop_sid, cx, cy, bp["footprint"], bp["placement"], bp["solid"],
+                        )
+                        new_ent = self._instantiate_blueprint_locked(bp, shop_sid, p_id, px, py, pz)
+                        self._world["entities"][new_ent["entity_id"]] = new_ent
+                        changed = True
+                        placed = True
+                        break
+                    except ValueError:
+                        continue
+                if not placed:
+                    try:
+                        fx, fy = self._find_open_floor_cell_locked(shop_space)
+                        p_id, px, py, pz = self._resolve_placement_locked(
+                            shop_sid, fx, fy, bp["footprint"], bp["placement"], bp["solid"],
+                        )
+                        new_ent = self._instantiate_blueprint_locked(bp, shop_sid, p_id, px, py, pz)
+                        self._world["entities"][new_ent["entity_id"]] = new_ent
+                        changed = True
+                    except ValueError:
+                        pass
+
+            if changed:
+                restocked.append(shop_name)
+                self._push_diff_locked(shop_sid, f"清晨营业，「{shop_name}」补好了今日份的餐点与热饮。")
+                for act in self._world["actors"].values():
+                    if act.get("is_player"):
+                        continue
+                    cog = (act.get("autonomy") or {}).get("cognition")
+                    if not isinstance(cog, dict):
+                        continue
+                    place = (cog.get("places") or {}).get(shop_sid)
+                    if not isinstance(place, dict):
+                        continue
+                    aff = place.setdefault("affordances", {})
+                    food_rec = aff.get("food")
+                    if not isinstance(food_rec, dict) or float(food_rec.get("confidence", 0.0)) < 0.65:
+                        aff["food"] = {
+                            "source": "signboard",
+                            "confidence": 0.65,
+                            "samples": list((food_rec or {}).get("samples") or [sim_now])[-7:],
+                        }
+        return restocked
+
     def tick_physics(
         self, *, advance_minutes: float | None = None, now: float | None = None,
         minimum_elapsed_minutes: float = 0.0, time_scale: float = 1.0,
@@ -5101,15 +5557,33 @@ class WorldEngine:
             else:
                 elapsed = max(0.0, (cur_now - last_ts) / 60.0)
                 if elapsed < minimum_elapsed_minutes:
-                    return {"delta_min": 0.0, "cooled": []}
+                    return {"delta_min": 0.0, "cooled": [], "restocked": []}
                 delta_min = elapsed * time_scale
                 self._world["clock_offset_minutes"] += delta_min - elapsed
             self._world["last_tick_ts"] = cur_now
             self._world["simulation_minutes"] += delta_min
 
             cooled: list[str] = []
+            restocked: list[str] = []
             precision = 5 if minimum_elapsed_minutes else 3
             if delta_min > 0:
+                root_realms = [
+                    r_sid for r_sid, sp in self._world["spaces"].items()
+                    if not str(sp.get("parent_space_id") or "").strip()
+                    or str(sp.get("parent_space_id") or "").strip() not in self._world["spaces"]
+                ]
+                sim_now = float(self._world.get("simulation_minutes") or 0.0)
+                w_map = self._world.setdefault("weather_by_realm", {})
+                for r_sid in root_realms:
+                    prev_w = self._weather_state_locked(r_sid)
+                    prev_code = prev_w["current"]
+                    nxt_w, w_changed = weather.advance_weather(
+                        prev_w, sim_now, realm_seed=f"{self._world['event_source']}:{r_sid}",
+                    )
+                    w_map[r_sid] = nxt_w
+                    if w_changed:
+                        self._record_weather_transition_locked(r_sid, prev_code, nxt_w)
+
                 for eid, ent in self._world["entities"].items():
                     th = (ent.get("traits") or {}).get("thermal")
                     if not th:
@@ -5121,6 +5595,12 @@ class WorldEngine:
                     elapsed = delta_min
                     if advance_minutes is None:
                         elapsed = max(delta_min, (cur_now - float(th.get("temp_updated_ts") or cur_now)) / 60.0)
+                    ent_sid = str(ent.get("space_id") or "")
+                    ent_sp = self._world["spaces"].get(ent_sid)
+                    if ent_sp and ent_sp.get("space_kind") == "town" and not str(ent.get("parent_id") or "").startswith("inventory:"):
+                        w_st = self._weather_state_locked(self._realm_space_id_locked(ent_sid))
+                        rate = float(weather.WEATHER_META.get(w_st["current"], {}).get("outdoor_thermal_rate", 1.0))
+                        elapsed *= rate
                     new_temp = cur_temp
                     if elapsed >= cool_min:
                         new_temp = "cold"
@@ -5132,10 +5612,16 @@ class WorldEngine:
                         cooled.append(f"{ent['name']}->{new_temp}")
                         self._push_diff_locked(ent["space_id"], f"「{ent['name']}」{'微温了' if new_temp == 'warm' else '已经凉透了'}")
 
+                for r_sid in root_realms:
+                    restocked.extend(self._restock_shops_locked(r_sid, cur_now))
+
                 for act in self._world["actors"].values():
+                    if act.get("is_player"):
+                        continue
                     vit = act["vitals"]
                     rest_id = act.get("resting_on_id")
-                    if act.get("posture") == "resting" and rest_id and rest_id in self._world["entities"]:
+                    is_resting = bool(act.get("posture") == "resting" and rest_id and rest_id in self._world["entities"])
+                    if is_resting:
                         regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.012)
                         vit["energy"] = round(clamp_float(vit["energy"] + regen * delta_min, 0.0, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] - regen * 0.9 * delta_min, 0.0, 1.0, 0.3), precision)
@@ -5143,16 +5629,17 @@ class WorldEngine:
                         vit["energy"] = round(clamp_float(vit["energy"] - 0.0012 * delta_min, 0.05, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] + 0.0015 * delta_min, 0.0, 1.0, 0.3), precision)
                     aut = normalize_autonomy(act.get("autonomy"))
-                    aut["hunger"] = round(clamp_float(aut["hunger"] + 0.005 * delta_min, 0.0, 1.0, 0.3), precision)
+                    hunger_rate = 0.0014 * 0.35 if is_resting else 0.0014
+                    aut["hunger"] = round(clamp_float(aut["hunger"] + hunger_rate * delta_min, 0.0, 1.0, 0.3), precision)
                     aut["curiosity"] = round(clamp_float(aut["curiosity"] + 0.006 * delta_min, 0.0, 1.0, 0.55), precision)
                     act["autonomy"] = aut
                     self._refresh_actor_expression_locked(act)
                     self._sync_actor_world_state_locked(act)
 
-                if delta_min >= 1.0 or cooled:
-                    self._append_event_locked("world_tick", payload={"delta_min": round(delta_min, 2), "cooled": cooled})
+                if delta_min >= 1.0 or cooled or restocked:
+                    self._append_event_locked("world_tick", payload={"delta_min": round(delta_min, 2), "cooled": cooled, "restocked": restocked})
             self._save_world_locked()
-            return {"delta_min": round(delta_min, 2), "cooled": cooled}
+            return {"delta_min": round(delta_min, 2), "cooled": cooled, "restocked": restocked}
 
     def _actor_active_sprite_payload(self, actor: Mapping[str, Any]) -> dict[str, Any]:
         sp = actor.get("sprite") or {}
@@ -5211,6 +5698,9 @@ class WorldEngine:
                 a = copy.deepcopy(act)
                 a["sprite"] = self._sprite_with_data_url(a["sprite"])
                 a["active_sprite"] = self._actor_active_sprite_payload(a)
+                if not a.get("is_player") and a.get("space_id") in self._world["spaces"]:
+                    a_realm = self._realm_space_id_locked(a["space_id"])
+                    a["resolved_home_space_id"] = self._resolve_actor_home_locked(a, a_realm)
                 actors_out.append(a)
 
             blueprints_out = []
@@ -5313,6 +5803,7 @@ class WorldEngine:
                 "child_spaces": child_spaces,
                 "current_zone": current_zone,
                 "lighting": lighting,
+                "weather": self._weather_view_locked(sid),
                 "palette": active_palette,
                 "palettes": list(palettes.values()),
                 "tile_catalog": [copy.deepcopy(t) for t in TILE_CATALOG.values()],

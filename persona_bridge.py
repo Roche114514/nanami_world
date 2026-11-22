@@ -243,6 +243,7 @@ def write_world_bridge(engine: Any, actor_id: str, bridge_dir: Path, *, view_tex
         "autonomy": actor.get("autonomy") or {},
         "lighting": "dark" if lighting.get("is_dark") else "lit",
         "period": lighting.get("period"),
+        "weather": snap.get("weather") or {},
         "recentItemTags": recent_tags[:12],
         "recentSummary": "; ".join(engine.peek_diffs(sid)[-3:]),
         "viewText": view_text,
@@ -786,6 +787,7 @@ def update_and_project_world_perception(
     touched_eid: str = "",
     advance_exposure: float = 0.0,
     behavior_profile: Mapping[str, Any] | None = None,
+    weather_vis_scale: float = 1.0,
 ) -> dict[str, Any]:
     """计算 L0 主观注意力焦点 Top-K、更新 Groves-Thompson 熟悉度与 Tolman/ACT-R 认知地图。"""
     if not bool(cfg.get("enabled", True)):
@@ -842,7 +844,7 @@ def update_and_project_world_perception(
     recent = list(aut.get("recent_targets") or [])
 
     base_r = max(1.5, float(cfg.get("sensory_radius", 5.0)))
-    eff_r = base_r * (0.72 if sleep_p > 0.70 else 1.0)
+    eff_r = base_r * (0.72 if sleep_p > 0.70 else 1.0) * max(0.5, min(1.2, float(weather_vis_scale)))
     nov_w = float(cfg.get("novelty_weight", 0.55))
     ior_w = float(cfg.get("ior_decay", 0.60))
     top_k = max(2, min(8, int(cfg.get("attentional_breadth", 4))))
@@ -1122,6 +1124,27 @@ def emit_world_event_to_persona(
         return None
 
 
+def _resolve_hour_float(lighting: Mapping[str, Any]) -> float:
+    if "hour_float" in lighting:
+        try:
+            return float(lighting["hour_float"])
+        except (TypeError, ValueError):
+            pass
+    if "hour" in lighting:
+        try:
+            return float(lighting["hour"]) + float(lighting.get("minute") or 0.0) / 60.0
+        except (TypeError, ValueError):
+            pass
+    clock_txt = str(lighting.get("clock") or "").strip()
+    if ":" in clock_txt:
+        try:
+            hh, mm = clock_txt.split(":", 1)
+            return int(hh) + int(mm) / 60.0
+        except (TypeError, ValueError):
+            pass
+    return 12.0
+
+
 def build_percept_frame(
     world_data_root: Path,
     project_root: Path,
@@ -1137,6 +1160,7 @@ def build_percept_frame(
     look_eid: str = "",
     touched_eid: str = "",
     advance_exposure: float = 0.0,
+    weather: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """统一输入层（Input）：客观世界刺激 → L0 主观感知帧（PerceptFrame，供思考层 Brain 消费）。"""
     sid = str(space_meta.get("space_id") or actor.get("space_id") or "room_default").strip() or "room_default"
@@ -1145,6 +1169,9 @@ def build_percept_frame(
     host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
     cfg = read_world_perception_config(project_root, host_char, custom_persona_dir=custom_persona_dir)
     behavior_profile = read_persona_behavior_profile(project_root, host_char, custom_persona_dir=custom_persona_dir)
+    w_dict = dict(weather) if isinstance(weather, Mapping) else {}
+    w_code = str(w_dict.get("current") or "clear").strip().lower()
+    vis_scale = 0.85 if (sp_kind == "town" and w_code in ("rain", "snow")) else 1.0
     l0 = update_and_project_world_perception(
         world_data_root,
         sid,
@@ -1156,9 +1183,10 @@ def build_percept_frame(
         touched_eid=touched_eid,
         advance_exposure=advance_exposure,
         behavior_profile=behavior_profile,
+        weather_vis_scale=vis_scale,
     )
 
-    hour = float(lighting.get("hour", 12))
+    hour = _resolve_hour_float(lighting)
     chrono = float(l0.get("chronotype_offset") or 0.0) if l0.get("enabled") else 0.0
     bio_hour = (hour - chrono) % 24.0
     circ_phase = "deep_night" if (bio_hour >= 23.0 or bio_hour < 6.0) else ("evening" if bio_hour >= 21.0 else "daytime")
@@ -1172,6 +1200,8 @@ def build_percept_frame(
         )
     else:
         light_desc = "屋里暗着" if lighting.get("is_dark") else "室内光线明亮"
+    w_desc = str(w_dict.get("description") or "").strip()
+    w_seg = f"｜天气：{w_desc}" if w_desc else ""
 
     aid = str(actor.get("actor_id") or "")
     ax, ay = int(actor.get("x") or 0), int(actor.get("y") or 0)
@@ -1202,11 +1232,12 @@ def build_percept_frame(
     stage = str(l0.get("stage") or "settled")
     stage_cn = _STAGE_LABELS.get(stage, stage)
 
+    minute_i = int(lighting.get("minute", round((hour % 1.0) * 60.0))) % 60
     peer_line = f"\n- 眼前人物（社会注意焦点）：{'；'.join(focused_peers)}" if focused_peers else ""
     if l0.get("enabled"):
         prompt_block = (
             f"【{actor.get('name') or host_char} · L0 主观感知输入】\n"
-            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}\n"
+            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{minute_i:02d})｜{light_desc}{w_seg}\n"
             f"- 适应阶段：{stage_cn}（熟悉度={l0['familiarity']:.2f}，已记住物件={l0['mental_map_count']}件）"
             f"{peer_line}\n"
             f"- 此刻物体焦点（按显著度过滤）：{'；'.join(focused_sensory) if focused_sensory else '周围空荡荡的'}"
@@ -1215,7 +1246,7 @@ def build_percept_frame(
         all_sensory = [_sensory_item_desc(e, actors_map=actors_map) for e in entities[:12]]
         prompt_block = (
             f"【{actor.get('name') or host_char} · 环境输入（L0 已关闭）】\n"
-            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{int(lighting.get('minute', 0)):02d})｜{light_desc}"
+            f"- 身处空间：「{sp_name}」｜客观时段：{period_cn}({int(hour):02d}:{minute_i:02d})｜{light_desc}{w_seg}"
             f"{peer_line}\n"
             f"- 周围物件：{'；'.join(all_sensory) if all_sensory else '周围空荡荡的'}"
         )
@@ -1227,8 +1258,10 @@ def build_percept_frame(
         "habituation_rate": _clamp_f(cfg.get("habituation_rate"), 0.05, 1.0, 0.25),
         "space_name": sp_name,
         "stage_cn": stage_cn,
+        "hour_float": round(hour, 3),
         "bio_hour": round(bio_hour, 2),
         "circadian_phase": circ_phase,
+        "weather": w_dict,
         "focused_names": focused_names,
         "focused_peers": focused_peers,
         "focused_sensory": focused_sensory,
