@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from . import persona_bridge, schedule, text_compiler, venue_semantics, weather
+from . import episodic_memory, persona_bridge, schedule, text_compiler, venue_semantics, weather
 from .schema import clip_text, inscription_is_new
 
 
@@ -19,7 +19,7 @@ _DOMAINS = {
     "social": "社交", "notice": "导览", "explore": "探索", "expression": "表达",
     "comfort": "照明", "curiosity": "好奇", "hobby": "爱好", "music": "音乐",
 }
-_PHASES = {"travel": "前往", "approach": "接近", "activity": "在场活动"}
+_PHASES = {"travel": "前往", "approach": "接近", "waiting": "等候同伴", "activity": "在场活动", "dwell": "结伴停留"}
 _SOURCES = {"direct": "亲历", "signboard": "布告栏", "social": "同伴告知"}
 # 恢复周期为游戏分钟。场所和区块的新鲜感恢复得比单次动作慢。
 _HALF_LIFE = {"entity": 95.0, "action": 35.0, "place": 230.0, "frontier": 190.0}
@@ -50,14 +50,16 @@ def _rehearse(record: dict[str, Any], now: float, *, interval: float = 3.0) -> N
 
 
 def cognitive_summary(actor: Mapping[str, Any]) -> dict[str, Any]:
-    state = (actor.get("autonomy") or {}).get("cognition") or {}
+    autonomy = actor.get("autonomy") or {}
+    state = autonomy.get("cognition") or {}
     if not state:
         return {}
     intention = state.get("active_intention") or {}
     zones = state.get("zones", {}).values()
     places = state.get("places", {}).values()
+    goal = autonomy.get("current_goal") if intention.get("phase") == "dwell" else intention.get("goal")
     return {
-        "goal": intention.get("goal") or "",
+        "goal": goal or intention.get("goal") or "",
         "phase": _PHASES.get(intention.get("phase"), ""),
         "drives": {_DOMAINS.get(k, k): v for k, v in state.get("drives", {}).items()},
         "satiation": {_DOMAINS.get(k, k): v for k, v in state.get("satiation", {}).items() if v >= 0.05},
@@ -74,6 +76,7 @@ def cognitive_summary(actor: Mapping[str, Any]) -> dict[str, Any]:
         "agenda": (state.get("modulation") or {}).get("agenda", ""),
         "commitment": (intention.get("goal") or "") if intention.get("pfc_committed") else "",
         "arbitration": state.get("arbitration") or "稳态/习惯",
+        "memories": episodic_memory.recent_summaries(state),
         "peers": [
             {
                 "name": p["name"],
@@ -112,6 +115,13 @@ class CognitiveEngine:
                 state.pop(key, None)
         state.setdefault("last_social_at", now)
         state.setdefault("arbitration", "稳态/习惯")
+        joint_visit = scene.get("joint_visit") or {}
+        scene["joint_wait_minutes"] = 4.0 if "engage" in scene else max(4.0, settings.heartbeat_interval_sec / 12)
+        scene["joint_activity_minutes"] = 2.0 if "engage" in scene else max(2.0, settings.heartbeat_interval_sec / 15)
+        for key in ("active_intention", "suspended_intention"):
+            visit_id = (state.get(key) or {}).get("joint_visit_id")
+            if visit_id and visit_id != joint_visit.get("id"):
+                state.pop(key, None)
 
         lang_packet = state.pop("pending_modulation", None)
         if isinstance(lang_packet, dict) and lang_packet.get("id"):
@@ -211,7 +221,7 @@ class CognitiveEngine:
             sa = social_signal.get("speech_act") if isinstance(social_signal.get("speech_act"), Mapping) else {}
             exp_text = str(sa.get("summary") or "").strip()
             self._experience(state, exp_text or f"和{name}{'聊了几句' if spoken else '碰了面'}。")
-            has_plan = bool(sa.get("shared_place_id") or sa.get("personal_goal"))
+            has_plan = bool(sa.get("shared_place_id") or sa.get("shared_entity_id") or sa.get("personal_goal"))
             state["reflection"] = f"和{name}聊出了约定" if has_plan else f"刚和{name}{'交流' if spoken else '碰面'}"
             self._reward(state, social_signal["actor"], "social", now)
             speaker = next((p for p in peers if p["actor_id"] == social_signal["actor"]), None)
@@ -227,7 +237,7 @@ class CognitiveEngine:
                 pg.get("kind") == "visit" and pg.get("target") == spid
                 and (pg.get("action") == "escort" or (pg.get("drive") == "rest" and target_is_lodging))
             )
-            if spid in realm_places and not personal_arrival:
+            if spid in realm_places and not personal_arrival and not social_signal.get("joint_visit_id"):
                 self._ensure_portal_known(state, scene, spid, "social", now, partner=speaker)
                 sdrive = sa.get("shared_drive") if sa.get("shared_drive") in _DOMAINS else "social"
                 pending_commitment = {
@@ -237,7 +247,7 @@ class CognitiveEngine:
                     "companion_id": social_signal["actor"],
                     "priority": "high", "source": "speech_act",
                 }
-            elif pg:
+            elif pg and not social_signal.get("joint_visit_id"):
                 pg_kind = str(pg.get("kind") or "").strip()
                 pg_tgt = str(pg.get("target") or "").strip()
                 pg_drv = str(pg.get("drive") or "").strip()
@@ -273,6 +283,21 @@ class CognitiveEngine:
                 mod["domains"] = mod_dom
                 mod["at"] = now
                 state["modulation"] = mod
+
+        joint_id = str(joint_visit.get("id") or "")
+        local_rest = joint_visit.get("seated_id") == aid
+        if (joint_id and actor["posture"] != "resting"
+                and (local_rest or (vit["energy"] >= 0.25 and vit["sleep_pressure"] < 0.85))
+                and (state.get("active_intention") or {}).get("joint_visit_id") != joint_id
+                and (pending_commitment or {}).get("source") not in ("language", "speech_act")):
+            target = joint_visit["target"]
+            name = joint_visit.get("entity_name") or scene["realm_places"][target]
+            pending_commitment = {
+                "id": joint_id, "kind": "visit", "target": target, "drive": joint_visit["drive"],
+                "reason": f"和{joint_visit['peer_name']}一起去「{name}」",
+                "companion_id": joint_visit["peer_id"], "joint_visit_id": joint_id,
+                "priority": "high", "source": "speech_act",
+            }
 
         self._update_drives(state, scene)
         if "engage" in scene and not actor.get("is_player"):
@@ -310,16 +335,19 @@ class CognitiveEngine:
             state["applied_commitments"] = seen_cids[-12:]
             arrival_in_progress = self._is_agreed_arrival(intention)
             new_arrival = self._is_agreed_arrival(pending_commitment)
-            speech_visit_in_progress = bool(
-                intention and intention.get("source") == "speech_act" and intention.get("kind") == "visit"
+            speech_action_in_progress = bool(
+                intention and intention.get("source") == "speech_act" and intention.get("kind") in ("visit", "entity")
             )
             if arrival_in_progress:
                 may_replace = new_arrival or pending_commitment.get("source") == "language"
-            elif speech_visit_in_progress:
+            elif speech_action_in_progress:
                 may_replace = pending_commitment.get("source") in ("language", "speech_act")
             else:
                 may_replace = True
-            going_to_rest = new_arrival and pending_commitment.get("drive") == "rest"
+            going_to_rest = pending_commitment.get("drive") == "rest" and (
+                new_arrival or pending_commitment.get("action") == "rest"
+                or (local_rest and pending_commitment.get("joint_visit_id") == joint_id)
+            )
             going_to_food = (
                 pending_commitment.get("drive") == "food"
                 or (
@@ -349,6 +377,8 @@ class CognitiveEngine:
                         and (actor.get("posture") == "resting" or (state["drives"]["rest"] >= 0.65 and not going_to_rest))
                     )
                     if (pending_commitment.get("priority") == "high" or low_urgency) and not_sleeping:
+                        if joint_id and not resolved.get("joint_visit_id") and resolved["source"] in ("language", "speech_act"):
+                            self.engine.finish_joint_visit(aid, joint_id, together=True)
                         if intention is not None and not low_urgency and intention.get("key") != resolved.get("key"):
                             state["suspended_intention"] = intention
                         intention = resolved
@@ -394,6 +424,7 @@ class CognitiveEngine:
         picked = intention
         if actor.get("posture") == "resting" and (
             state["drives"]["rest"] >= 0.35 or now < state.get("agreed_rest_until", -1)
+            or (local_rest and joint_visit.get("met"))
         ):
             goal, drive, thought = "休息一会儿", "rest", "再坐一会儿。"
             state["arbitration"] = "生理稳态主导"
@@ -407,12 +438,13 @@ class CognitiveEngine:
                 if reason and use_llm:
                     picked = self._reflect(scene, state, candidates, reason)
                 if scene.get("request_reflection"):
-                    self._request_reflection(scene, state, candidates, reason)
-            elif picked is not None and scene.get("request_reflection") and candidates:
+                    self._request_reflection(scene, state, candidates, reason, include_memories=settings.episodic_memory_enabled)
+            elif (picked is not None and picked.get("source") != "speech_act"
+                  and scene.get("request_reflection") and candidates):
                 reason = state.get("reflection", "")
                 if reason and not str(reason).startswith("完成了"):
                     state.pop("reflection", "")
-                    self._request_reflection(scene, state, candidates, reason)
+                    self._request_reflection(scene, state, candidates, reason, include_memories=settings.episodic_memory_enabled)
             if picked:
                 if picked.get("pfc_committed"):
                     state["arbitration"] = "社会脑/语言主导" if picked.get("source") in ("language", "speech_act") else "前额叶主导"
@@ -423,6 +455,13 @@ class CognitiveEngine:
                 previous_error = state.get("prediction_error")
                 status, logs = self._execute(picked, state, scene, talk, candidates)
                 goal, drive = picked["goal"], picked["drive"]
+                if status == "progress" and picked.get("joint_visit_id") and picked["phase"] == "waiting":
+                    name = joint_visit.get("entity_name")
+                    goal = f"在{name + '旁' if name else space['name']}等{joint_visit['peer_name']}"
+                elif status == "progress" and picked["phase"] == "dwell":
+                    name = joint_visit.get("entity_name")
+                    peer_name = joint_visit["peer_name"]
+                    goal = f"和{peer_name}在{name}旁歇一会儿" if name else f"陪{peer_name}在{space['name']}待一会儿"
                 thought = ""
                 if status == "blocked":
                     state["blocked"][picked["key"]] = state["step"] + 10
@@ -433,6 +472,12 @@ class CognitiveEngine:
                     if picked.get("pfc_committed"):
                         state["reflection"] = thought
                 if status in ("done", "blocked"):
+                    if picked.get("joint_visit_id"):
+                        if sid != picked["target"]:
+                            self.engine.finish_joint_visit(aid, picked["joint_visit_id"], together=True)
+                        suspended = state.get("suspended_intention") or {}
+                        if suspended.get("joint_visit_id") == picked["joint_visit_id"]:
+                            state.pop("suspended_intention", None)
                     intention = state.pop("suspended_intention", None) if drive in ("rest", "social") else None
                     if status == "done" and picked["kind"] != "exit":
                         state.setdefault("reflection", "完成了" + goal)
@@ -730,6 +775,8 @@ class CognitiveEngine:
             }
             if commitment.get("companion_id"):
                 out["companion_id"] = str(commitment["companion_id"])
+            if commitment.get("joint_visit_id"):
+                out["joint_visit_id"] = str(commitment["joint_visit_id"])
             return out
 
         if kind == "social" and target not in scene["player_ids"]:
@@ -1412,6 +1459,14 @@ class CognitiveEngine:
             if sid == scene["realm"]:
                 return self._escort_to_door(intention, state, scene)
         if kind == "visit" and sid == target:
+            if intention.get("joint_visit_id"):
+                with self.engine._lock:
+                    status, logs = self._joint_visit_activity(intention, state, scene, talk)
+                    if status in ("done", "blocked"):
+                        self.engine.finish_joint_visit(
+                            actor["actor_id"], intention["joint_visit_id"], together=drive == "social",
+                        )
+                    return status, logs
             if drive == "social":
                 peer_goal = next((c for c in candidates if c["kind"] == "social" and c["utility"] >= 2.0), None)
                 if peer_goal:
@@ -1423,7 +1478,7 @@ class CognitiveEngine:
             if status != "entered":
                 return status, logs
             if kind == "visit" and destination == target:
-                if target == scene["realm"]:
+                if target == scene["realm"] and not intention.get("joint_visit_id"):
                     return "done", logs
                 intention["phase"] = "activity"
                 self._accumulate(state, "place", target, now, 1.0)
@@ -1437,6 +1492,91 @@ class CognitiveEngine:
         if entity is None:
             return "blocked", []
         return self._use_entity(state, scene, entity, drive, intention["action"])
+
+    def _joint_visit_activity(
+        self, intention: dict[str, Any], state: dict[str, Any], scene: dict[str, Any],
+        talk: Callable[[str, str, str], list[str]],
+    ) -> tuple[str, list[str]]:
+        actor, space = scene["actor"], scene["space"]
+        aid, peer_id = actor["actor_id"], intention["companion_id"]
+        if scene["joint_visit"].get("done"):
+            intention["phase"] = "dwell"
+            return "progress", []
+        entity = scene.get("joint_entity")
+        sitter_id = scene["joint_visit"].get("seated_id")
+        same_tile_as_peer = entity and aid > peer_id and any(
+            person["actor_id"] == peer_id and (person["x"], person["y"]) == (actor["x"], actor["y"])
+            for person in scene["actors"]
+        )
+        on_seat = entity and sitter_id and aid != sitter_id and (actor["x"], actor["y"]) == (entity["x"], entity["y"])
+        if on_seat or same_tile_as_peer:
+            for dx, dy in ((0, 1), (1, 0), (-1, 0), (0, -1)):
+                x, y = actor["x"] + dx, actor["y"] + dy
+                if self.engine.chebyshev_distance({**actor, "x": x, "y": y}, entity) > 1:
+                    continue
+                status, logs = self._walk(scene, state, x, y, 0, avoid_actors=True)
+                if status == "progress":
+                    return status, logs
+        if entity and self.engine.chebyshev_distance(actor, entity) > 1:
+            intention["phase"] = "approach"
+            status, logs = self._walk(scene, state, entity["x"], entity["y"], 1, avoid_actors=True)
+            if status == "progress":
+                intention.pop("waiting_since", None)
+                return status, logs
+            if status == "blocked":
+                blocked_since = intention.setdefault("waiting_since", scene["minutes"])
+                if scene["minutes"] - blocked_since >= scene["joint_wait_minutes"]:
+                    return "blocked", [f"暂时走不到「{entity['name']}」旁。"]
+                return "progress", []
+        peer = next(
+            (person for person in scene["actors"] if person["actor_id"] == peer_id
+             and peer_id in scene["seen_peer_ids"] and person["posture"] != "resting"),
+            None,
+        )
+        if not self.engine.confirm_joint_visit(
+            aid, intention["joint_visit_id"], activity_minutes=(
+                (0.25 if "engage" in scene else scene["joint_activity_minutes"] / 2)
+                if entity else scene["joint_activity_minutes"]
+            ),
+        ):
+            intention["phase"] = "waiting"
+            waiting_since = intention.setdefault("waiting_since", scene["minutes"])
+            if scene["minutes"] - waiting_since >= scene["joint_wait_minutes"]:
+                return "done", [f"在{space['name']}等了一会儿，和同伴还没能汇合。"]
+            if entity:
+                return "progress", []
+            if peer and aid < peer_id:
+                _, logs = self._walk(scene, state, peer["x"], peer["y"], 1)
+                return "progress", logs
+            if peer is None:
+                portal = state["portals"].get(f"{space['space_id']}:{scene['realm']}")
+                if portal:
+                    x, y = portal["x"], portal["y"]
+                else:
+                    x, y = space["width"] // 2, space["height"] // 2
+                _, logs = self._walk(scene, state, x, y, 2)
+                return "progress", logs
+            return "progress", []
+
+        if entity:
+            intention["phase"] = "dwell"
+            return "progress", []
+        intention["phase"] = "activity"
+        if intention["drive"] != "social":
+            return self._visit_activity(intention, state, scene)
+        if aid > peer_id or peer is None:
+            intention["phase"] = "waiting"
+            return "progress", []
+        status, logs = self._walk(scene, state, peer["x"], peer["y"], 1)
+        if status != "ready":
+            return ("progress", logs) if status == "blocked" else (status, logs)
+        reason = f"按约和{peer['name']}在{space['name']}汇合，想聊几句"
+        logs = scene.get("rendezvous_talk", talk)(aid, peer_id, reason)
+        if not logs:
+            return "progress", []
+        state["last_social_at"] = scene["minutes"]
+        self._reward(state, peer_id, "social", scene["minutes"])
+        return "done", logs
 
     def _talk_to_peer(
         self, target: str, goal: str, state: dict[str, Any], scene: dict[str, Any],
@@ -1484,7 +1624,7 @@ class CognitiveEngine:
     def _is_agreed_arrival(plan: Mapping[str, Any] | None) -> bool:
         return bool(
             plan and plan.get("source") == "speech_act" and plan.get("kind") == "visit"
-            and (plan.get("drive") == "rest" or plan.get("action") == "escort")
+            and not plan.get("joint_visit_id") and (plan.get("drive") == "rest" or plan.get("action") == "escort")
         )
 
     @staticmethod
@@ -1640,13 +1780,13 @@ class CognitiveEngine:
 
     def _walk(
         self, scene: dict[str, Any], state: dict[str, Any], x: int, y: int, reach: int,
-        *, cardinal: bool = False, region: tuple[int, int, int, int] | None = None,
+        *, cardinal: bool = False, region: tuple[int, int, int, int] | None = None, avoid_actors: bool = False,
     ) -> tuple[str, list[str]]:
         actor = scene["actor"]
         move = scene.get("stage_walk", self.engine.move_actor_toward)
         path = move(
             actor["actor_id"], actor["space_id"], x, y, reach=reach, stride=scene.get("stride", _STRIDE),
-            cardinal=cardinal, region=region,
+            cardinal=cardinal, region=region, avoid_actors=avoid_actors,
         )
         if not path:
             return "blocked", []
@@ -1676,6 +1816,7 @@ class CognitiveEngine:
 
     def _request_reflection(
         self, scene: dict[str, Any], state: dict[str, Any], candidates: list[dict[str, Any]], reason: str,
+        *, include_memories: bool,
     ) -> None:
         actor = scene["actor"]
         vitals = actor["vitals"]
@@ -1695,6 +1836,10 @@ class CognitiveEngine:
         if not (notable or near_tie or unfamiliar or agenda_expired):
             return
         space = scene["space"]
+        memories = (
+            episodic_memory.recall(state, space["space_id"], scene.get("seen_peer_ids", set()), query=reason)
+            if include_memories else []
+        )
         active = state.get("active_intention") or {}
         brief_zones = {
             z["zone_id"]: z["name"]
@@ -1716,6 +1861,7 @@ class CognitiveEngine:
             "reason": reason or ("遇到陌生物件" if unfamiliar else "两类目标吸引力接近" if near_tie else "需要形成新的议程"),
             "active_goal": active.get("goal") or "",
             "experience": state.get("experience", ""), "drives": state["drives"],
+            "memories": memories,
             "satiation": state.get("satiation", {}), "vitals": vitals,
             "appraisal": state.get("last_appraisal", {}), "host": actor.get("host_character") or actor["name"],
             "choices": [(c["goal"], c["drive"], c["utility"]) for c in candidates[:5]],

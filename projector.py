@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import persona_bridge, schedule
+from . import episodic_memory, persona_bridge, schedule
 from .cognitive_engine import cognitive_summary
 from .engine import WorldEngine, compute_lighting
 from .schema import TILE_CATALOG
@@ -81,6 +81,9 @@ def project_terminal_data(
     actor_id: str,
     *,
     consume_diffs: bool = False,
+    memory_cue: str = "",
+    include_memories: bool = True,
+    player_conversation: bool = False,
 ) -> dict[str, Any]:
     """编译角色此刻眼中的纯文字世界与格网反查索引。"""
     snap = engine.snapshot_for_ui()
@@ -293,6 +296,11 @@ def project_terminal_data(
             lines.append("- 记得同伴所在：" + "、".join(c_peers[:8]))
         if cognition["prediction_error"]:
             lines.append("- 修正过的记忆：" + cognition["prediction_error"])
+    if include_memories:
+        memory_peers = seen_peer_ids | {episodic_memory.PLAYER_SUBJECT_ID} if player_conversation else seen_peer_ids
+        memories = episodic_memory.recall(aut.get("cognition") or {}, sid, memory_peers, query=memory_cue)
+        if memories:
+            lines.append("- 休息后记住的亲历片段（过去的经历）：" + "；".join(memories))
     if held_ent:
         h_verbs = [lbl for _c, lbl in engine.legal_verbs(held_ent, actor)]
         h_tags = engine.entity_state_tags(held_ent)
@@ -318,5 +326,12 @@ def project_terminal_data(
     return {"text": "\n".join(lines), "anchors": anchors}
 
 
-def project_view(engine: WorldEngine, actor_id: str, *, consume_diffs: bool = False) -> str:
-    return str(project_terminal_data(engine, actor_id, consume_diffs=consume_diffs).get("text") or "")
+def project_view(
+    engine: WorldEngine, actor_id: str, *, consume_diffs: bool = False, memory_cue: str = "",
+    include_memories: bool = True,
+    player_conversation: bool = False,
+) -> str:
+    return str(project_terminal_data(
+        engine, actor_id, consume_diffs=consume_diffs, memory_cue=memory_cue, include_memories=include_memories,
+        player_conversation=player_conversation,
+    ).get("text") or "")

@@ -86,7 +86,9 @@ class WorldHeartbeat:
         with self._step_lock:
             settings = self._settings_provider()
             self._sync_persona_vitals(settings)
-            tick_res = self._engine.tick_physics(advance_minutes=advance_minutes)
+            tick_res = self._engine.tick_physics(
+                advance_minutes=advance_minutes, consolidate_memory=settings.episodic_memory_enabled,
+            )
             self._deliver_persona_events(settings)
             should_act = bool(force_autonomy or advance_minutes is None or float(advance_minutes) > 0.0)
             if should_act:
@@ -150,6 +152,9 @@ class WorldHeartbeat:
         for event in self._engine.pending_persona_events():
             payload = {**event["payload"], "seq": event["seq"], "at": round(event["ts"] * 1000)}
             for aid in event["pending"]:
+                if payload["kind"] == "memory_consolidated" and not settings.episodic_memory_enabled:
+                    self._engine.acknowledge_persona_event(payload["event_id"], aid, None)
+                    continue
                 key = (event["space_id"], aid)
                 if key in retry:
                     continue
@@ -384,6 +389,8 @@ class WorldHeartbeat:
                 chat_svc = self._chat_service_provider() if self._chat_service_provider and not local_social else None
                 if chat_svc is not None and hasattr(chat_svc, "conduct_actor_social_exchange"):
                     ex = chat_svc.conduct_actor_social_exchange(actor_id, tgt_aid, reason=reason)
+                    if ex.get("duplicate"):
+                        continue
                     logs.append(str(ex.get("summary") or f"{me['name']} 和 {peer['name']} 聊了几句"))
                 else:
                     a_host = str(me.get("host_character") or me.get("name") or "").strip()
@@ -597,8 +604,8 @@ class WorldHeartbeat:
         aid = actor["actor_id"]
         vit = actor.get("vitals") or {}
         aut = normalize_autonomy(actor.get("autonomy"))
-        view_txt = projector.project_view(self._engine, aid, consume_diffs=False)
         settings_now = self._settings_provider()
+        view_txt = projector.project_view(self._engine, aid, include_memories=settings_now.episodic_memory_enabled)
         invitations = {}
         for box in vis:
             invitation = self._puzzle_invitation(actor, box, settings_now)
@@ -1278,7 +1285,8 @@ class WorldHeartbeat:
 
     def _export_bridges(self) -> None:
         snap = self._engine.snapshot_for_ui()
+        include_memories = self._settings_provider().episodic_memory_enabled
         for act in snap["actors"]:
             aid = act["actor_id"]
-            view = projector.project_view(self._engine, aid, consume_diffs=False)
+            view = projector.project_view(self._engine, aid, include_memories=include_memories)
             persona_bridge.write_world_bridge(self._engine, aid, self._engine.bridge_dir, view_text=view)

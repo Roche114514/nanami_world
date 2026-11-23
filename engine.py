@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import persona_bridge, schedule, venue_semantics, weather
+from . import episodic_memory, persona_bridge, schedule, venue_semantics, weather
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -940,6 +940,11 @@ class WorldEngine:
                 return {}
             _realm, places = self._realm_places_locked(sid)
             return places
+
+    def list_realm_buildings(self, space_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            realm = self._realm_space_id_locked(space_id)
+            return copy.deepcopy(self._world["spaces"].get(realm, {}).get("buildings", []))
 
     def _weather_state_locked(self, realm_id: str) -> dict[str, Any]:
         sim_min = float(self._world.get("simulation_minutes") or 0.0)
@@ -2879,30 +2884,62 @@ class WorldEngine:
         )
         if kind:
             self._world["persona_events"][event_id] = {**event, "pending": list(payload["witness_ids"])}
+        if ok and kind in ("action_success", "consumed", "discovered", "cooperative_solve", "gift_received"):
+            summary = clip_text(message, 80)
+            if target.get("name") and action in ("interact", "consume", "unlock"):
+                verb = {"interact": "体验了", "consume": "享用了", "unlock": "打开了"}[action]
+                summary = f"{verb}「{target['name']}」。"
+            self._record_episode_locked(actor, "activity", summary, subject=target)
         return event
+
+    def _record_episode_locked(
+        self, actor: Mapping[str, Any], kind: str, summary: str, *, subject: Mapping[str, Any] | None = None,
+    ) -> None:
+        if actor.get("is_player"):
+            return
+        memory = actor["autonomy"].setdefault("cognition", {}).setdefault("episodic_memory", {})
+        subject = subject or {}
+        episodic_memory.record(
+            memory, self._world["simulation_minutes"], self._world["spaces"][actor["space_id"]], kind, summary,
+            subject_id=subject.get("actor_id") or subject.get("entity_id") or subject.get("zone_id") or "",
+            subject_name=subject.get("name") or "",
+        )
+
+    def record_player_conversation(self, actor_id: str, space_id: str, text: str) -> None:
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            if actor and not actor.get("is_player") and actor["space_id"] == space_id:
+                self._record_episode_locked(
+                    actor, "social", text, subject={"actor_id": episodic_memory.PLAYER_SUBJECT_ID, "name": "玩家"},
+                )
+                self._sync_actor_world_state_locked(actor)
+                self._save_world_locked()
 
     def record_social_feedback(
         self, actor_id: str, space_id: str, message: str, *, peer_id: str = "", mood_delta: float = 0.0,
-        spoken: bool = True, speech_act: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Capture a completed exchange or an observed interval of solitude."""
+        spoken: bool = True, speech_act: Mapping[str, Any] | None = None, decision_interval: float = 5.0,
+    ) -> bool:
+        """Capture the exchange and report whether a new rendezvous is pending."""
         with self._lock:
             actors = self._world["actors"]
             actor = actors.get(actor_id)
             if actor is None or actor["space_id"] != space_id:
-                return
+                return False
+            joint_waiting = False
             if peer_id:
                 peer = actors.get(peer_id)
                 if peer is None or peer_id == actor_id or peer["space_id"] != space_id:
-                    return
+                    return False
                 event = self._queue_persona_event_locked(actor, "social_gesture", None, "talk", message, peer=peer,
                                                          mood_delta=mood_delta)
                 realm = self._realm_space_id_locked(space_id)
                 has_sa = isinstance(speech_act, Mapping) and bool(speech_act)
                 split_sa = has_sa and ("a" in speech_act or "b" in speech_act)
-                for idx_r, (receiver, partner) in enumerate(((actor, peer), (peer, actor))):
-                    side_raw = (speech_act.get("a" if idx_r == 0 else "b") if split_sa else speech_act) if has_sa else None
-                    side_sa = copy.deepcopy(dict(side_raw)) if isinstance(side_raw, Mapping) and side_raw else None
+                raw_sides = (speech_act.get("a"), speech_act.get("b")) if split_sa else (speech_act, speech_act)
+                sides = [copy.deepcopy(dict(raw)) if isinstance(raw, Mapping) else {} for raw in raw_sides]
+                joint_id = self._agree_joint_visit_locked(actor, peer, realm, sides, event["seq"], decision_interval)
+                joint_waiting = bool(joint_id and not actor["autonomy"]["cognition"]["joint_visit"].get("met"))
+                for (receiver, partner), side_sa in zip(((actor, peer), (peer, actor)), sides):
                     if self._world["spaces"][realm].get("space_kind") == "town" or "cognition" in receiver["autonomy"] or side_sa:
                         cognition = receiver["autonomy"].setdefault("cognition", {})
                         sig: dict[str, Any] = {
@@ -2911,14 +2948,187 @@ class WorldEngine:
                         }
                         if side_sa:
                             sig["speech_act"] = side_sa
-                            if side_sa.get("shared_place_id") or side_sa.get("personal_goal") or side_sa.get("tone") == "tense":
+                            if joint_id:
+                                sig["joint_visit_id"] = joint_id
+                            if joint_id or side_sa.get("shared_place_id") or side_sa.get("personal_goal") or side_sa.get("tone") == "tense":
                                 cognition["preempt_seq"] = int(cognition.get("preempt_seq", 0)) + 1
                         cognition["social_signal"] = sig
-                        self._sync_actor_world_state_locked(receiver)
+                    topic = (side_sa or {}).get("summary")
+                    summary = f"和{partner['name']}聊了聊：{topic}" if topic else message
+                    self._record_episode_locked(receiver, "social", summary, subject=partner)
+                    self._sync_actor_world_state_locked(receiver)
             else:
                 if any(person["space_id"] == space_id and aid != actor_id for aid, person in actors.items()):
-                    return
+                    return False
                 self._queue_persona_event_locked(actor, "alone_tick", None, "idle", message)
+            self._save_world_locked()
+            return joint_waiting
+
+    def _agree_joint_visit_locked(
+        self, actor: dict[str, Any], peer: dict[str, Any], realm: str,
+        sides: list[dict[str, Any]], seq: int, decision_interval: float,
+    ) -> str:
+        if actor.get("is_player") or peer.get("is_player"):
+            return ""
+        entity_id = str(sides[0].get("shared_entity_id") or "")
+        entity = self._joint_entity_locked(entity_id, actor["space_id"])
+        if entity_id and (not entity or sides[1].get("shared_entity_id") != entity_id):
+            return ""
+        target = actor["space_id"] if entity else str(sides[0].get("shared_place_id") or "")
+        space = self._world["spaces"].get(target)
+        if not entity and (
+            not space or sides[1].get("shared_place_id") != target or self._realm_space_id_locked(target) != realm
+            or self._world["spaces"][realm]["space_kind"] != "town"
+        ):
+            return ""
+        building = next(
+            (b for b in self._world["spaces"][realm]["buildings"] if b["interior_space_id"] == target), None,
+        )
+        for person, side in zip((actor, peer), sides):
+            goal = side.get("personal_goal")
+            if isinstance(goal, Mapping) and goal.get("kind") == "visit" and (
+                goal.get("target") != target or goal.get("action") == "escort"
+                or (goal.get("drive") == "rest" and (
+                    self._resolve_actor_home_locked(person, realm) == target
+                    or venue_semantics.is_lodging_building(building, name=space["name"])
+                ))
+            ):
+                return ""
+        current = self._joint_visit_locked(actor)
+        if (current and current["peer_id"] == peer["actor_id"] and current["target"] == target
+                and current.get("entity_id", "") == entity_id):
+            return current["id"]
+        previous = (actor["autonomy"].get("cognition") or {}).get("joint_visit") or {}
+        counterpart = (peer["autonomy"].get("cognition") or {}).get("joint_visit") or {}
+        if (
+            previous.get("met") and previous.get("target") == actor["space_id"] == target
+            and previous["id"] == counterpart.get("id")
+            and previous.get("entity_id", "") == entity_id
+            and self._world["simulation_minutes"] < previous["expires_at"]
+        ):
+            return previous["id"]
+
+        drive = str(sides[0].get("shared_drive") or "")
+        if drive not in _MODULATION_DOMAINS or sides[1].get("shared_drive") != drive:
+            drive = "social"
+        agreement = {
+            "id": f"sa:{seq}", "target": target, "drive": drive,
+            "expires_at": self._world["simulation_minutes"] + max(10.0, 10 * decision_interval),
+        }
+        if entity:
+            agreement["entity_id"] = entity_id
+            agreement["entity_name"] = entity["name"]
+            if "restable" in entity["traits"] and all(side.get("shared_action") == "rest" for side in sides):
+                sitter = actor if sides[0].get("seated") else peer
+                agreement.update(drive="rest", seated_id=sitter["actor_id"])
+        for person, partner in ((actor, peer), (peer, actor)):
+            cognition = person["autonomy"].setdefault("cognition", {})
+            cognition["joint_visit"] = {**agreement, "peer_id": partner["actor_id"], "peer_name": partner["name"]}
+        return agreement["id"]
+
+    def _joint_entity_locked(self, entity_id: str, space_id: str) -> dict[str, Any] | None:
+        entity = self._world["entities"].get(entity_id)
+        if (entity and entity["space_id"] == space_id and entity["z"] >= 0
+                and entity["parent_id"].startswith(("space:", "entity:")) and "portal" not in entity["traits"]):
+            return entity
+        return None
+
+    def _joint_visit_locked(self, actor: Mapping[str, Any]) -> dict[str, Any] | None:
+        visit = (actor["autonomy"].get("cognition") or {}).get("joint_visit")
+        if not visit or self._world["simulation_minutes"] >= visit["expires_at"]:
+            return None
+        peer = self._world["actors"].get(visit["peer_id"])
+        peer_visit = ((peer["autonomy"].get("cognition") or {}).get("joint_visit") or {}) if peer else {}
+        realm = self._realm_space_id_locked(actor["space_id"])
+        if (peer_visit.get("id") != visit["id"] or (visit.get("done") and peer_visit.get("done"))
+                or visit["target"] not in self._world["spaces"] or self._realm_space_id_locked(visit["target"]) != realm
+                or self._realm_space_id_locked(peer["space_id"]) != realm):
+            return None
+        if visit.get("entity_id") and not self._joint_entity_locked(visit["entity_id"], visit["target"]):
+            return None
+        return visit
+
+    def recent_joint_entity(self, actor_id: str, peer_id: str) -> str:
+        with self._lock:
+            actors = self._world["actors"]
+            actor, peer = actors.get(actor_id), actors.get(peer_id)
+            if not actor or not peer or actor["space_id"] != peer["space_id"]:
+                return ""
+            joint = (actor["autonomy"].get("cognition") or {}).get("joint_visit") or {}
+            other = (peer["autonomy"].get("cognition") or {}).get("joint_visit") or {}
+            entity_id = joint.get("entity_id") or ""
+            if (not entity_id or joint.get("id") != other.get("id") or joint["target"] != actor["space_id"]
+                    or not self._joint_entity_locked(entity_id, joint["target"])):
+                return ""
+            if joint.get("met") and self._world["simulation_minutes"] < joint["expires_at"] + 2:
+                return entity_id
+            if self._joint_visit_locked(actor):
+                return entity_id
+            return ""
+
+    def confirm_joint_visit(self, actor_id: str, visit_id: str, *, activity_minutes: float) -> bool:
+        """Confirm physical proximity and release both participants to their activity."""
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            visit = self._joint_visit_locked(actor) if actor else None
+            if not visit or visit.get("done") or visit["id"] != visit_id or actor["space_id"] != visit["target"]:
+                return False
+            if visit.get("met"):
+                return True
+            peer = self._world["actors"][visit["peer_id"]]
+            entity = self._joint_entity_locked(visit.get("entity_id", ""), visit["target"])
+            participants = (actor, peer)
+            sitter_id = visit.get("seated_id")
+            if any(person["posture"] == "resting" or person["vitals"]["disengaged"]
+                   or (person["actor_id"] != sitter_id and
+                       (person["vitals"]["energy"] < 0.25 or person["vitals"]["sleep_pressure"] >= 0.85))
+                   for person in participants):
+                return False
+            if entity:
+                if any(self.chebyshev_distance(person, entity) > 1 for person in participants):
+                    return False
+                if (actor["x"], actor["y"]) == (peer["x"], peer["y"]):
+                    return False
+                if sitter_id and any(person["actor_id"] != sitter_id
+                                     and (person["x"], person["y"]) == (entity["x"], entity["y"])
+                                     for person in participants):
+                    return False
+            elif self.chebyshev_distance(actor, peer) > 1 or peer["actor_id"] not in self._visible_peer_ids_locked(actor):
+                return False
+            place = f"{entity['name']}旁" if entity else self._world["spaces"][visit["target"]]["name"]
+            for person, partner in ((actor, peer), (peer, actor)):
+                cognition = person["autonomy"]["cognition"]
+                cognition["joint_visit"].update(
+                    met=True, expires_at=self._world["simulation_minutes"] + activity_minutes,
+                )
+                self._record_episode_locked(person, "social", f"和{partner['name']}在{place}汇合了。", subject=partner)
+                self._sync_actor_world_state_locked(person)
+            self._append_event_locked(
+                "actors_met_for_visit", actor_id=actor_id, space_id=visit["target"],
+                payload={"visit_id": visit_id, "peer_id": peer["actor_id"], "entity_id": visit.get("entity_id", "")},
+            )
+            seat_is_clear = entity and not any(
+                person["space_id"] == visit["target"] and person["actor_id"] != sitter_id
+                and (person["x"], person["y"]) == (entity["x"], entity["y"])
+                for person in self._world["actors"].values()
+            )
+            if sitter_id and seat_is_clear:
+                self.cognitive_act(sitter_id, visit["target"], entity["entity_id"], "rest")
+            self._save_world_locked()
+            return True
+
+    def finish_joint_visit(self, actor_id: str, visit_id: str, *, together: bool = False) -> None:
+        with self._lock:
+            actor = self._world["actors"].get(actor_id)
+            visit = self._joint_visit_locked(actor) if actor else None
+            if not visit or visit["id"] != visit_id:
+                return
+            participants = [actor]
+            if together or not visit.get("met"):
+                participants.append(self._world["actors"][visit["peer_id"]])
+            for person in participants:
+                person["autonomy"]["cognition"]["joint_visit"]["done"] = True
+                self._sync_actor_world_state_locked(person)
             self._save_world_locked()
 
     def inject_language_modulation(
@@ -3076,7 +3286,7 @@ class WorldEngine:
             event = outbox.get(event_id)
             if not event or actor_id not in event["pending"]:
                 return
-            if mood is not None and actor_id in self._world["actors"]:
+            if mood is not None and actor_id in self._world["actors"] and event["payload"]["kind"] != "memory_consolidated":
                 actor = self._world["actors"][actor_id]
                 same_realm = self._realm_space_id_locked(actor["space_id"]) == self._realm_space_id_locked(event["space_id"])
                 self.set_actor_world_mood(
@@ -3182,8 +3392,17 @@ class WorldEngine:
             sid = actor["space_id"]
             space = self._world["spaces"][sid]
             realm, realm_places = self._realm_places_locked(sid)
-            if not include_rooms and self._world["spaces"][realm].get("space_kind") != "town":
+            joint_visit = self._joint_visit_locked(actor)
+            cognition = actor["autonomy"].get("cognition") or {}
+            active = cognition.get("active_intention") or {}
+            signal = cognition.get("social_signal") or {}
+            personal = (signal.get("speech_act") or {}).get("personal_goal") or {}
+            entity_intent = personal.get("kind") == "entity" or (
+                active.get("kind") == "entity" and active.get("source") == "speech_act"
+            )
+            if not include_rooms and not joint_visit and not entity_intent and self._world["spaces"][realm].get("space_kind") != "town":
                 return None
+            joint_entity = self._joint_entity_locked(joint_visit.get("entity_id", ""), joint_visit["target"]) if joint_visit else None
             visible = self.visible_entities(actor_id, spatial_filter=True if space["space_kind"] != "room" else None)
             visible_peer_ids = sorted(self._visible_peer_ids_locked(actor))
             destinations = {}
@@ -3209,6 +3428,10 @@ class WorldEngine:
                 "realm_places": realm_places,
                 "realm_buildings": copy.deepcopy(realm_space.get("buildings") or []),
                 "realm_actors": realm_actors,
+                "joint_visit": copy.deepcopy(joint_visit),
+                "joint_entity": (copy.deepcopy({key: joint_entity[key] for key in
+                                  ("entity_id", "name", "space_id", "parent_id", "x", "y", "footprint")})
+                                 if joint_entity else None),
                 "player_ids": {aid for aid, a in self._world["actors"].items() if a.get("is_player")},
                 "minutes": self._world["simulation_minutes"],
                 "visible": visible,
@@ -3239,6 +3462,7 @@ class WorldEngine:
             cog = actor["autonomy"].get("cognition") or {}
             packet = cog.get("modulation") or {}
             active_int = cog.get("active_intention") or {}
+            joint_visit = self._joint_visit_locked(actor)
             frame["is_player"] = bool(actor.get("is_player", False))
             realm_sid = self._realm_space_id_locked(actor["space_id"])
             frame["home_space_id"] = "" if frame["is_player"] else self._resolve_actor_home_locked(actor, realm_sid)
@@ -3246,6 +3470,8 @@ class WorldEngine:
                 "id": packet.get("id"), "strength": packet.get("strength", 1.0),
                 "preempt_seq": int(cog.get("preempt_seq", 0)),
                 "seek_peer_target": str(active_int.get("target") or "") if active_int.get("kind") == "seek_peer" else "",
+                "joint_visit_id": joint_visit["id"] if joint_visit else "",
+                "speech_action": active_int.get("kind") == "entity" and active_int.get("source") == "speech_act",
             }
             return frame
 
@@ -3372,7 +3598,7 @@ class WorldEngine:
     def ensure_player_avatar(self, *, space_id: str = "", name: str = "你") -> dict[str, Any]:
         """在当前空间确保存在独立的主控「玩家」像素小人（不受 AI 自主心跳接管）。"""
         with self._lock:
-            pid = "player_avatar"
+            pid = episodic_memory.PLAYER_SUBJECT_ID
             target_sid = str(space_id or self._world["active_space_id"]).strip()
             if target_sid not in self._world["spaces"]:
                 target_sid = self._world["active_space_id"]
@@ -3898,12 +4124,13 @@ class WorldEngine:
 
     def move_actor_toward(
         self, actor_id: str, space_id: str, x: int, y: int, *, reach: int, stride: int,
-        cardinal: bool = False, region: tuple[int, int, int, int] | None = None,
+        cardinal: bool = False, region: tuple[int, int, int, int] | None = None, avoid_actors: bool = False,
     ) -> list[tuple[int, int]]:
         """沿物理寻路结果走有限步，返回实际经过的格子。"""
         with self._lock:
             walked = self.plan_actor_route(
                 actor_id, space_id, x, y, reach=reach, stride=stride, cardinal=cardinal, region=region,
+                avoid_actors=avoid_actors,
             )
             if len(walked) > 1:
                 self._finish_move_locked(self._world["actors"][actor_id], walked)
@@ -3912,7 +4139,7 @@ class WorldEngine:
 
     def plan_actor_route(
         self, actor_id: str, space_id: str, x: int, y: int, *, reach: int, stride: int,
-        cardinal: bool = False, region: tuple[int, int, int, int] | None = None,
+        cardinal: bool = False, region: tuple[int, int, int, int] | None = None, avoid_actors: bool = False,
     ) -> list[tuple[int, int]]:
         with self._lock:
             actor = self._world["actors"].get(actor_id)
@@ -3930,7 +4157,7 @@ class WorldEngine:
             distant = stride > 1 or max(abs(x - int(actor["x"])), abs(y - int(actor["y"]))) > 3
             path = self._bfs_locked(
                 space_id, (actor["x"], actor["y"]), goals, ignore_actor_id=actor_id,
-                ignore_distant_actors_from=(int(actor["x"]), int(actor["y"])) if distant else None,
+                ignore_distant_actors_from=(int(actor["x"]), int(actor["y"])) if distant and not avoid_actors else None,
             ) or []
             return path[:stride + 1]
 
@@ -4625,6 +4852,11 @@ class WorldEngine:
                 rs["occupied_by"] = None
         actor["resting_on_id"] = None
         actor["posture"] = "standing"
+        cognition = actor["autonomy"].get("cognition")
+        if cognition:
+            cognition.pop("rest_started_at", None)
+            cognition.pop("rest_started_ts", None)
+            cognition.pop("rest_consolidated", None)
 
     # ── 小人动画元数据：走位路径 / 朝向 / 最近一次交互动作 ───────────────
     @staticmethod
@@ -4733,6 +4965,12 @@ class WorldEngine:
             cur.update(dict(patch or {}))
             cognition = cur.get("cognition")
             if cognition is not None:
+                # Event and physics updates can be newer than this cognitive snapshot.
+                for key in ("episodic_memory", "rest_started_at", "rest_started_ts", "rest_consolidated", "joint_visit"):
+                    if key in prev_cog:
+                        cognition[key] = prev_cog[key]
+                    else:
+                        cognition.pop(key, None)
                 if signal and signal["seq"] > cognition.get("last_social_signal", 0):
                     cognition["social_signal"] = signal
                 if pending_mod and int(pending_mod.get("id", 0)) > int(cognition.get("last_language_mod_id", 0)):
@@ -4833,6 +5071,14 @@ class WorldEngine:
     def _finish_move_locked(
         self, actor: dict[str, Any], path: list[tuple[int, int]], *, record_event: bool = True,
     ) -> None:
+        space = self._world["spaces"][actor["space_id"]]
+        if space["space_kind"] == "town" and space["zones"] and not actor.get("is_player"):
+            previous = self.get_zone_at(space, actor["x"], actor["y"])
+            for x, y in path[1:]:
+                zone = self.get_zone_at(space, x, y)
+                if zone is not None and zone != previous:
+                    self._record_episode_locked(actor, "exploration", f"走过了{zone['name']}。", subject=zone)
+                previous = zone
         self._clear_actor_rest_locked(actor)
         self._record_move_locked(actor, path)
         actor["x"], actor["y"] = path[-1]
@@ -5118,6 +5364,10 @@ class WorldEngine:
                 actor["posture"] = "resting"
                 actor["x"] = int(ent["x"])
                 actor["y"] = int(ent["y"])
+                if not actor.get("is_player"):
+                    cognition = actor["autonomy"].setdefault("cognition", {})
+                    cognition["rest_started_at"] = self._world["simulation_minutes"]
+                    cognition["rest_started_ts"] = time.time()
                 self._refresh_actor_expression_locked(actor, action_kind="rest")
                 self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "resting": True})
                 return report(f"{prefix}在「{ent['name']}」上歇了下来。", ok=True)
@@ -5154,8 +5404,10 @@ class WorldEngine:
                 if not ok:
                     return prefix
                 self._refresh_actor_expression_locked(actor, action_kind="read")
-                self._save_world_locked()
                 entries = traits["inscribable"].get("entries") or []
+                if entries:
+                    self._record_episode_locked(actor, "activity", f"读了「{ent['name']}」上的文字。", subject=ent)
+                self._save_world_locked()
                 if not entries:
                     return f"{prefix}翻开「{ent['name']}」，里面还是空白的。"
                 formatted = "；".join(f"[{e['by']}] {e['text']}" for e in entries[-5:])
@@ -5204,6 +5456,9 @@ class WorldEngine:
         actor["x"] = tx
         actor["y"] = ty
         dest_kind = str(target_space.get("space_kind") or "room")
+        if dest_kind != "town":
+            self._record_episode_locked(actor, "exploration", f"走进了{target_space['name']}。")
+            self._sync_actor_world_state_locked(actor)
         if dest_kind == "building":
             actor["facing"] = "up"
         elif dest_kind == "town":
@@ -5546,7 +5801,7 @@ class WorldEngine:
 
     def tick_physics(
         self, *, advance_minutes: float | None = None, now: float | None = None,
-        minimum_elapsed_minutes: float = 0.0, time_scale: float = 1.0,
+        minimum_elapsed_minutes: float = 0.0, time_scale: float = 1.0, consolidate_memory: bool = True,
     ) -> dict[str, Any]:
         with self._lock:
             cur_now = float(now if now is not None else time.time())
@@ -5625,6 +5880,20 @@ class WorldEngine:
                         regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.012)
                         vit["energy"] = round(clamp_float(vit["energy"] + regen * delta_min, 0.0, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] - regen * 0.9 * delta_min, 0.0, 1.0, 0.3), precision)
+                        cognition = act["autonomy"].setdefault("cognition", {})
+                        started = cognition.setdefault("rest_started_at", sim_now - delta_min)
+                        started_ts = cognition.get("rest_started_ts", last_ts)
+                        if advance_minutes is None and started_ts > last_ts:
+                            rest_delta = max(0.0, (cur_now - started_ts) / 60.0) * time_scale
+                            started = cognition["rest_started_at"] = sim_now - rest_delta
+                        if consolidate_memory and not cognition.get("rest_consolidated") and sim_now - started >= episodic_memory.REST_MINUTES:
+                            cognition["rest_consolidated"] = True
+                            summary = episodic_memory.consolidate(cognition.get("episodic_memory") or {}, sim_now)
+                            if summary:
+                                self._queue_persona_event_locked(
+                                    act, "memory_consolidated", None, "consolidate", summary,
+                                    epa={"e": 0.0, "p": 0.0, "a": 0.0},
+                                )
                     else:
                         vit["energy"] = round(clamp_float(vit["energy"] - 0.0012 * delta_min, 0.05, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] + 0.0015 * delta_min, 0.0, 1.0, 0.3), precision)

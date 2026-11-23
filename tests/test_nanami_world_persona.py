@@ -231,6 +231,34 @@ class WorldPersonaTests(unittest.TestCase):
         final_energy = next(a for a in restored.list_actors() if a["actor_id"] == scout)["vitals"]["energy"]
         self.assertEqual(final_energy, energy_after)
 
+    def test_rest_memory_uses_persona_event_retry_without_changing_mood(self) -> None:
+        scout = self.engine.import_actor(name="Scout", x=3, y=4)["actor_id"]
+        snack = self.engine.place_from_blueprint("default_snack", self.sid, 3, 5)
+        bed = self.engine.place_from_blueprint("default_bed", self.sid, 4, 4)
+        self.engine.execute_act(scout, snack["entity_id"], "consume")
+        self.engine.execute_act(scout, bed["entity_id"], "rest")
+        self.heartbeat.deliver_persona_events()
+        before = self.mind("scout", scout)
+        self.engine.tick_physics(advance_minutes=2)
+        event, = self.engine.pending_persona_events()
+        self.assertEqual(event["payload"]["kind"], "memory_consolidated")
+
+        lock = self.persona / "scout" / "state" / "mind.json.lock"
+        lock.touch()
+        try:
+            self.heartbeat.deliver_persona_events()
+            self.assertEqual(self.engine.pending_persona_events(), [event])
+        finally:
+            lock.unlink()
+        restored = self.open_world(self.data)
+        self.heartbeat_for(restored).deliver_persona_events()
+        self.assertEqual(restored.pending_persona_events(), [])
+        after = self.mind("scout", scout)
+        self.assertEqual(after["lastWorldEvent"]["kind"], "memory_consolidated")
+        self.assertIn(snack["name"], after["lastWorldEvent"]["label"])
+        for field in ("moodV", "moodA", "energy"):
+            self.assertEqual(before[field], after[field])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

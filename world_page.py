@@ -1428,7 +1428,7 @@ def register_pages(
                 {"key": "heartbeat_enabled", "type": "boolean", "label": "开启后台心跳推进", "description": "按真实时间自动推进热饮降温、昼夜光影与低精力自主休息"},
                 {"key": "heartbeat_interval_sec", "type": "integer", "label": "心跳间隔（秒）", "min": 30, "max": 3600, "step": 30},
                 {"key": "heartbeat_use_llm", "type": "boolean", "label": "自主心跳使用大模型", "description": "自动生活中，关键经历会触发后台反思，清醒角色相遇时可生成对话。步行与日常动作由本地引擎执行。"},
-                {"key": "episodic_memory_enabled", "type": "boolean", "label": "使用世界经历", "description": "让角色在相关话题中回忆共同解谜，并在遇到同类谜题时考虑再次邀请同伴"},
+                {"key": "episodic_memory_enabled", "type": "boolean", "label": "使用世界经历", "description": "角色在休息时整理亲历的探索、活动与交往，并在相关话题或解谜时回想"},
                 {"key": "allow_ai_diary", "type": "boolean", "label": "允许自主写随手记", "description": "城镇角色有新经历时，可在可写的笔记本或读过的布告栏留一句话。"},
                 {"key": "diary_cooldown_hours", "type": "number", "label": "自主写字冷却时长（小时）", "min": 1.0, "max": 72.0, "step": 0.5},
                 {"key": "persona_data_dir", "type": "text", "label": "人格模型数据目录（可选覆盖）", "placeholder": "留空自动探测 data/nanami"},

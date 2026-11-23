@@ -249,7 +249,9 @@ class LiveSimulation:
                 actors = [(aid, actor) for aid, actor in self._actors.items() if actor.speed and aid not in self._chatting]
             scale = max((actor.speed for _, actor in actors), default=1)
             if previous_scale != scale:
-                self.engine.tick_physics(time_scale=previous_scale)
+                self.engine.tick_physics(
+                    time_scale=previous_scale, consolidate_memory=self.settings_provider().episodic_memory_enabled,
+                )
                 previous_scale = scale
             if not actors:
                 self._stop.wait(0.15)
@@ -259,7 +261,7 @@ class LiveSimulation:
                 if not settings.enabled:
                     continue
                 self.engine.tick_physics(
-                    minimum_elapsed_minutes=0.05, time_scale=scale,
+                    minimum_elapsed_minutes=0.05, time_scale=scale, consolidate_memory=settings.episodic_memory_enabled,
                 )
                 if now - last_maintenance >= 4 and (maintenance is None or maintenance.done()):
                     maintenance = self._maintenance.submit(self.maintain)
@@ -349,11 +351,17 @@ class LiveSimulation:
             self._meet(aid, order["target"], "对方请我过去说几句", user_requested=True)
         return "arrived"
 
-    def _meet(self, aid: str, peer_id: str, reason: str, *, user_requested: bool = False) -> list[str]:
+    def _meet(
+        self, aid: str, peer_id: str, reason: str, *, user_requested: bool = False, rendezvous: bool = False,
+    ) -> list[str]:
         first, second = self.engine.live_actor_frame(aid), self.engine.live_actor_frame(peer_id)
         if not first or not second or first["space_id"] != second["space_id"] or second["posture"] == "resting":
             return []
         if first.get("is_player"):
+            return []
+        if not (rendezvous or user_requested) and any(
+            person["reflection_state"].get("joint_visit_id") for person in (first, second)
+        ):
             return []
         if max(abs(first["x"] - second["x"]), abs(first["y"] - second["y"])) > 1:
             return []
@@ -365,7 +373,10 @@ class LiveSimulation:
         if greeting_player and service is None:
             return []
         with self._lock:
-            if len(self._chatting) >= 4 or aid in self._chatting or peer_id in self._chatting or self._social_until.get(key, 0) > now:
+            peer_runtime = self._actors.get(peer_id)
+            if (len(self._chatting) >= 4 or aid in self._chatting or peer_id in self._chatting
+                    or (not rendezvous and self._social_until.get(key, 0) > now)
+                    or (rendezvous and peer_runtime and peer_runtime.user_chat_until > now)):
                 return []
             self._social_until = {pair: expiry for pair, expiry in self._social_until.items() if expiry > now}
             self._social_until[key] = now + 25
@@ -380,7 +391,7 @@ class LiveSimulation:
                 if greeting_player:
                     self._social.submit(self._greet_player, service, aid, peer_id, reason, use_model)
                     return ["停下来，准备向主控打招呼。"]
-                self._social.submit(self._speak, service, aid, peer_id, reason)
+                self._social.submit(self._speak, service, aid, peer_id, reason, rendezvous=rendezvous)
                 return ["停下，准备与同伴交流。"]
         return self.talk(aid, peer_id, reason)
 
@@ -395,13 +406,18 @@ class LiveSimulation:
             with self._lock:
                 self._chatting.discard(aid)
 
-    def _speak(self, service: Any, aid: str, peer: str, reason: str) -> None:
+    def _speak(self, service: Any, aid: str, peer: str, reason: str, *, rendezvous: bool = False) -> None:
         result = {}
         try:
             result = service.conduct_actor_social_exchange(aid, peer, reason=reason, generated_only=True)
         except Exception:
             logger.debug("nanami_world: 实时同伴对话失败", exc_info=True)
         finally:
+            if rendezvous and not (result.get("turns") or (result.get("line_a") and result.get("line_b"))):
+                try:
+                    self.talk(aid, peer, reason)
+                except Exception:
+                    logger.debug("nanami_world: 汇合后的本地互动失败", exc_info=True)
             with self._lock:
                 now = time.monotonic()
                 raw_turns = result.get("turns") if isinstance(result.get("turns"), list) else []
@@ -438,7 +454,8 @@ class LiveSimulation:
                             if sa:
                                 side_sa = sa.get("a" if index == 0 else "b") if ("a" in sa or "b" in sa) else sa
                                 if isinstance(side_sa, dict) and (
-                                    side_sa.get("shared_place_id") or side_sa.get("beliefs") or side_sa.get("personal_goal")
+                                    side_sa.get("shared_place_id") or side_sa.get("shared_entity_id")
+                                    or side_sa.get("beliefs") or side_sa.get("personal_goal")
                                 ):
                                     detail = clip_text(side_sa.get("summary") or result.get("summary") or "", 48)
                                     self._log(actor, "social_act", detail)
@@ -503,6 +520,7 @@ class LiveSimulation:
             scene["engage"] = engage
             scene["stride"] = max(2, round(walk_speed * 0.8))
             scene["stage_walk"] = stage_walk
+            scene["rendezvous_talk"] = lambda first, peer, goal: self._meet(first, peer, goal, rendezvous=True)
             scene["walked"] = actor.walked if before["move_seq"] == actor.frame["move_seq"] else []
             now = time.monotonic()
             scene["exposure_scale"] = max(0.04, min(1.0, (now - (actor.last_plan_at or now)) * speed / 12))
@@ -537,6 +555,10 @@ class LiveSimulation:
                 phase, seconds = "dwell", 1.5
             elif frame["posture"] == "resting":
                 phase, seconds = "resting", 2.0
+            elif decision.get("cognition", {}).get("phase") == "等候同伴":
+                phase, seconds = "waiting", 0.75
+            elif decision.get("cognition", {}).get("phase") == "结伴停留":
+                phase, seconds = "dwell", 0.75
             else:
                 seconds = 0.35
 
@@ -586,7 +608,8 @@ class LiveSimulation:
                 return
             order, seen_preempt = actor.order, actor.seen_preempt_seq
             cell, frame, route_id = actor.route[0], actor.frame, actor.route_id
-            if not order:
+            feedback = frame["reflection_state"]
+            if not order and not (feedback.get("joint_visit_id") or feedback.get("speech_action")):
                 sid = frame["space_id"]
                 ax, ay = frame["x"], frame["y"]
                 seek_target = str((frame.get("reflection_state") or {}).get("seek_peer_target") or "")
@@ -670,9 +693,12 @@ class LiveSimulation:
         choices = "; ".join(f"{g}[{d}]={u:.2f}" for g, d, u in (brief.get("choices") or ())) or "无"
         extra_env = "｜".join(x for x in (brief.get("weather"), brief.get("routine")) if x)
         env_line = f"\n天气与节律：{extra_env}" if extra_env else ""
+        memories = "；".join(brief.get("memories") or ())
+        memory_line = f"休息后记住的亲历片段（往事）：{memories}\n" if memories else ""
         return (
             f"角色：{brief.get('name')}｜触发原因：{brief.get('reason')}｜当前目标：{brief.get('active_goal') or '无'}\n"
             f"刚才经历：{brief.get('experience') or '日常行进'}\n"
+            f"{memory_line}"
             f"身体状态：精力={vit.get('energy', 0):.2f} 困意={vit.get('sleep_pressure', 0):.2f} 心情={vit.get('mood_v', 0):+.2f}"
             f"{env_line}\n"
             f"内驱力：{drv}\n"
@@ -703,7 +729,10 @@ class LiveSimulation:
             if self._actors.get(aid) is actor:
                 actor.packet = packet or actor.packet
                 self._log(actor, "received" if packet else "unavailable", (packet or {}).get("agenda", ""))
-                if packet and (packet.get("commitment") or {}).get("priority") == "high" and not actor.order and actor.phase == "walking":
+                if (packet and (packet.get("commitment") or {}).get("priority") == "high"
+                        and not actor.order and actor.phase == "walking"
+                        and not actor.frame["reflection_state"].get("joint_visit_id")
+                        and not actor.frame["reflection_state"].get("speech_action")):
                     actor.route = []
                     actor.route_id += 1
                     actor.next_at = time.monotonic() if actor.speed else 0

@@ -11,10 +11,11 @@ import shutil
 import subprocess
 import threading
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 
-from . import persona_bridge, projector, text_compiler
+from . import episodic_memory, persona_bridge, projector, text_compiler, venue_semantics
 from .schema import clip_text
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ _CHAT_DOMAINS = frozenset({
     "rest", "food", "game", "reading", "social", "notice", "explore",
     "expression", "comfort", "curiosity", "hobby", "music",
 })
+_INVITATION_DECLINES = ("不用", "不必", "不想", "不去", "改天", "下次", "先不", "去不了", "算了", "我自己")
 
 
 def _resolve_realm_place_id(raw_target: Any, realm_places: dict[str, str]) -> str:
@@ -81,6 +83,7 @@ def _sanitize_speech_goal(
 
 def _build_speech_act_pair(
     raw_sa: dict[str, Any] | None, *, realm_places: dict[str, str], valid_eids: set[str], summary: str,
+    shared_objects: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any] | None:
     if not isinstance(raw_sa, dict) or not raw_sa:
         return None
@@ -106,14 +109,21 @@ def _build_speech_act_pair(
     if not shared_pid and goal_a and goal_b and goal_a.get("kind") == "visit" and goal_b.get("kind") == "visit":
         if goal_a.get("target") == goal_b.get("target"):
             shared_pid = str(goal_a["target"])
-    if not any((shared_pid, beliefs, goal_a, goal_b, tone == "tense")):
+    entity_id = str(raw_sa.get("shared_entity_id") or "").strip()
+    entity = shared_objects.get(entity_id) if not shared_pid else None
+    if not any((shared_pid, entity, beliefs, goal_a, goal_b, tone == "tense")):
         return None
 
-    def _side(personal_goal: dict[str, Any] | None) -> dict[str, Any]:
+    def _side(personal_goal: dict[str, Any] | None, side: str) -> dict[str, Any]:
         out: dict[str, Any] = {"tone": tone}
         if shared_pid:
             out["shared_place_id"] = shared_pid
             out["shared_drive"] = sdrive
+        if entity is not None:
+            rest = raw_sa.get("shared_action") == "rest" and "restable" in entity["traits"]
+            out.update(shared_entity_id=entity_id, shared_action="rest" if rest else "dwell")
+            if rest:
+                out["seated"] = side == ("a" if raw_sa.get("seated") == "a" else "b")
         if beliefs:
             out["beliefs"] = list(beliefs)
         if personal_goal:
@@ -122,14 +132,16 @@ def _build_speech_act_pair(
             out["summary"] = clip_text(summary, 72)
         return out
 
-    return {"a": _side(goal_a), "b": _side(goal_b)}
+    return {"a": _side(goal_a, "a"), "b": _side(goal_b, "b")}
 
 
 def _accepted_escort(
-    turns: list[dict[str, str]], realm_places: dict[str, str], *, at_night: bool,
+    turns: list[dict[str, str]], realm_places: dict[str, str], realm_buildings: list[dict[str, Any]], *, at_night: bool,
 ) -> dict[str, Any]:
-    lodging = {pid: name for pid, name in realm_places.items()
-               if any(word in name for word in ("宿舍", "小屋", "卧室", "客房", "旅馆"))}
+    lodging = {
+        pid: realm_places[pid] for building in realm_buildings
+        if (pid := building["interior_space_id"]) in realm_places and venue_semantics.is_lodging_building(building)
+    }
     if not lodging:
         return {}
     speech = " ".join(f"{turn['line_a']} {turn['line_b']}" for turn in turns)
@@ -145,7 +157,8 @@ def _accepted_escort(
             destination = offer.group(1)
             hits = [pid for pid, name in lodging.items() if name in destination]
             if not hits:
-                hits = [pid for pid, name in lodging.items() if "宿舍" in destination and "宿舍" in name]
+                alias = re.split(r"门口|门前|那边|休息|睡觉|可以吗|好吗|吧", destination, maxsplit=1)[0].strip()
+                hits = [pid for pid, name in lodging.items() if len(alias) >= 2 and alias in name]
             if len(hits) != 1:
                 continue
             if speaker == "b" and index + 1 == len(turns):
@@ -165,6 +178,68 @@ def _accepted_escort(
                                      "reason": f"回「{name}」休息"},
             }
     return {}
+
+
+def _accepted_invitations(turns: list[dict[str, str]]):
+    invitations = ("一起", "同行", "一块", "一道", "要不要", "去不去", "过去吧", "走吧", "过去坐")
+    for index in range(len(turns) - 1, -1, -1):
+        turn = turns[index]
+        exchanges = [(turn["line_a"], turn["line_b"], "b")]
+        if index + 1 < len(turns):
+            exchanges.insert(0, (turn["line_b"], turns[index + 1]["line_a"], "a"))
+        for offer, reply, receiver in exchanges:
+            if not any(word in offer for word in invitations) or any(word in reply for word in _INVITATION_DECLINES):
+                continue
+            if not re.match(r"^(?:好|嗯|行|可以|走吧|去吧|正好|我也想)", reply.lstrip()):
+                continue
+            yield offer, reply, receiver
+
+
+def _accepted_outing(turns: list[dict[str, str]], realm_places: dict[str, str]) -> tuple[str, str]:
+    for offer, reply, _ in _accepted_invitations(turns):
+        for pid, name in realm_places.items():
+            if name and name in offer:
+                return pid, f"{offer} {reply}"
+    return "", ""
+
+
+def _accepted_object_outing(
+    turns: list[dict[str, str]], objects: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    for offer, reply, receiver in _accepted_invitations(turns):
+        if not any(word in offer for word in ("坐", "歇", "休息", "旁边", "那边", "附近", "边上", "晒", "烤火", "取暖", "躺")):
+            continue
+        choices = []
+        for eid, entity in objects.items():
+            name = entity["name"]
+            if name in offer:
+                choices.append((len(name), eid))
+            elif len(name) > 2 and re.search(rf"(?:去|到){re.escape(name[-2:])}|{re.escape(name[-2:])}(?:那边|旁边|上)", offer):
+                choices.append((2, eid))
+        if choices:
+            # Objects are ordered by walking distance when names match more than one instance.
+            _, eid = max(choices, key=lambda match: match[0])
+            traits = objects[eid]["traits"]
+            rest = "restable" in traits and any(word in offer + reply for word in ("坐", "休息", "歇", "躺"))
+            return {"shared_entity_id": eid, "shared_action": "rest" if rest else "dwell", "seated": receiver}
+    return {}
+
+
+def _social_turn_key(first: str, second: str) -> tuple[str, str]:
+    return tuple(re.sub(r"[\W_]+", "", line.casefold()) for line in (first, second))
+
+
+def _repeated_social_turn(candidate: tuple[str, str], recent: list[tuple[str, str]]) -> bool:
+    def similar(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        if max(len(left), len(right)) <= 6:
+            a = re.sub(r"^(?:嗯+|好[呀啊]?|行|可以)", "", left)
+            b = re.sub(r"^(?:嗯+|好[呀啊]?|行|可以)", "", right)
+            return bool(a and a == b and a in ("走吧", "去吧", "过去吧", "一起去"))
+        return min(len(left), len(right)) >= 8 and SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.84
+
+    return any(similar(candidate[0], old[0]) and similar(candidate[1], old[1]) for old in recent)
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
@@ -268,6 +343,27 @@ class WorldChatService:
         with self._lock:
             key = self._history_key_locked(actor_id, eff_sid)
             return [dict(item) for item in self._history.get(key, [])]
+
+    def _recent_pair_turns(self, actor_id: str, partner_name: str, space_id: str) -> list[tuple[str, str]]:
+        own_prefix = (f"（对{partner_name}说）", f"(对{partner_name}说)")
+        peer_prefix = (f"[{partner_name} 回应]", f"[{partner_name} 对你说]")
+        pending: tuple[int, str] | None = None
+        turns = []
+        for row in self.get_history(actor_id, space_id=space_id):
+            line = str(row.get("text") or "")
+            match = next(((side, p) for side, group in enumerate((own_prefix, peer_prefix))
+                          for p in group if line.startswith(p)), None)
+            if row.get("role") != "assistant" or match is None:
+                pending = None
+                continue
+            side, prefix = match
+            spoken = line[len(prefix):].strip()
+            if pending and pending[0] != side:
+                turns.append((pending[1], spoken) if side == 1 else (spoken, pending[1]))
+                pending = None
+            else:
+                pending = (side, spoken)
+        return turns[-10:]
 
     def get_history_if_changed(self, actor_id: str, space_id: str, after: str) -> list[dict[str, Any]] | None:
         with self._lock:
@@ -939,12 +1035,17 @@ class WorldChatService:
             )
             actor = next(a for a in self._engine.list_actors() if a["actor_id"] == actor_id)
 
-        world_view = projector.project_view(self._engine, actor_id, consume_diffs=True)
-        setting_text = soul_text or self._character_setting_of(actor)
         settings_now = self._settings_provider() if self._settings_provider else None
+        include_memories = getattr(settings_now, "episodic_memory_enabled", True)
+        world_view = projector.project_view(
+            self._engine, actor_id, consume_diffs=True, memory_cue=clean_user,
+            include_memories=include_memories and self._realm_space_id(actor["space_id"]) == realm_sid,
+            player_conversation=True,
+        )
+        setting_text = soul_text or self._character_setting_of(actor)
         puzzle_recall = (
             projector.recall_puzzle(self._engine, actor_id, eff_sid, clean_user)
-            if getattr(settings_now, "episodic_memory_enabled", True) else ""
+            if include_memories else ""
         )
         custom_pdir = str(getattr(settings_now, "persona_data_dir", "") or "")
         rels_now = persona_bridge.read_actor_relations(
@@ -1170,6 +1271,9 @@ class WorldChatService:
                 space_id=eff_sid,
             )
 
+        self._engine.record_player_conversation(
+            actor_id, eff_sid, f"玩家说「{clip_text(clean_user, 30)}」，我说「{clip_text(reply, 28)}」。",
+        )
         if mind_mjs is not None and state_root is not None:
             self._run_mind_mjs(mind_mjs, state_root, actor_id, "--her", reply, space_id=realm_sid)
 
@@ -1361,15 +1465,25 @@ class WorldChatService:
             if not scene or scene["space"]["space_id"] != sid:
                 return {"turns": [], "used_llm": False}
             sp_meta, light_meta, vis_a = scene["space"], scene["lighting"], scene["visible"]
+            realm_buildings = scene["realm_buildings"]
             weather_now = scene.get("weather")
             view_a = f"两人在「{sp_meta['name']}」近距离碰面。"
         else:
-            view_a = projector.project_view(self._engine, initiator_id, consume_diffs=False)
+            view_a = projector.project_view(self._engine, initiator_id, include_memories=False)
             sp_snap = self._engine.snapshot_for_ui(sid)
             sp_meta = sp_snap.get("space") or {}
+            realm_buildings = self._engine.list_realm_buildings(sid)
             light_meta = sp_snap.get("lighting") or {}
             weather_now = sp_snap.get("weather")
             vis_a = self._engine.visible_entities(initiator_id)
+        memory_context = ""
+        if getattr(settings, "episodic_memory_enabled", True):
+            for person, partner in ((actor_a, actor_b), (actor_b, actor_a)):
+                remembered = episodic_memory.recall(
+                    person["autonomy"].get("cognition") or {}, sid, {partner["actor_id"]},
+                )
+                if remembered:
+                    memory_context += f"【{person['name']}记住的亲历片段（往事）】{'；'.join(remembered)}\n"
         actors_map_now = {a["actor_id"]: a for a in actors if a.get("space_id") == sid}
         vis_b = self._engine.visible_entities(target_actor_id)
         l0_a = persona_bridge.build_percept_frame(
@@ -1398,7 +1512,15 @@ class WorldChatService:
             advance_exposure=0.12,
             weather=weather_now,
         )
-        action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in vis_a[:16]) or "无"
+        nearby_objects = sorted(
+            {e["entity_id"]: e for e in (*vis_a, *vis_b)}.values(),
+            key=lambda e: self._engine.chebyshev_distance(actor_a, e) + self._engine.chebyshev_distance(actor_b, e),
+        )
+        shared_objects = {
+            e["entity_id"]: e for e in nearby_objects
+            if e["z"] >= 0 and not e["parent_id"].startswith("actor:") and "portal" not in e["traits"]
+        }
+        action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in nearby_objects[:24]) or "无"
         room_clean_nouns = "、".join(dict.fromkeys((l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]])) or "空房间"
         pctx_a = self._persona_full_context_for(a_host, corpus_limit=7)
         pctx_b = self._persona_full_context_for(b_host, corpus_limit=7)
@@ -1489,30 +1611,23 @@ class WorldChatService:
         realm_places = self._engine.list_realm_places(sid)
         is_town_realm = len(realm_places) > 1
         realm_places_ref = "、".join(f"{nm}={pid}" for pid, nm in realm_places.items())
-        valid_eids = {e["entity_id"] for e in vis_a}
+        visible_by_actor = [{e["entity_id"]: e for e in view} for view in (vis_a, vis_b)]
+        valid_eids = set().union(*visible_by_actor)
         turns: list[dict[str, str]] = []
-        accepted_turn_keys: set[tuple[str, ...]] = set()
+        prior_turns = self._recent_pair_turns(initiator_id, b_name, sid)
+        accepted_turn_keys = [_social_turn_key(*pair) for pair in prior_turns]
+        recent_shared_entity = self._engine.recent_joint_entity(initiator_id, target_actor_id)
+        repeated = False
         collected_sa: dict[str, Any] | None = None
         mem_note = ""
         ended_by = ""
         end_reason = ""
         used_llm = False
 
-        def _recent_spoken_from_hist(aid_x: str) -> list[str]:
-            out_lines: list[str] = []
-            for m in self.get_history(aid_x, space_id=sid)[-16:]:
-                if m.get("role") != "assistant":
-                    continue
-                txt = str(m.get("text") or "").strip()
-                txt = re.sub(r"^(?:[（(]对[^）)]+说[）)]|\[[^\]]+\])\s*", "", txt).strip()
-                if txt:
-                    out_lines.append(txt)
-            return out_lines[-6:]
-
-        recent_a_lines = _recent_spoken_from_hist(initiator_id)
-        recent_b_lines = _recent_spoken_from_hist(target_actor_id)
+        recent_a_lines = [pair[0] for pair in prior_turns[-6:]]
+        recent_b_lines = [pair[1] for pair in prior_turns[-6:]]
         prior_social_block = "\n".join(
-            f"- {line}" for line in (recent_a_lines[-2:] + recent_b_lines[-2:])
+            f"- {a_name}：{a_line}\n- {b_name}：{b_line}" for a_line, b_line in prior_turns[-4:]
         ) or "（刚刚才开始这次接触）"
         follow_up_a: dict[str, Any] | None = None
         follow_up_b: dict[str, Any] | None = None
@@ -1541,17 +1656,20 @@ class WorldChatService:
                 + "2. **跨次记忆（防车轱辘话）**：参考【两人此前刚说过的话】，禁止重复相同的邀约或开场白；\n"
                 "3. 严格遵守【态度与情感指针】：若写着“尚不认识”，第1轮自然破冰；否则紧接话题自然聊下去；\n"
                 "4. 若聊到准备去吃/玩/睡屋里某样真实物件并准备结束对话（end_chat=true），可在 follow_up_a / follow_up_b 填写该物件的 entity_id 与 action（consume|interact|rest）让角色真的去做；"
-                "若形成了后续出行约定、互相告知了某场所功能/状态，或气氛变冷，可在可选字段 speech_act 中表达；\n"
+                "若形成了后续出行约定、互相告知了某场所功能/状态，或气氛变冷，可在可选字段 speech_act 中表达；"
+                "shared_place_id 仅在两人明确同意稍后去同一个地点时填写。聊到正身处的场所或单方面邀约时留空。\n"
+                "若约好一起走到本空间某件物品旁（坐垫、篝火等），填写对应的 shared_entity_id，"
+                "shared_action 填 dwell（一起在旁边停留）或 rest（使用可坐物品，seated 写坐下的人 a 或 b）。约好后结束对话。\n"
                 "夜间约好送人回住处休息时，分别填写两人的 goal_a / goal_b。送人的一方用 kind=visit、action=escort，"
                 "回去休息的一方用 kind=visit、drive=rest，target 都填住处 ID。只有双方同意后才记录出行约定；"
                 "尚未执行的行动不得写成已完成；\n"
                 "5. 严格只输出一个合法 JSON 对象：\n"
-                '{"intent_a":"发起方这轮想表达的具体语义意图","emotion_a":"开心|好奇|平静|害羞|温柔|兴奋|冷漠|困倦","intent_b":"回应方这轮想表达的具体语义意图","emotion_b":"...","keep_facts":["本轮涉及的真实物件名"],"end_chat":false,"ended_by":"a|b|","end_reason":"若结束写简短原因(<=16字)","follow_up_a":null,"follow_up_b":null,"speech_act":{"shared_place_id":"","shared_drive":"social","goal_a":null,"goal_b":null,"shared_beliefs":[],"tone":"neutral"},"memory_note":"一句话总结目前聊的内容(<=40字)"}'
+                '{"intent_a":"发起方这轮想表达的具体语义意图","emotion_a":"开心|好奇|平静|害羞|温柔|兴奋|冷漠|困倦","intent_b":"回应方这轮想表达的具体语义意图","emotion_b":"...","keep_facts":["本轮涉及的真实物件名"],"end_chat":false,"ended_by":"a|b|","end_reason":"若结束写简短原因(<=16字)","follow_up_a":null,"follow_up_b":null,"speech_act":{"shared_place_id":"","shared_drive":"social","shared_entity_id":"","shared_action":"","seated":"","goal_a":null,"goal_b":null,"shared_beliefs":[],"tone":"neutral"},"memory_note":"一句话总结目前聊的内容(<=40字)"}'
             )
             user_prompt = (
                 f"{l0_a['prompt_block']}\n"
                 f"{l0_b['prompt_block']}\n"
-                f"【可执行动作物件ID（仅填 follow_up 时使用，绝不写进对话）】{action_id_ref}\n"
+                f"【可执行动作物件ID（用于 follow_up 和 shared_entity_id，绝不写进对话）】{action_id_ref}\n"
                 + (f"【本镇真实场所（仅填 speech_act 时用 ID）】{realm_places_ref}\n" if is_town_realm else "")
                 + f"【{a_name}底色】{setting_a}\n"
                 + (f"【{a_name}心理状态卡】{card_a}\n" if card_a else "")
@@ -1560,6 +1678,7 @@ class WorldChatService:
                 + f"【指针1】{_rel_desc(a_name, b_name, edge_ab)}\n"
                 + f"【指针2】{_rel_desc(b_name, a_name, edge_ba)}\n"
                 + f"【实时状态】{state_brief}\n"
+                + memory_context
                 + f"【两人此前刚说过的话（禁止重复）】\n{prior_social_block}\n"
                 + f"【触发原因】{reason or '在屋里看到对方，想过来聊聊'}\n"
                 + f"【对话进程】{pace_hint}\n"
@@ -1604,40 +1723,55 @@ class WorldChatService:
             if not (line_a and line_b):
                 break
 
-            # 只有整组问答重复才收尾，保留单句自然的应和与短答。
-            turn_key = tuple(re.sub(r"[\W_]+", "", line.casefold()) or line.strip() for line in (line_a, line_b))
-            if turn_key in accepted_turn_keys:
+            turn_key = _social_turn_key(line_a, line_b)
+            if _repeated_social_turn(turn_key, accepted_turn_keys):
                 end_reason = "话题告一段落"
+                repeated = True
                 break
-            accepted_turn_keys.add(turn_key)
-            used_llm = True
-            turns.append({"line_a": line_a, "emotion_a": ea, "line_b": line_b, "emotion_b": eb})
-            recent_a_lines.append(line_a)
-            recent_b_lines.append(line_b)
-
+            next_turn = {"line_a": line_a, "emotion_a": ea, "line_b": line_b, "emotion_b": eb}
+            shared = dict(collected_sa or {})
             if isinstance(parsed.get("speech_act"), dict) and parsed["speech_act"]:
-                merged_sa = dict(collected_sa or {})
                 for k, v in parsed["speech_act"].items():
                     if k == "shared_beliefs" and isinstance(v, list):
                         if v:
-                            merged_sa[k] = list(merged_sa.get(k) or []) + list(v)
+                            shared[k] = list(shared.get(k) or []) + list(v)
                     elif v not in (None, "", [], {}):
-                        merged_sa[k] = v
-                collected_sa = merged_sa
-            if not generated_only:
-                if isinstance(parsed.get("follow_up_a"), dict):
-                    follow_up_a = parsed["follow_up_a"]
-                if isinstance(parsed.get("follow_up_b"), dict):
-                    follow_up_b = parsed["follow_up_b"]
+                        shared[k] = v
+            object_plan = {}
+            if not _resolve_realm_place_id(shared.get("shared_place_id"), realm_places):
+                proposed_entity = str(shared.get("shared_entity_id") or "")
+                inferred = _accepted_object_outing([*turns[-1:], next_turn], shared_objects)
+                if proposed_entity in shared_objects and not any(word in line_b for word in _INVITATION_DECLINES):
+                    object_plan = {**inferred, **shared} if inferred.get("shared_entity_id") == proposed_entity else shared
+                else:
+                    for key in ("shared_entity_id", "shared_action", "seated"):
+                        shared.pop(key, None)
+                    object_plan = inferred
+                if object_plan and object_plan.get("shared_entity_id") == recent_shared_entity:
+                    end_reason = "刚约过这件事"
+                    repeated = True
+                    break
+            collected_sa = {**shared, **object_plan}
+            accepted_turn_keys.append(turn_key)
+            used_llm = True
+            turns.append(next_turn)
+            recent_a_lines.append(line_a)
+            recent_b_lines.append(line_b)
+            if isinstance(parsed.get("follow_up_a"), dict):
+                follow_up_a = parsed["follow_up_a"]
+            if isinstance(parsed.get("follow_up_b"), dict):
+                follow_up_b = parsed["follow_up_b"]
             if str(parsed.get("memory_note") or "").strip():
                 mem_note = clip_text(parsed.get("memory_note"), 80, mem_note)
-            if bool(parsed.get("end_chat")) or is_last:
+            if object_plan or bool(parsed.get("end_chat")) or is_last:
                 ended_by = str(parsed.get("ended_by") or ("a" if turn_idx % 2 == 1 else "b")).strip().lower()
                 if ended_by not in ("a", "b"):
                     ended_by = "a"
-                end_reason = clip_text(parsed.get("end_reason"), 32, "聊得差不多了")
+                end_reason = clip_text(parsed.get("end_reason"), 32, "约好后动身" if object_plan else "聊得差不多了")
                 break
 
+        if not turns and repeated:
+            return {"turns": [], "turns_count": 0, "used_llm": False, "duplicate": True, "speech_act": None}
         if generated_only:
             current = [self._engine.live_actor_frame(aid) for aid in (initiator_id, target_actor_id)]
             now_a, now_b = current
@@ -1645,7 +1779,6 @@ class WorldChatService:
                 return {"turns": [], "used_llm": False}
             if now_b["posture"] == "resting" or self._engine.chebyshev_distance(now_a, now_b) > 1:
                 return {"turns": [], "used_llm": False}
-            follow_up_a = follow_up_b = None
 
         if not turns:
             stance_ab = str(edge_ab.get("attitude_stance") or "neutral")
@@ -1755,36 +1888,43 @@ class WorldChatService:
         expr_a = self._engine.refresh_actor_expression(initiator_id, emotion_hint=emo_a, force_auto=True) or {}
         expr_b = self._engine.refresh_actor_expression(target_actor_id, emotion_hint=emo_b, force_auto=True) or {}
 
-        escort_goals = _accepted_escort(turns, realm_places, at_night=light_meta.get("period") == "night")
+        escort_goals = _accepted_escort(
+            turns, realm_places, realm_buildings, at_night=light_meta.get("period") == "night",
+        )
         if escort_goals:
             collected_sa = {**(collected_sa or {}), **escort_goals}
-        if realm_places and not _resolve_realm_place_id((collected_sa or {}).get("shared_place_id"), realm_places):
-            joined_lines = " ".join(
-                [mem_note] + [f"{t.get('line_a', '')} {t.get('line_b', '')}" for t in turns[-2:]]
-            )
-            if any(kw in joined_lines for kw in ("一起", "约好", "同行", "一块", "一块儿", "一道", "过去吧", "走吧")):
-                for pid, pname in realm_places.items():
-                    if pname and pname in joined_lines:
-                        collected_sa = dict(collected_sa or {})
-                        collected_sa["shared_place_id"] = pid
-                        inferred_drive = (
-                            "food"
-                            if any(
-                                kw in joined_lines
-                                for kw in ("热饮", "喝杯", "喝茶", "咖啡", "吃点东西", "吃东西", "拉面", "蛋糕", "点心", "甜品")
-                            )
-                            else "social"
-                        )
-                        collected_sa.setdefault("shared_drive", inferred_drive)
-                        break
+        if (realm_places and not (collected_sa or {}).get("shared_entity_id")
+                and not _resolve_realm_place_id((collected_sa or {}).get("shared_place_id"), realm_places)):
+            pid, exchanged_lines = _accepted_outing(turns[-2:], realm_places)
+            if pid:
+                collected_sa = {**(collected_sa or {}), "shared_place_id": pid}
+                food_words = ("热饮", "喝杯", "喝茶", "喝咖啡", "吃点东西", "吃东西", "拉面", "蛋糕", "点心", "甜品")
+                collected_sa.setdefault("shared_drive", "food" if any(word in exchanged_lines for word in food_words) else "social")
+
+        if generated_only:
+            for side, follow_up, view, person in zip(
+                ("a", "b"), (follow_up_a, follow_up_b), visible_by_actor, (actor_a, actor_b),
+            ):
+                if not isinstance(follow_up, dict) or (collected_sa or {}).get(f"goal_{side}"):
+                    continue
+                eid = str(follow_up.get("entity_id") or "").strip()
+                action = str(follow_up.get("action") or "").strip()
+                entity = view.get(eid)
+                if entity and action in ("consume", "interact", "rest", "open") and action in dict(self._engine.legal_verbs(entity, person)):
+                    drive = {"consume": "food", "rest": "rest", "open": "curiosity"}.get(action)
+                    if drive is None:
+                        drive = entity["traits"]["activity"]["domain"]
+                    collected_sa = {**(collected_sa or {}), f"goal_{side}": {
+                        "kind": "entity", "target": eid, "drive": drive, "action": action,
+                    }}
 
         speech_act_pair = _build_speech_act_pair(
-            collected_sa, realm_places=realm_places, valid_eids=valid_eids, summary=mem_note,
+            collected_sa, realm_places=realm_places, valid_eids=valid_eids, summary=mem_note, shared_objects=shared_objects,
         )
         action_note = f"[角色社交{'·初次破冰' if first_meet else ''}·{len(turns)}轮] {a_name} 与 {b_name} 聊了起来：{mem_note}"
-        self._engine.record_social_feedback(
+        joint_waiting = self._engine.record_social_feedback(
             initiator_id, sid, action_note, peer_id=target_actor_id, mood_delta=mood_delta,
-            speech_act=speech_act_pair,
+            speech_act=speech_act_pair, decision_interval=getattr(settings, "heartbeat_interval_sec", 300) / 60,
         )
         with self._lock:
             self._append_msg_locked(initiator_id, "action", action_note, space_id=sid)
@@ -1830,7 +1970,7 @@ class WorldChatService:
 
         follow_logs: list[str] = []
         for aid_x, nm_x, fu in ((initiator_id, a_name, follow_up_a), (target_actor_id, b_name, follow_up_b)):
-            if not isinstance(fu, dict):
+            if generated_only or joint_waiting or not isinstance(fu, dict):
                 continue
             feid = str(fu.get("entity_id") or "").strip()
             fact = str(fu.get("action") or "").strip()

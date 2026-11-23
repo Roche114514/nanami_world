@@ -753,6 +753,10 @@
           <div class="sec-title" style="margin-top:9px;"><span>认知地图</span></div>
           <ul id="cognitive-map" style="margin:0;padding-left:18px;font-size:11px;"></ul>
           <div id="cognitive-error" class="muted" style="margin-top:4px;font-size:11px;"></div>
+          <div id="cognitive-memory-section" class="hidden">
+            <div class="sec-title" style="margin-top:9px;"><span>休息后记住的往事</span></div>
+            <ul id="cognitive-memories" style="margin:0;padding-left:18px;font-size:11px;"></ul>
+          </div>
         </div>
 
         <div id="schedule-status" class="sec-box hidden">
@@ -3960,6 +3964,15 @@ function renderCognitiveStatus(cognition) {
     map.append(row);
   }
   el("cognitive-error").textContent = cognition.prediction_error || "";
+  const memories = cognition.memories || [];
+  el("cognitive-memory-section").classList.toggle("hidden", !memories.length);
+  const memoryList = el("cognitive-memories");
+  memoryList.replaceChildren();
+  for (const memory of memories) {
+    const row = document.createElement("li");
+    row.textContent = memory;
+    memoryList.append(row);
+  }
 }
 
 function renderScheduleStatus(act, sched) {
@@ -6118,7 +6131,7 @@ function focusActiveActor() {
 /* ── 绑定控件事件并启动 ── */
 function renderLiveActivity(live) {
   const activity = live && live.activity;
-  const names = {walking: "行走", engaging: "正在互动", conversing: "交谈", resting: "休息", dwell: "短暂停留", idle: "观察", paused: "已暂停"};
+  const names = {walking: "行走", engaging: "正在互动", conversing: "交谈", resting: "休息", waiting: "等候同伴", dwell: "短暂停留", idle: "观察", paused: "已暂停"};
   el("live-activity").textContent = activity ? (names[activity.phase] || "") : "";
   const progress = el("live-progress");
   progress.classList.toggle("hidden", !activity || !activity.duration);
