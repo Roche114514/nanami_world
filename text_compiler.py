@@ -274,6 +274,19 @@ def _ask_llm_json(
 
 
 def _generic_pixel_box(w: int, h: int, shape: str = "box") -> list[str]:
+    silhouettes = {
+        "filament": ("....33", "...331", "..33.1", "..3.1.", ".33.1.", ".3.1..", ".3.1..", "3a1...", "aa...."),
+        "fragment": ("..22.1..", ".o22.o1.", ".o12o...","..oo..2.", ".....2o.", ".1o..o.."),
+        "tool": ("oo.oo.....", "o2.2o.....", ".o2o......", "..o2o.....", "...o22o...", "....o22o..", ".....o2o..", "......oo.."),
+        "receipt": ("..o.o.oo", ".o22222o", ".o2o2o2o", ".o2222o.", ".o2o2o..", ".o222o..", ".oo.o..."),
+        "clock": ("...oooo...", "..o2222o..", ".o222222o.", ".o222o22o.", ".o22oo22o.", ".o2o2222o.", ".o222222o.", "..o2222o..", "...oooo..."),
+        "key": ("..oooo....", ".o2222o...", ".o2..2o...", ".o2222o...", "..oo2o....", "....o2o...", ".....o2o..", "......o2o.", "......o22o", ".......oo."),
+    }
+    if shape in silhouettes:
+        motif = silhouettes[shape]
+        left = "." * ((w - len(motif[0])) // 2)
+        top = [("." * w)] * ((h - len(motif)) // 2)
+        return normalize_pixel_grid(top + [(left + row).ljust(w, ".") for row in motif], w, h, auto_outline=False)
     if shape == "cup":
         rows = [
             "................",
@@ -417,6 +430,18 @@ def _fallback_item_from_text(prompt_text: str, preferred_size: tuple[int, int]) 
         traits["activity"] = {"domain": domain, "progress_unit": "关" if domain == "game" else "次", "progress": 0, "battery": 80 if "电" in text or "机" in text else None, "battery_cost": 10}
         shape = "book" if domain == "reading" else "box"
         tags.append(domain)
+
+    for keywords, silhouette in (
+        (("发丝", "纤维", "细发"), "filament"),
+        (("碎片", "碎屑", "碎渣", "金属屑"), "fragment"),
+        (("扳手", "剪刀", "刀片", "螺丝刀"), "tool"),
+        (("票根", "凭证", "收据", "纸片", "撕裂"), "receipt"),
+        (("钟表", "时钟", "表盘", "计时器", "挂钟"), "clock"),
+        (("钥匙",), "key"),
+    ):
+        if any(keyword in text for keyword in keywords):
+            shape = silhouette
+            break
 
     if any(k in text for k in ("蓝", "海", "青")):
         slot_colors.update({"1": "#5c88b8", "2": "#8eb8e5", "3": "#39597d"})
@@ -1591,6 +1616,14 @@ _TOWN_PALETTES: tuple[str, ...] = (
 )
 _QUADRANT_SLOTS: tuple[str, ...] = ("nw", "ne", "sw", "se")
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+VALID_TOWN_LAYOUTS: tuple[str, ...] = (
+    "crossroads",
+    "ring_plaza",
+    "river_bridges",
+    "coastal_pier",
+    "winding_avenue",
+    "courtyard_manor",
+)
 
 _TOWN_SYSTEM_PROMPT = """你是像素风文字世界的城镇总设计师。用户输入一句城镇设定描述，你必须只输出一个合法 JSON 对象（不要 markdown 围栏、不要任何坐标数字），由程序按确定性算法完成道路连通与建筑布局。
 
@@ -1603,6 +1636,7 @@ _TOWN_SYSTEM_PROMPT = """你是像素风文字世界的城镇总设计师。用�
 - public（公共会馆/邮局/沙龙/休息厅）
 
 可用 zone_slot 枚举：nw（西北区）、ne（东北区）、sw（西南区）、se（东南区）；center 仅用于 zones。
+可用 layout_style（按城镇地形格局选择，严禁做成十字路口）：ring_plaza（环岛喷泉广场）、river_bridges（双岸跨河桥梁）、coastal_pier（南岸海滨栈桥）、winding_avenue（曲折林荫大道）、courtyard_manor（对称庭院大道）。
 可用地表 tile_id（均可行走）：grass, flower_grass, sand, cobble, stone_tile, wood_floor, dark_wood, tatami, carpet_pink, carpet_blue
 可用边界/墙体 tile_id：hedge, water, brick_wall, wood_wall, white_wall, glass_wall
 可用 palette_id：warm_stardew, midnight_handheld, cyber_pastel, gameboy_pocket, ink_terminal
@@ -1612,6 +1646,7 @@ JSON 输出结构：
 {
   "name": "城镇名称(<=12字)",
   "theme": "seaside|snow_onsen|neon_market|forest_academy|sakura",
+  "layout_style": "ring_plaza|river_bridges|coastal_pier|winding_avenue|courtyard_manor",
   "ambient_phrase": "一句话城镇白描(<=55字)",
   "palette_id": "warm_stardew",
   "allowed_weathers": ["clear", "cloudy", "rain"],
@@ -1634,6 +1669,8 @@ JSON 输出结构：
       "name": "建筑名(<=12字)",
       "role": "home|cafe|shop|library|arcade|public",
       "zone_slot": "nw|ne|sw|se",
+      "ext_w": 7,
+      "ext_h": 5,
       "roof_color": "#c9647a",
       "wall_tile": "brick_wall",
       "interior_floor_tile": "wood_floor",
@@ -1645,7 +1682,7 @@ JSON 输出结构：
     }
   ]
 }
-注意：至少包含 1 栋 home（住处）和 1 栋 cafe 或 shop（饮食补给场所），各区建筑尽量均衡分布。"""
+注意：至少包含 1 栋 home（住处）和 1 栋 cafe 或 shop（饮食补给场所），各区建筑尽量均衡分布，可通过 ext_w(4..10) 与 ext_h(4..6) 拉开大小体量差异。"""
 
 
 def _valid_hex(val: Any, fallback: str) -> str:
@@ -1848,6 +1885,23 @@ def _detect_town_theme(prompt_text: str) -> str:
     return "sakura"
 
 
+def _infer_town_layout_style(theme: str, prompt_text: str) -> str:
+    low = f"{theme} {prompt_text}".lower()
+    if any(k in low for k in ("海", "港", "码头", "滩", "湾", "汐", "sea", "seaside", "harbor", "pier", "port", "coast", "beach")):
+        return "coastal_pier"
+    if any(k in low for k in ("河", "桥", "运河", "水乡", "溪", "river", "bridge", "canal")):
+        return "river_bridges"
+    if any(k in low for k in ("环", "喷泉", "钟楼", "祭典", "广场", "霓虹", "集市", "ring", "fountain", "plaza", "neon_market")):
+        return "ring_plaza"
+    if any(k in low for k in ("林荫", "山", "小径", "森林", "林间", "林", "温泉", "snow_onsen", "forest", "winding", "hill")):
+        return "winding_avenue"
+    if any(k in low for k in ("庄园", "公馆", "院", "学园", "学院", "古堡", "courtyard", "manor", "academy")):
+        return "courtyard_manor"
+    non_cross = ("ring_plaza", "river_bridges", "coastal_pier", "winding_avenue", "courtyard_manor")
+    acc = sum((idx + 1) * ord(ch) for idx, ch in enumerate(low))
+    return non_cross[acc % len(non_cross)]
+
+
 def _sanitize_town_spec(
     raw: Mapping[str, Any] | None,
     *,
@@ -1861,6 +1915,12 @@ def _sanitize_town_spec(
     if theme not in ("seaside", "snow_onsen", "neon_market", "forest_academy", "sakura"):
         theme = _detect_town_theme(prompt_text)
     preset = _town_theme_preset(theme)
+    raw_layout = str(src.get("layout_style") or "").strip().lower()
+    explicit_cross = "十字" in prompt_text or "crossroads" in prompt_text.lower()
+    if raw_layout in VALID_TOWN_LAYOUTS and (raw_layout != "crossroads" or explicit_cross):
+        layout_style = raw_layout
+    else:
+        layout_style = _infer_town_layout_style(theme, prompt_text)
 
     palette_id = str(src.get("palette_id") or preset["palette_id"]).strip()
     if palette_id not in _TOWN_PALETTES:
@@ -1882,7 +1942,16 @@ def _sanitize_town_spec(
 
     ground_tile = _pick_walkable_tile(src.get("ground_tile"), str(preset["ground_tile"]))
     road_tile = _pick_walkable_tile(src.get("road_tile"), str(preset["road_tile"]))
+    if road_tile == ground_tile:
+        road_tile = "cobble" if ground_tile != "cobble" else "wood_floor"
     plaza_tile = _pick_walkable_tile(src.get("plaza_tile"), str(preset["plaza_tile"]))
+    if plaza_tile == ground_tile:
+        if (theme == "neon_market" or palette_id == "midnight_handheld") and ground_tile != "carpet_blue":
+            plaza_tile = "carpet_blue"
+        elif ground_tile == "stone_tile":
+            plaza_tile = "wood_floor"
+        else:
+            plaza_tile = "stone_tile"
     accent_tile = _pick_walkable_tile(src.get("accent_tile"), str(preset["accent_tile"]))
     border_tile = _pick_border_tile(src.get("border_tile"), str(preset["border_tile"]))
     has_water = bool(src.get("has_water_feature", preset["has_water_feature"]))
@@ -1934,7 +2003,7 @@ def _sanitize_town_spec(
             int_pal = palette_id
         default_wall = "brick_wall" if role in ("home", "library", "arcade") else "wood_wall"
         default_floor = "tatami" if (role == "home" and idx_hint % 2 == 1) else ("dark_wood" if role == "cafe" else "wood_floor")
-        sanitized_bldgs.append({
+        b_item: dict[str, Any] = {
             "name": name,
             "role": role,
             "category": venue_semantics.default_category_for_role(role),
@@ -1943,13 +2012,25 @@ def _sanitize_town_spec(
             "zone_slot": slot,
             "roof_color": _valid_hex(item.get("roof_color"), "#c9647a"),
             "wall_tile": _pick_wall_tile(item.get("wall_tile"), default_wall),
-            "interior_floor_tile": _pick_walkable_tile(item.get("interior_floor_tile"), default_floor),
+            "interior_floor_tile": _pick_walkable_tile(item.get("interior_floor_tile") or item.get("floor_tile"), default_floor),
             "interior_wall_tile": _pick_wall_tile(item.get("interior_wall_tile"), "wood_wall"),
             "interior_palette": int_pal,
             "interior_ambient": clip_text(item.get("interior_ambient"), 60, f"「{name}」的室内空间，推门可回到街道。"),
             "icon": clip_text(item.get("icon"), 4, venue_semantics.default_icon_for_role(role)),
             "note_text": clip_text(item.get("note_text"), 80, ""),
-        })
+        }
+        for passthrough in ("location_id", "bed_count", "rug_tile", "partition_style", "furniture_clusters", "scene_items", "rug_style", "room_shape"):
+            if item.get(passthrough) is not None:
+                b_item[passthrough] = item[passthrough]
+        if item.get("interior_width") is not None:
+            b_item["interior_width"] = clamp_int(item["interior_width"], 8, 36, 16)
+        if item.get("interior_height") is not None:
+            b_item["interior_height"] = clamp_int(item["interior_height"], 6, 28, 11)
+        if item.get("ext_w") is not None:
+            b_item["ext_w"] = clamp_int(item.get("ext_w"), 4, 10, 6)
+        if item.get("ext_h") is not None:
+            b_item["ext_h"] = clamp_int(item.get("ext_h"), 4, 6, 5)
+        sanitized_bldgs.append(b_item)
 
     for idx, rb in enumerate(raw_bldgs[:target_n]):
         _add_clean_bldg(rb, idx)
@@ -1979,9 +2060,12 @@ def _sanitize_town_spec(
 
     return {
         "name": clip_text(src.get("name"), 16, str(preset["name"])),
+        **({"seed": src["seed"]} if type(src.get("seed")) is int else {}),
         "theme": theme,
-        "width": clamp_int(width, 28, 64, 40),
-        "height": clamp_int(height, 22, 48, 30),
+        "layout_style": layout_style,
+        "world_prompt": clip_text(prompt_text, 240, ""),
+        "width": clamp_int(width, 28, 72, 48),
+        "height": clamp_int(height, 22, 52, 36),
         "ambient_phrase": clip_text(src.get("ambient_phrase"), 60, str(preset["ambient_phrase"])),
         "palette_id": palette_id,
         "allowed_weathers": allowed_weathers,
@@ -2012,8 +2096,8 @@ def _fallback_town_spec_from_text(prompt_text: str, width: int, height: int, bui
 def compile_town_spec_from_text(
     prompt_text: str,
     *,
-    width: int = 40,
-    height: int = 30,
+    width: int | None = None,
+    height: int | None = None,
     building_count: int = 6,
     use_llm: bool = True,
     adapter_provider: Callable[[], Any] | None = None,
@@ -2021,8 +2105,8 @@ def compile_town_spec_from_text(
 ) -> dict[str, Any]:
     """根据一句自然语言描述编译分层城镇设计蓝本（语义归 LLM，几何与连通性交由算法确定性布局）。"""
     clean_prompt = clip_text(prompt_text, 240, "一座温馨宁静的像素风格小镇")
-    tw = clamp_int(width, 28, 64, 40)
-    th = clamp_int(height, 22, 48, 30)
+    tw = clamp_int(width if width is not None else 48, 28, 72, 48)
+    th = clamp_int(height if height is not None else 36, 22, 52, 36)
     b_cnt = clamp_int(building_count, 3, 8, 6)
 
     if use_llm:

@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from collections import Counter, deque
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from . import venue_semantics, weather
-from .schema import TILE_CATALOG, clip_text, normalize_buildings, normalize_zones, slugify
+from . import building_architect, interior_designer, map_generator, outdoor_designer, venue_semantics, weather
+from .schema import TILE_CATALOG, clamp_int, clip_text, normalize_buildings, normalize_zones, slugify
 
 if TYPE_CHECKING:
     from .engine import WorldEngine
@@ -351,11 +352,14 @@ def build_building_subworld(
     interior_space_id: str = "",
     interior_width: int = 12,
     interior_height: int = 9,
+    interior_entry_x: int | None = None,
     interior_palette: str = "warm_stardew",
     interior_ambient: str = "",
     interior_floor_tile: str = "wood_floor",
     interior_wall_tile: str = "wood_wall",
     interior_items: Sequence[Mapping[str, Any]] = (),
+    location_id: str = "",
+    bed_count: int = 0,
 ) -> dict[str, Any]:
     """在城镇空间上构建一栋建筑外观及其双向门洞连通的独立室内子世界。"""
     with engine._lock:
@@ -426,7 +430,7 @@ def build_building_subworld(
     # 2. 创建独立的室内子世界
     iw = max(8, int(interior_width))
     ih = max(6, int(interior_height))
-    exit_x = iw // 2
+    exit_x = clamp_int(interior_entry_x, 1, iw - 2, iw // 2)
     exit_y = ih - 1
     interior_sp = engine.create_space(
         name=clean_name,
@@ -525,7 +529,7 @@ def build_building_subworld(
             if str(b.get("building_id") or "") != bid
             and str(b.get("interior_space_id") or "") != interior_sp["space_id"]
         ]
-        existing.append({
+        b_meta: dict[str, Any] = {
             "building_id": bid,
             "name": clean_name,
             "zone_id": zone_id,
@@ -542,7 +546,12 @@ def build_building_subworld(
             "restock_profile": resolved_restock,
             "affordances": resolved_aff,
             "icon": resolved_icon,
-        })
+        }
+        if str(location_id or "").strip():
+            b_meta["location_id"] = str(location_id).strip()
+        if int(bed_count or 0) > 0 or resolved_role == "home":
+            b_meta["bed_count"] = max(1 if resolved_role == "home" else 0, int(bed_count or 0))
+        existing.append(b_meta)
         tsp["buildings"] = normalize_buildings(existing, int(tsp["width"]), int(tsp["height"]))
         engine._save_world_locked()
 
@@ -869,7 +878,7 @@ def synthesize_interior_items(
     ]
 
 
-_PROTECTED_ROAD_TILES: frozenset[str] = frozenset({"cobble", "stone_tile", "carpet_pink", "carpet_blue"})
+_PROTECTED_ROAD_TILES: frozenset[str] = frozenset({"cobble", "stone_tile", "carpet_pink", "carpet_blue", "wood_floor"})
 
 
 def _is_walkable_tile_id(tid: str) -> bool:
@@ -883,6 +892,63 @@ def _cell_tile_id(space: Mapping[str, Any], x: int, y: int) -> str:
     if isinstance(raw, Mapping):
         return str(raw.get(f"{x},{y}") or default_tid)
     return default_tid
+
+
+def _town_plaza_start(space: Mapping[str, Any], blocked: set[tuple[int, int]]) -> tuple[int, int]:
+    width, height = int(space["width"]), int(space["height"])
+    plaza = next((z for z in space.get("zones") or () if z.get("zone_id") in ("center", "central_plaza")), None)
+    if plaza:
+        cx, cy = int(plaza["x"]) + int(plaza["w"]) // 2, int(plaza["y"]) + int(plaza["h"]) // 2
+    else:
+        cx, cy = width // 2 - 1, height // 2
+    return min(
+        ((x, y) for y in range(height) for x in range(width)
+         if (x, y) not in blocked and _is_walkable_tile_id(_cell_tile_id(space, x, y))),
+        key=lambda p: (abs(p[0] - cx) + abs(p[1] - cy), p[1], p[0]),
+        default=(cx, cy),
+    )
+
+
+def _town_reachable_cells(
+    space: Mapping[str, Any], start: tuple[int, int], blocked: set[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    if start in blocked or not _is_walkable_tile_id(_cell_tile_id(space, *start)):
+        return set()
+    width, height = int(space["width"]), int(space["height"])
+    reachable = {start}
+    queue = deque([start])
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nx, ny = x + dx, y + dy
+            point = (nx, ny)
+            if (
+                0 <= nx < width and 0 <= ny < height
+                and point not in reachable and point not in blocked
+                and _is_walkable_tile_id(_cell_tile_id(space, nx, ny))
+                and _can_step_space_elev(space, x, y, nx, ny)
+            ):
+                reachable.add(point)
+                queue.append(point)
+    return reachable
+
+
+def _can_step_space_elev(space: Mapping[str, Any], x0: int, y0: int, x1: int, y1: int) -> bool:
+    elevs = space.get("elevations")
+    if not isinstance(elevs, Mapping) or not elevs:
+        return True
+    k0, k1 = f"{int(x0)},{int(y0)}", f"{int(x1)},{int(y1)}"
+    e0 = int(elevs.get(k0, 0) or 0)
+    e1 = int(elevs.get(k1, 0) or 0)
+    if e0 == e1:
+        return True
+    if abs(e0 - e1) > 1:
+        return False
+    stairs = space.get("stairs")
+    if not isinstance(stairs, Mapping) or not stairs:
+        return False
+    need = "ns" if int(x0) == int(x1) else "ew"
+    return stairs.get(k0) in (need, "both") or stairs.get(k1) in (need, "both")
 
 
 def _walkable_tile_counts(space: Mapping[str, Any]) -> Counter[str]:
@@ -961,6 +1027,8 @@ def _shortest_walkway_to_road(
                 continue
             if nc not in road_targets and not _is_walkable_tile_id(_cell_tile_id(space, nx, ny)):
                 continue
+            if not _can_step_space_elev(space, cx, cy, nx, ny):
+                continue
             parent[nc] = (cx, cy)
             queue.append(nc)
 
@@ -972,9 +1040,12 @@ def _shortest_walkway_to_road(
         path.append(cur)
         cur = parent[cur]
     path.reverse()
-    return [{"x": px, "y": py, "tile_id": tile_id} for px, py in path if (px, py) not in road_targets] or [
-        {"x": sx, "y": sy, "tile_id": tile_id}
-    ]
+    stairs_map = space.get("stairs") if isinstance(space.get("stairs"), Mapping) else {}
+    return [
+        {"x": px, "y": py, "tile_id": tile_id}
+        for px, py in path
+        if (px, py) not in road_targets and f"{px},{py}" not in stairs_map
+    ] or [{"x": sx, "y": sy, "tile_id": tile_id}]
 
 
 def find_free_building_lot(
@@ -987,6 +1058,7 @@ def find_free_building_lot(
     road_tile: str = "cobble",
     reserved_cells: set[tuple[int, int]] | None = None,
     region: tuple[int, int, int, int] | None = None,
+    rng_salt: int = 0,
 ) -> dict[str, Any]:
     """在城镇空间内确定性寻找不遮挡道路/水域/既有建筑且可达主路网的空闲建地。"""
     with engine._lock:
@@ -998,14 +1070,20 @@ def find_free_building_lot(
         buildings = _collect_building_boxes(space)
 
         occupied_entities: set[tuple[int, int]] = set()
+        solid_cells: set[tuple[int, int]] = set()
         for ent in engine._world["entities"].values():
             if ent.get("space_id") != town_space_id or int(ent.get("z", 0)) < 0:
                 continue
-            fw, fh = ent.get("footprint") or [1, 1]
-            ex, ey = int(ent["x"]), int(ent["y"])
-            for dx in range(int(fw)):
-                for dy in range(int(fh)):
-                    occupied_entities.add((ex + dx, ey + dy))
+            cells = engine._entity_cells(ent)
+            occupied_entities.update(cells)
+            if int(ent.get("z", 0)) == 0 and engine._is_entity_blocking_locked(ent):
+                solid_cells.update(cells)
+
+        plaza_start = _town_plaza_start(space, solid_cells)
+        plaza_reach = _town_reachable_cells(space, plaza_start, solid_cells)
+        existing_landings = {
+            (int(b["door_x"]), int(b["door_y"]) + 1) for b in space.get("buildings") or ()
+        } & plaza_reach
 
         # Road/plaza network targets: exclude the town's dominant ground tile so stone_tile/sand/etc. towns still have lots.
         counts = _walkable_tile_counts(space)
@@ -1071,6 +1149,30 @@ def find_free_building_lot(
         size_trials = list(dict.fromkeys([(max(4, int(ext_w)), max(4, int(ext_h))), (6, 4), (5, 4), (4, 4)]))
         entities_view = engine._world["entities"]
 
+        # Precompute distance to nearest non-ground street/plaza tile so buildings front streets organically.
+        street_seeds = {
+            c for c in road_cells if _cell_tile_id(space, *c) in (road_tile, "cobble", "wood_floor")
+        } or set(road_cells)
+        road_dist: dict[tuple[int, int], int] = {c: 0 for c in street_seeds}
+        bfs_road: deque[tuple[int, int]] = deque(sorted(street_seeds))
+        while bfs_road:
+            cx, cy = bfs_road.popleft()
+            cd = road_dist[(cx, cy)]
+            if cd >= 18:
+                continue
+            for ox, oy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nx, ny = cx + ox, cy + oy
+                if not (1 <= nx < tw - 1 and 1 <= ny < th - 1) or (nx, ny) in road_dist:
+                    continue
+                if not _is_walkable_tile_id(_cell_tile_id(space, nx, ny)):
+                    continue
+                if not _can_step_space_elev(space, cx, cy, nx, ny):
+                    continue
+                road_dist[(nx, ny)] = cd + 1
+                bfs_road.append((nx, ny))
+
+        elev_map = space.get("elevations") if isinstance(space.get("elevations"), Mapping) else {}
+        stair_map = space.get("stairs") if isinstance(space.get("stairs"), Mapping) else {}
         for bw, bh in size_trials:
             for rx0, ry0, rx1, ry1 in search_boxes:
                 min_x = max(1, rx0)
@@ -1079,6 +1181,7 @@ def find_free_building_lot(
                 max_y = min(th - 2 - bh, ry1 - bh + 1)
                 if min_x > max_x or min_y > max_y:
                     continue
+                valid_cands: list[tuple[tuple[int, int, int, int, int, int], int, int, int, int, tuple[int, int]]] = []
                 for ly in range(min_y, max_y + 1):
                     for lx in range(min_x, max_x + 1):
                         dx = lx + bw // 2
@@ -1086,10 +1189,17 @@ def find_free_building_lot(
                         step_out = (dx, dy + 1)
                         if not (1 <= step_out[0] < tw - 1 and 1 <= step_out[1] < th - 1):
                             continue
-                        if step_out in padded_bldgs or step_out in occupied_entities or step_out in extra_reserved:
+                        if (
+                            step_out in padded_bldgs
+                            or step_out in occupied_entities
+                            or step_out in extra_reserved
+                            or f"{step_out[0]},{step_out[1]}" in stair_map
+                            or step_out not in plaza_reach
+                        ):
                             continue
                         if not _is_walkable_tile_id(_cell_tile_id(space, *step_out)):
                             continue
+                        lot_elev = int(elev_map.get(f"{step_out[0]},{step_out[1]}", 0) or 0)
 
                         lot_ok = True
                         for cy in range(ly, ly + bh):
@@ -1100,6 +1210,9 @@ def find_free_building_lot(
                                     or cell in occupied_entities
                                     or cell in extra_reserved
                                     or cell in road_cells
+                                    or f"{cx},{cy}" in stair_map
+                                    or cell == plaza_start
+                                    or int(elev_map.get(f"{cx},{cy}", 0) or 0) != lot_elev
                                     or not _is_walkable_tile_id(_cell_tile_id(space, cx, cy))
                                 ):
                                     lot_ok = False
@@ -1109,17 +1222,28 @@ def find_free_building_lot(
                         if not lot_ok:
                             continue
 
-                        next_boxes = [*buildings, (lx, ly, lx + bw - 1, ly + bh - 1)]
-                        walkway = _shortest_walkway_to_road(
-                            space,
-                            entities_view,
-                            step_out,
-                            building_boxes=next_boxes,
-                            road_targets=road_cells,
-                            reserved_cells=extra_reserved,
-                            tile_id=road_tile,
-                        )
-                        if walkway is None:
+                        d_road = road_dist.get(step_out, 99)
+                        border_pen = (2 if ly <= 2 else 0) + (1 if (lx <= 1 or lx + bw >= tw - 1) else 0)
+                        stagger = (lx * 37 + ly * 19 + len(buildings) * 23 + rng_salt) % 11
+                        score = (min(d_road, 99), border_pen, d_road, stagger, ly, lx)
+                        valid_cands.append((score, lx, ly, dx, dy, step_out))
+
+                valid_cands.sort(key=lambda item: item[0])
+                for _, lx, ly, dx, dy, step_out in valid_cands:
+                    next_boxes = [*buildings, (lx, ly, lx + bw - 1, ly + bh - 1)]
+                    walkway = _shortest_walkway_to_road(
+                        space,
+                        entities_view,
+                        step_out,
+                        building_boxes=next_boxes,
+                        road_targets=road_cells,
+                        reserved_cells=extra_reserved,
+                        tile_id=road_tile,
+                    )
+                    if walkway is not None:
+                        lot_cells = {(x, y) for y in range(ly, ly + bh) for x in range(lx, lx + bw)}
+                        reach_after = _town_reachable_cells(space, plaza_start, solid_cells | lot_cells)
+                        if step_out not in reach_after or not existing_landings <= reach_after:
                             continue
                         return {
                             "ext_x": lx,
@@ -1134,17 +1258,317 @@ def find_free_building_lot(
         raise ValueError("当前城镇暂未找到足够的空闲建地，可先向外扩图后再加盖建筑。")
 
 
+def _paint_town_skeleton(
+    tw: int,
+    th: int,
+    *,
+    layout_style: str,
+    ground_tile: str,
+    road_tile: str,
+    plaza_tile: str,
+    border_tile: str,
+    accent_tile: str,
+    has_water: bool,
+    rng: random.Random | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    set[tuple[int, int]],
+    tuple[int, int] | None,
+    tuple[int, int],
+    tuple[int, int, int, int],
+]:
+    """按 layout_style 绘制 6 种不同室外路网/水系/广场骨架，确保单连通与充足建筑用地。"""
+    jx = rng.randint(-3, 3) if (rng is not None and tw >= 38) else 0
+    jy = rng.randint(-2, 2) if (rng is not None and th >= 28) else 0
+    rx = clamp_int(tw // 2 - 1 + jx, 8, tw - 9, tw // 2 - 1)
+    ry = clamp_int(th // 2 - 1 + jy, 7, th - 8, th // 2 - 1)
+    px0 = max(3, rx - 4)
+    px1 = min(tw - 4, rx + 5)
+    py0 = max(3, ry - 2)
+    py1 = min(th - 4, ry + 3)
+
+    grid: dict[tuple[int, int], str] = {}
+    ordered_cells: list[dict[str, Any]] = []
+
+    def _paint(cells: Sequence[Mapping[str, Any]]) -> None:
+        for c in cells:
+            x, y, tid = int(c["x"]), int(c["y"]), str(c["tile_id"])
+            if 0 <= x < tw and 0 <= y < th:
+                grid[(x, y)] = tid
+                ordered_cells.append({"x": x, "y": y, "tile_id": tid})
+
+    _paint(_rect_cells(0, 0, tw, th, ground_tile))
+    edge_cells: list[dict[str, Any]] = []
+    for x in range(tw):
+        edge_cells.append({"x": x, "y": 0, "tile_id": border_tile})
+        edge_cells.append({"x": x, "y": th - 1, "tile_id": border_tile})
+    for y in range(th):
+        edge_cells.append({"x": 0, "y": y, "tile_id": border_tile})
+        edge_cells.append({"x": tw - 1, "y": y, "tile_id": border_tile})
+    _paint(edge_cells)
+
+    reserved_lot_cells: set[tuple[int, int]] = set()
+    pond_campfire_cell: tuple[int, int] | None = None
+    spawn_hint = (rx, ry + 1)
+    plaza_bounds = (px0, py0, px1, py1)
+
+    if layout_style == "ring_plaza":
+        # 环岛喷泉广场：中心闭合地标广场 + 紧贴外绕的环形大道 + 错位分支辅路（绝不穿心成十字）
+        _paint(_rect_cells(px0, py0, px1 - px0 + 1, py1 - py0 + 1, plaza_tile))
+        for ax, ay in ((px0, py0), (px1, py0), (px0, py1), (px1, py1)):
+            _paint([{"x": ax, "y": ay, "tile_id": accent_tile}])
+        center_mark = "water" if has_water else accent_tile
+        _paint(_rect_cells(rx, ry, 2, 2, center_mark))
+        if has_water:
+            reserved_lot_cells.update({(rx, ry), (rx + 1, ry), (rx, ry + 1), (rx + 1, ry + 1)})
+
+        ring_x0 = max(3, px0 - 3)
+        ring_x1 = min(tw - 5, px1 + 2)
+        ring_y0 = max(3, py0 - 3)
+        ring_y1 = min(th - 5, py1 + 2)
+        ring_w = 2 if tw >= 38 and th >= 26 else 1
+        _paint(_rect_cells(ring_x0, ring_y0, ring_x1 - ring_x0 + ring_w, ring_w, road_tile))
+        _paint(_rect_cells(ring_x0, ring_y1, ring_x1 - ring_x0 + ring_w, ring_w, road_tile))
+        _paint(_rect_cells(ring_x0, ring_y0, ring_w, ring_y1 - ring_y0 + ring_w, road_tile))
+        _paint(_rect_cells(ring_x1, ring_y0, ring_w, ring_y1 - ring_y0 + ring_w, road_tile))
+        # 短口将外环连入广场四边，但不在广场内部横竖贯通
+        _paint(_rect_cells(rx, ring_y0, 2, max(1, py0 - ring_y0), road_tile))
+        _paint(_rect_cells(rx, py1 + 1, 2, max(1, ring_y1 - py1), road_tile))
+        _paint(_rect_cells(ring_x0, ry, max(1, px0 - ring_x0), 2, road_tile))
+        _paint(_rect_cells(px1 + 1, ry, max(1, ring_x1 - px1), 2, road_tile))
+        # 错开辐射支路通往四角街区
+        w_arm_y = max(3, py0)
+        e_arm_y = min(th - 5, py1 - 1)
+        n_arm_x = max(4, px0 + 1)
+        s_arm_x = min(tw - 6, px1 - 2)
+        _paint(_rect_cells(2, w_arm_y, max(2, ring_x0 - 1), 2, road_tile))
+        _paint(_rect_cells(ring_x1 + 1, e_arm_y, max(2, tw - 3 - ring_x1), 2, road_tile))
+        _paint(_rect_cells(n_arm_x, 2, 2, max(2, ring_y0 - 1), road_tile))
+        _paint(_rect_cells(s_arm_x, ring_y1 + 1, 2, max(2, th - 3 - ring_y1), road_tile))
+
+        for py in range(py0 - 1, py1 + 2):
+            for px in range(px0 - 1, px1 + 2):
+                reserved_lot_cells.add((px, py))
+        spawn_hint = (max(px0 + 1, rx - 2), ry)
+
+    elif layout_style == "river_bridges":
+        # 双岸曲河与上下双桥：S 型微弯河道 + 双岸滨水大道 + 西岸码头广场（无中央十字桥）
+        shore_tile = "sand" if ground_tile != "sand" else accent_tile
+        river_cols: dict[int, int] = {}
+        for y in range(1, th - 1):
+            if y < ry - 1:
+                cx_r = rx - 2
+            elif y <= ry + 1:
+                cx_r = rx - 1
+            else:
+                cx_r = rx
+            river_cols[y] = cx_r
+            _paint([
+                {"x": cx_r - 1, "y": y, "tile_id": shore_tile},
+                {"x": cx_r, "y": y, "tile_id": "water"},
+                {"x": cx_r + 1, "y": y, "tile_id": "water"},
+                {"x": cx_r + 2, "y": y, "tile_id": "water"},
+                {"x": cx_r + 3, "y": y, "tile_id": shore_tile},
+            ])
+            for rx_r in range(cx_r - 1, cx_r + 4):
+                reserved_lot_cells.add((rx_r, y))
+
+        west_ave_x = max(4, rx - 6)
+        east_ave_x = min(tw - 6, rx + 6)
+        _paint(_rect_cells(west_ave_x, 2, 2, th - 4, road_tile))
+        _paint(_rect_cells(east_ave_x, 2, 2, th - 4, road_tile))
+
+        # 仅在南北两翼架桥过河，并从双岸大道延伸入街区支巷
+        bridge_north_y = max(4, th // 4)
+        bridge_south_y = min(th - 6, (th * 3) // 4)
+        _paint(_rect_cells(2, bridge_north_y, max(2, west_ave_x), 2, road_tile))
+        _paint(_rect_cells(east_ave_x + 2, bridge_north_y, max(2, tw - 4 - east_ave_x), 2, road_tile))
+        _paint(_rect_cells(2, bridge_south_y, max(2, west_ave_x), 2, road_tile))
+        _paint(_rect_cells(east_ave_x + 2, bridge_south_y, max(2, tw - 4 - east_ave_x), 2, road_tile))
+        for by in (bridge_north_y, bridge_south_y):
+            span_x0 = max(2, west_ave_x)
+            span_w = min(tw - 3, east_ave_x + 2) - span_x0
+            _paint(_rect_cells(span_x0, by, span_w, 2, "wood_floor"))
+
+        # 西岸河畔广场（贴西岸大道而设，不横跨河面）
+        w_px0 = max(2, west_ave_x - 4)
+        w_px1 = west_ave_x + 2
+        _paint(_rect_cells(w_px0, py0, max(3, w_px1 - w_px0 + 1), py1 - py0 + 1, plaza_tile))
+        _paint(_rect_cells(west_ave_x, py0, 2, py1 - py0 + 1, road_tile))
+        for ax, ay in ((w_px0, py0), (w_px0, py1)):
+            _paint([{"x": ax, "y": ay, "tile_id": accent_tile}])
+        for py in range(py0 - 1, py1 + 2):
+            for px in range(w_px0 - 1, w_px1 + 2):
+                reserved_lot_cells.add((px, py))
+        plaza_bounds = (w_px0, py0, w_px1, py1)
+        spawn_hint = (max(w_px0 + 1, west_ave_x - 2), ry)
+        pond_campfire_cell = (max(2, river_cols.get(min(th - 3, ry + 3), rx) - 1), min(th - 3, ry + 3)) if has_water else None
+
+    elif layout_style == "coastal_pier":
+        # 南岸海湾木栈桥：深海湾区 + 黄金沙滩堤 + 滨海观景步道 + 双木栈桥 + 错位双北街
+        water_y0 = th - (5 if th < 28 else 7)
+        sand_y = water_y0 - 1
+        prom_y = max(3, sand_y - 2)
+        upper_y = max(3, prom_y // 3 + 1)
+        _paint(_rect_cells(1, water_y0, tw - 2, max(2, th - 1 - water_y0), "water"))
+        shore_tile = "sand" if ground_tile != "sand" else accent_tile
+        _paint(_rect_cells(1, sand_y, tw - 2, 1, shore_tile))
+        for ry_res in range(sand_y, th - 1):
+            for rx_res in range(1, tw - 1):
+                reserved_lot_cells.add((rx_res, ry_res))
+
+        # 东西海滨步道、偏北横街、以及错开的双翼垂直巷（取消贯穿正中的十字轴）
+        _paint(_rect_cells(2, prom_y, tw - 4, 2, road_tile))
+        _paint(_rect_cells(2, upper_y, tw - 4, 2, road_tile))
+        left_alley = max(4, tw // 4)
+        right_alley = min(tw - 6, (tw * 3) // 4)
+        _paint(_rect_cells(left_alley, 2, 2, prom_y, road_tile))
+        _paint(_rect_cells(right_alley, 2, 2, prom_y, road_tile))
+
+        # 观海长廊广场紧贴滨海步道南段
+        bay_py0 = max(3, prom_y - 4)
+        bay_py1 = prom_y
+        _paint(_rect_cells(px0, bay_py0, px1 - px0 + 1, max(3, bay_py1 - bay_py0 + 1), plaza_tile))
+        _paint(_rect_cells(px0, prom_y, px1 - px0 + 1, 2, road_tile))
+        for ax, ay in ((px0, bay_py0), (px1, bay_py0)):
+            _paint([{"x": ax, "y": ay, "tile_id": accent_tile}])
+
+        # 伸入海水中的中心 T 型主木栈桥与西侧渔港小栈桥
+        pier_h = max(2, th - 2 - sand_y)
+        _paint(_rect_cells(rx, sand_y, 2, pier_h, "wood_floor"))
+        if tw >= 38:
+            _paint(_rect_cells(max(2, rx - 1), th - 3, 4, 1, "wood_floor"))
+            _paint(_rect_cells(left_alley, sand_y, 2, max(2, pier_h - 1), "wood_floor"))
+        for py in range(bay_py0 - 1, bay_py1 + 2):
+            for px in range(px0 - 1, px1 + 2):
+                reserved_lot_cells.add((px, py))
+        plaza_bounds = (px0, bay_py0, px1, max(bay_py0 + 2, prom_y - 1))
+        spawn_hint = (max(px0 + 1, rx - 1), max(bay_py0 + 1, prom_y - 1))
+        pond_campfire_cell = (max(3, left_alley + 3), sand_y)
+
+    elif layout_style == "winding_avenue":
+        # 曲折林荫 S 型主街：连续弯曲阶梯步道 + 错落观景小广场 + 尽端支巷（无十字贯通）
+        y_hi = max(4, ry - 6)
+        y_lo = min(th - 5, ry + 5)
+        x_w = max(6, px0 - 5)
+        x_e = min(tw - 8, px1 + 4)
+        _paint(_rect_cells(2, y_lo, max(3, x_w - 1), 2, road_tile))
+        _paint(_rect_cells(x_w, ry - 1, 2, max(2, y_lo - (ry - 1) + 2), road_tile))
+        _paint(_rect_cells(x_w, ry - 1, max(3, rx - x_w + 1), 2, road_tile))
+        _paint(_rect_cells(rx, y_hi + 2, 2, max(2, (ry - 1) - (y_hi + 2) + 2), road_tile))
+        _paint(_rect_cells(rx, y_hi + 2, max(3, x_e - rx + 2), 2, road_tile))
+        _paint(_rect_cells(x_e, y_hi, 2, 4, road_tile))
+        _paint(_rect_cells(x_e, y_hi, max(2, tw - 3 - x_e), 2, road_tile))
+
+        # 两条不对称短支巷分别探向西北与东南片区
+        _paint(_rect_cells(x_w, 3, 2, max(2, ry - 3), road_tile))
+        _paint(_rect_cells(2, y_hi, max(3, x_w - 1), 2, road_tile))
+        _paint(_rect_cells(x_e, y_hi + 2, 2, max(2, y_lo - y_hi), road_tile))
+        _paint(_rect_cells(x_e, y_lo, max(2, tw - 3 - x_e), 2, road_tile))
+
+        # 错落沿街露台广场（设于西段弯道北侧，不居死正中）
+        w_px0 = max(3, x_w + 2)
+        w_px1 = min(tw - 5, w_px0 + 7)
+        w_py0 = max(3, ry - 4)
+        w_py1 = min(th - 4, ry + 1)
+        _paint(_rect_cells(w_px0, w_py0, w_px1 - w_px0 + 1, w_py1 - w_py0 + 1, plaza_tile))
+        _paint(_rect_cells(w_px0, ry - 1, w_px1 - w_px0 + 1, 2, road_tile))
+        for ax, ay in ((w_px0, w_py0), (w_px1, w_py0), (w_px0, w_py1), (w_px1, w_py1)):
+            _paint([{"x": ax, "y": ay, "tile_id": accent_tile}])
+        for py in range(w_py0 - 1, w_py1 + 2):
+            for px in range(w_px0 - 1, w_px1 + 2):
+                reserved_lot_cells.add((px, py))
+        if has_water and tw >= 36 and th >= 26:
+            wx0, wy0 = max(3, rx + 3), min(th - 5, ry + 3)
+            _paint(_rect_cells(wx0, wy0, 3, 2, "water"))
+            for r_y in range(wy0 - 1, wy0 + 3):
+                for r_x in range(wx0 - 1, wx0 + 4):
+                    reserved_lot_cells.add((r_x, r_y))
+            pond_campfire_cell = (wx0, max(2, wy0 - 1))
+        plaza_bounds = (w_px0, w_py0, w_px1, w_py1)
+        spawn_hint = (max(3, w_px0 + 2), ry - 2)
+
+    elif layout_style == "courtyard_manor":
+        # U 型庄园庭院大道：南向迎宾主道直抵中心花苑庭院 + 北翼/东西翼 U 型回廊路（无东西横穿线）
+        _paint(_rect_cells(px0, py0, px1 - px0 + 1, py1 - py0 + 1, plaza_tile))
+        # 仅南向入口大道接通庭院南沿
+        _paint(_rect_cells(rx, py1 + 1, 2, max(2, th - 3 - py1), road_tile))
+        y_top = max(3, py0 - 3)
+        y_bot = min(th - 5, py1 + 3)
+        x_l = max(4, px0 - 5)
+        x_r = min(tw - 6, px1 + 4)
+        # U 型外环翼道包绕庭院北/西/东三翼，并在南翼合拢至入口大道
+        _paint(_rect_cells(x_l, y_top, x_r - x_l + 2, 2, road_tile))
+        _paint(_rect_cells(x_l, y_top, 2, y_bot - y_top + 2, road_tile))
+        _paint(_rect_cells(x_r, y_top, 2, y_bot - y_top + 2, road_tile))
+        _paint(_rect_cells(x_l, y_bot, x_r - x_l + 2, 2, road_tile))
+        _paint(_rect_cells(rx, y_top, 2, max(1, py0 - y_top), road_tile))
+        # 庭院外围短花带与双侧外探街口
+        _paint(_rect_cells(2, y_top, max(2, x_l - 1), 2, road_tile))
+        _paint(_rect_cells(x_r + 1, y_top, max(2, tw - 3 - x_r), 2, road_tile))
+        for hx in range(px0 + 1, px1):
+            if abs(hx - rx) >= 2 and abs(hx - (rx + 1)) >= 2:
+                _paint([{"x": hx, "y": py0, "tile_id": accent_tile}, {"x": hx, "y": py1, "tile_id": accent_tile}])
+        for py in range(py0 - 1, py1 + 2):
+            for px in range(px0 - 1, px1 + 2):
+                reserved_lot_cells.add((px, py))
+        if has_water and tw >= 36:
+            wx0 = 2
+            wy0 = max(ry + 3, th - 5)
+            _paint(_rect_cells(wx0, wy0, 3, 2, "water"))
+            for r_y in range(wy0 - 1, wy0 + 3):
+                for r_x in range(wx0 - 1, wx0 + 4):
+                    reserved_lot_cells.add((r_x, r_y))
+            pond_campfire_cell = (wx0, max(2, wy0 - 1))
+        spawn_hint = (rx, ry)
+
+    else:
+        # 经典 crossroads 布局
+        _paint(_rect_cells(2, ry, tw - 4, 2, road_tile))
+        _paint(_rect_cells(rx, 2, 2, th - 4, road_tile))
+        _paint(_rect_cells(px0, py0, px1 - px0 + 1, py1 - py0 + 1, plaza_tile))
+        _paint(_rect_cells(rx - 1, py0, 4, py1 - py0 + 1, road_tile))
+        _paint(_rect_cells(px0, ry, px1 - px0 + 1, 2, road_tile))
+        for py in range(py0 - 1, py1 + 2):
+            for px in range(px0 - 1, px1 + 2):
+                reserved_lot_cells.add((px, py))
+        for ax, ay in ((px0, py0), (px1, py0), (px0, py1), (px1, py1)):
+            _paint([{"x": ax, "y": ay, "tile_id": accent_tile}])
+        for x in range(rx - 1, rx + 3):
+            _paint([{"x": x, "y": th - 3, "tile_id": accent_tile}])
+        if has_water:
+            wx0 = 2
+            wx1 = min(6, rx - 3)
+            wy0 = max(ry + 4, th - (5 if th >= 26 else 4))
+            wy1 = th - 3
+            if wx1 >= wx0 + 2 and wy1 >= wy0 + 1:
+                shore_tile = "sand" if ground_tile != "sand" else accent_tile
+                _paint(_rect_cells(wx0, wy0 - 1, wx1 - wx0 + 2, 1, shore_tile))
+                _paint(_rect_cells(wx0, wy0, wx1 - wx0 + 1, wy1 - wy0 + 1, "water"))
+                for r_y in range(wy0 - 1, wy1 + 1):
+                    for r_x in range(wx0 - 1, wx1 + 2):
+                        reserved_lot_cells.add((r_x, r_y))
+                pond_campfire_cell = (wx0 + 1, wy0 - 1)
+
+    return ordered_cells, reserved_lot_cells, pond_campfire_cell, spawn_hint, plaza_bounds
+
+
 def build_generated_town(
     engine: WorldEngine,
     town_spec: Mapping[str, Any],
     *,
     town_id: str = "",
     move_actor_id: str = "",
+    opaque_minds: bool = False,
+    isolated_persona: bool = False,
+    switch_active: bool = True,
+    initial_hour: float | None = None,
+    hub_location_id: str = "",
 ) -> dict[str, Any]:
     """三层确定性城镇生成管线：L1 宏观骨架路网 -> L2 建筑子世界与内室 -> L3 天气生态与连通校验。"""
     clean_name = clip_text(town_spec.get("name"), 16, "新像素小镇")
-    tw = max(28, min(64, int(town_spec.get("width") or 40)))
-    th = max(22, min(48, int(town_spec.get("height") or 30)))
+    tw = max(28, min(72, int(town_spec.get("width") or 48)))
+    th = max(22, min(52, int(town_spec.get("height") or 36)))
 
     with engine._lock:
         base_id = str(town_id or "").strip() or slugify(clean_name, prefix="town")
@@ -1154,12 +1578,60 @@ def build_generated_town(
             resolved_tid = f"{base_id}_{suffix}"
             suffix += 1
 
+    ground_tile = str(town_spec.get("ground_tile") or "grass")
+    road_tile = str(town_spec.get("road_tile") or "cobble")
+    plaza_tile = str(town_spec.get("plaza_tile") or "stone_tile")
+    border_tile = str(town_spec.get("border_tile") or "hedge")
+    accent_tile = str(town_spec.get("accent_tile") or "flower_grass")
+    palette_id = str(town_spec.get("palette_id") or "warm_stardew")
+    ambient = clip_text(town_spec.get("ambient_phrase"), 60, f"微风轻拂的「{clean_name}」，每栋建筑都可推门进入。")
+    has_water = bool(town_spec.get("has_water_feature", True))
+
+    # Layer 1: 按 layout_style 绘制非同质化城镇路网/水域/广场骨架 + 2.5D 三层台地与石阶
+    raw_seed = town_spec.get("seed")
+    if raw_seed is not None:
+        town_seed = int(raw_seed)
+    else:
+        town_seed = random.SystemRandom().randint(1, 2_000_000_000)
+    rng = random.Random(town_seed)
+    theme_name = str(town_spec.get("theme") or "sakura").strip().lower() or "sakura"
+
+    layout_style = str(town_spec.get("layout_style") or "winding_avenue").strip().lower()
+    tile_cells, reserved_lot_cells, pond_campfire_cell, spawn_hint, plaza_bounds = _paint_town_skeleton(
+        tw,
+        th,
+        layout_style=layout_style,
+        ground_tile=ground_tile,
+        road_tile=road_tile,
+        plaza_tile=plaza_tile,
+        border_tile=border_tile,
+        accent_tile=accent_tile,
+        has_water=has_water,
+        rng=rng,
+    )
+    tile_grid: list[list[str]] = [[ground_tile for _ in range(tw)] for _ in range(th)]
+    for c in tile_cells:
+        cx_t, cy_t = int(c["x"]), int(c["y"])
+        if 0 <= cx_t < tw and 0 <= cy_t < th:
+            tile_grid[cy_t][cx_t] = str(c["tile_id"])
+
+    elev_dict, stair_dict = outdoor_designer.generate_town_elevation(
+        tw,
+        th,
+        layout_style=layout_style,
+        theme=theme_name,
+        tile_grid=tile_grid,
+        road_tiles={road_tile, plaza_tile, "wood_floor"} - {ground_tile},
+        rng=rng,
+    )
+    final_tile_cells = [
+        {"x": x, "y": y, "tile_id": tile_grid[y][x]}
+        for y in range(th)
+        for x in range(tw)
+    ]
     rx = tw // 2 - 1
     ry = th // 2 - 1
-    px0 = max(3, rx - 4)
-    px1 = min(tw - 4, rx + 5)
-    py0 = max(3, ry - 2)
-    py1 = min(th - 4, ry + 3)
+    px0, py0, px1, py1 = plaza_bounds
 
     zone_meta = {
         str(z.get("slot") or ""): z
@@ -1186,7 +1658,7 @@ def build_generated_town(
             "name": clip_text((zone_meta.get("center") or {}).get("name"), 12, "中央广场"),
             "x": px0, "y": py0, "w": px1 - px0 + 1, "h": py1 - py0 + 1,
             "color": "#ffd166",
-            "description": clip_text((zone_meta.get("center") or {}).get("description"), 42, "十字道路交汇的中央广场。"),
+            "description": clip_text((zone_meta.get("center") or {}).get("description"), 42, "汇集镇上行人与活动的公共广场。"),
         },
         {
             "zone_id": "south_west",
@@ -1204,221 +1676,255 @@ def build_generated_town(
         },
     ]
 
-    ground_tile = str(town_spec.get("ground_tile") or "grass")
-    road_tile = str(town_spec.get("road_tile") or "cobble")
-    plaza_tile = str(town_spec.get("plaza_tile") or "stone_tile")
-    border_tile = str(town_spec.get("border_tile") or "hedge")
-    accent_tile = str(town_spec.get("accent_tile") or "flower_grass")
-    palette_id = str(town_spec.get("palette_id") or "warm_stardew")
-    ambient = clip_text(town_spec.get("ambient_phrase"), 60, f"微风轻拂的「{clean_name}」，每栋建筑都可推门进入。")
-    has_water = bool(town_spec.get("has_water_feature", True))
+    with engine.batch_mutations():
+        engine.create_space(
+            name=clean_name,
+            width=tw,
+            height=th,
+            wall_rows=0,
+            space_kind="town",
+            hub_location_id=hub_location_id,
+            ambient_phrase=ambient,
+            palette_id=palette_id,
+            zones=zone_specs,
+            fixed_space_id=resolved_tid,
+            switch_active=switch_active,
+            opaque_minds=opaque_minds,
+            isolated_persona=isolated_persona,
+        )
 
-    engine.create_space(
-        name=clean_name,
-        width=tw,
-        height=th,
-        wall_rows=0,
-        space_kind="town",
-        ambient_phrase=ambient,
-        palette_id=palette_id,
-        zones=zone_specs,
-        fixed_space_id=resolved_tid,
-        switch_active=True,
-    )
+        engine.paint_tiles(resolved_tid, final_tile_cells)
+        engine.set_space_terrain_relief(resolved_tid, elevations=elev_dict, stairs=stair_dict)
 
-    # Layer 1: 铺设地面、外围篱笆/水域、十字主干道、中央广场与西南角水景
-    tile_cells: list[dict[str, Any]] = _rect_cells(0, 0, tw, th, ground_tile)
-    for x in range(tw):
-        tile_cells.append({"x": x, "y": 0, "tile_id": border_tile})
-        tile_cells.append({"x": x, "y": th - 1, "tile_id": border_tile})
-    for y in range(th):
-        tile_cells.append({"x": 0, "y": y, "tile_id": border_tile})
-        tile_cells.append({"x": tw - 1, "y": y, "tile_id": border_tile})
+        bldgs_raw = list(town_spec.get("buildings") or ())
+        dir_names = "、".join(str(b.get("name") or "") for b in bldgs_raw if b.get("name"))
+        board_note = clip_text(
+            f"欢迎来到「{clean_name}」！镇上建有：{dir_names}。双击建筑正门即可推门进入。",
+            120,
+            f"欢迎来到「{clean_name}」！",
+        )
 
-    tile_cells.extend(_rect_cells(2, ry, tw - 4, 2, road_tile))
-    tile_cells.extend(_rect_cells(rx, 2, 2, th - 4, road_tile))
-    tile_cells.extend(_rect_cells(px0, py0, px1 - px0 + 1, py1 - py0 + 1, plaza_tile))
-    tile_cells.extend(_rect_cells(rx - 1, py0, 4, py1 - py0 + 1, road_tile))
-    tile_cells.extend(_rect_cells(px0, ry, px1 - px0 + 1, 2, road_tile))
+        if pond_campfire_cell is not None:
+            cx_f, cy_f = pond_campfire_cell
+            if (
+                0 < cx_f < tw - 1
+                and 0 < cy_f < th - 1
+                and _is_walkable_tile_id(tile_grid[cy_f][cx_f])
+                and f"{cx_f},{cy_f}" not in stair_dict
+            ):
+                try:
+                    cf = engine.place_from_blueprint("default_campfire", resolved_tid, cx_f, cy_f, delivery_mode="silent")
+                    upd_cf = dict(cf.get("traits") or {})
+                    if "switchable" in upd_cf:
+                        upd_cf["switchable"] = {**upd_cf["switchable"], "is_on": True}
+                        engine.update_entity_spec(cf["entity_id"], traits=upd_cf)
+                except Exception:
+                    logger.debug("nanami_world: 生成河畔篝火跳过 (%d, %d)", cx_f, cy_f, exc_info=True)
 
-    reserved_lot_cells: set[tuple[int, int]] = set()
-    for py in range(py0 - 1, py1 + 2):
-        for px in range(px0 - 1, px1 + 2):
-            reserved_lot_cells.add((px, py))
+        # Layer 2: 按角色/定制体积择优选择可变外立面尺寸并在同海拔台地上选址建房
+        slot_to_zone_id = {
+            "nw": "north_west",
+            "ne": "north_east",
+            "sw": "south_west",
+            "se": "south_east",
+        }
+        home_variant = 0
+        special_budget_left = 2
+        used_landmarks: set[str] = set()
+        building_results: list[dict[str, Any]] = []
+        all_building_space_ids: list[str] = []
+        for idx, b in enumerate(bldgs_raw):
+            if not isinstance(b, Mapping):
+                continue
+            bname = clip_text(b.get("name"), 16, f"建筑{idx + 1}")
+            role = venue_semantics.normalize_venue_role(b.get("role"), category=b.get("category"), name=bname)
+            slot = str(b.get("zone_slot") or ("nw", "ne", "sw", "se")[idx % 4]).strip().lower()
+            target_zid = slot_to_zone_id.get(slot, "north_west")
 
-    for ax, ay in ((px0, py0), (px1, py0), (px0, py1), (px1, py1)):
-        tile_cells.append({"x": ax, "y": ay, "tile_id": accent_tile})
-    for x in range(rx - 1, rx + 3):
-        tile_cells.append({"x": x, "y": th - 3, "tile_id": accent_tile})
+            req_ew = b.get("ext_w")
+            req_eh = b.get("ext_h")
+            if req_ew is not None and req_eh is not None:
+                cand_dims = [(max(4, min(10, int(req_ew))), max(4, min(6, int(req_eh)))), (6, 5), (5, 4)]
+            elif tw >= 40 and th >= 30:
+                if role in ("library", "public", "arcade"):
+                    cand_dims = [(8, 5), (7, 5), (6, 5), (5, 4)]
+                elif role in ("cafe", "shop"):
+                    cand_dims = [(7, 5), (6, 5), (5, 4)]
+                else:
+                    cand_dims = [(6, 5), (5, 4)] if idx % 2 == 0 else [(5, 4), (6, 5)]
+            elif tw >= 36 and th >= 26:
+                cand_dims = [(6, 5), (5, 4)] if (role != "home" or idx % 2 == 0) else [(5, 4)]
+            else:
+                cand_dims = [(5, 4)]
 
-    pond_campfire_cell: tuple[int, int] | None = None
-    if has_water:
-        wx0 = 2
-        wx1 = min(6, rx - 3)
-        wy0 = max(ry + 4, th - (5 if th >= 26 else 4))
-        wy1 = th - 3
-        if wx1 >= wx0 + 2 and wy1 >= wy0 + 1:
-            shore_tile = "sand" if ground_tile != "sand" else accent_tile
-            tile_cells.extend(_rect_cells(wx0, wy0 - 1, wx1 - wx0 + 2, 1, shore_tile))
-            tile_cells.extend(_rect_cells(wx0, wy0, wx1 - wx0 + 1, wy1 - wy0 + 1, "water"))
-            for r_y in range(wy0 - 1, wy1 + 1):
-                for r_x in range(wx0 - 1, wx1 + 2):
-                    reserved_lot_cells.add((r_x, r_y))
-            pond_campfire_cell = (wx0 + 1, wy0 - 1)
+            lot_salt = rng.randint(0, 99999)
+            lot: dict[str, Any] | None = None
+            for cand_w, cand_h in cand_dims:
+                try:
+                    lot = find_free_building_lot(
+                        engine,
+                        resolved_tid,
+                        ext_w=cand_w,
+                        ext_h=cand_h,
+                        zone_id=target_zid,
+                        road_tile=road_tile,
+                        reserved_cells=reserved_lot_cells,
+                        rng_salt=lot_salt,
+                    )
+                    break
+                except ValueError:
+                    continue
+            if lot is None:
+                logger.warning("nanami_world: 生成城镇跳过无法选址的建筑 %s", bname)
+                continue
 
-    engine.paint_tiles(resolved_tid, tile_cells)
-
-    bldgs_raw = list(town_spec.get("buildings") or ())
-    dir_names = "、".join(str(b.get("name") or "") for b in bldgs_raw if b.get("name"))
-    board_note = clip_text(
-        f"欢迎来到「{clean_name}」！镇上建有：{dir_names}。双击建筑正门即可推门进入。",
-        120,
-        f"欢迎来到「{clean_name}」！",
-    )
-    plaza_props: list[tuple[str, int, int, dict[str, Any]]] = [
-        ("default_street_lamp", max(2, px0 + 2), py0 + 1, {"light_on": True}),
-        ("default_street_lamp", min(tw - 3, px1 - 2), py0 + 1, {"light_on": True}),
-        ("default_street_lamp", max(2, px0 + 2), max(py0, py1 - 1), {"light_on": True}),
-        ("default_street_lamp", min(tw - 3, px1 - 2), max(py0, py1 - 1), {"light_on": True}),
-        (
-            "default_notebook",
-            px0 + 3,
-            py0,
-            {"name": "小镇布告栏", "brief": f"写着「{clean_name}」导览与留言的布告栏", "note_text": board_note},
-        ),
-        ("default_cat_cushion", min(tw - 3, px1 - 3), max(py0, py1 - 1), {}),
-    ]
-    if pond_campfire_cell is not None:
-        cx_f, cy_f = pond_campfire_cell
-        plaza_props.append(("default_campfire", cx_f, cy_f, {"light_on": True}))
-        if cx_f - 1 >= 1:
-            plaza_props.append(("default_snack", cx_f - 1, cy_f, {}))
-
-    for bp_id, ox, oy, meta in plaza_props:
-        try:
-            ent = engine.place_from_blueprint(
-                bp_id,
-                resolved_tid,
-                ox,
-                oy,
-                delivery_mode="silent",
-                note_text=str(meta.get("note_text") or ""),
-            )
-            upd_traits = dict(ent.get("traits") or {})
-            changed = False
-            if meta.get("light_on") and "switchable" in upd_traits:
-                upd_traits["switchable"] = {**upd_traits["switchable"], "is_on": True}
-                changed = True
-            if meta.get("name") or meta.get("brief") or changed:
-                engine.update_entity_spec(
-                    ent["entity_id"],
-                    name=meta.get("name"),
-                    brief=meta.get("brief"),
-                    traits=upd_traits if changed else None,
-                )
-        except Exception:
-            logger.debug("nanami_world: 生成城镇广场设施跳过 %s at (%d, %d)", bp_id, ox, oy, exc_info=True)
-
-    # Layer 2: 确定性分区选址并构造各建筑子世界与家具
-    slot_to_zone_id = {
-        "nw": "north_west",
-        "ne": "north_east",
-        "sw": "south_west",
-        "se": "south_east",
-    }
-    pref_w, pref_h = (6, 5) if (tw >= 36 and th >= 26) else (5, 4)
-    home_variant = 0
-    building_results: list[dict[str, Any]] = []
-    for idx, b in enumerate(bldgs_raw):
-        if not isinstance(b, Mapping):
-            continue
-        bname = clip_text(b.get("name"), 16, f"建筑{idx + 1}")
-        role = venue_semantics.normalize_venue_role(b.get("role"), category=b.get("category"), name=bname)
-        slot = str(b.get("zone_slot") or ("nw", "ne", "sw", "se")[idx % 4]).strip().lower()
-        target_zid = slot_to_zone_id.get(slot, "north_west")
-        try:
-            lot = find_free_building_lot(
+            bed_cnt = int(b.get("bed_count") if b.get("bed_count") is not None else interior_designer.default_bed_count(role, bname))
+            default_iw = 16 if (tw >= 36 and (role in ("cafe", "arcade", "library", "home") or bed_cnt >= 2)) else 14
+            default_ih = 12 if (tw >= 36 and bed_cnt >= 2) else (11 if default_iw >= 16 else 10)
+            layout = interior_designer.activity_layout(role, bname, bed_cnt)
+            default_iw, default_ih = interior_designer.activity_dimensions(layout, (default_iw, default_ih))
+            iw = int(b.get("interior_width") or default_iw)
+            ih = int(b.get("interior_height") or default_ih)
+            interior_seed = rng.randint(1, 2_000_000_000)
+            entry_x = interior_designer.interior_entry_x(layout, iw, interior_seed)
+            var_i = home_variant if role == "home" else idx
+            if role == "home":
+                home_variant += 1
+            ifloor = str(b.get("interior_floor_tile") or b.get("floor_tile") or "wood_floor")
+            iwall = str(b.get("interior_wall_tile") or b.get("wall_tile") or "wood_wall")
+            res = build_building_subworld(
                 engine,
                 resolved_tid,
-                ext_w=pref_w,
-                ext_h=pref_h,
+                building_id=f"bldg_{slugify(bname, prefix=str(idx + 1))}",
+                name=bname,
                 zone_id=target_zid,
+                ext_x=lot["ext_x"],
+                ext_y=lot["ext_y"],
+                ext_w=lot["ext_w"],
+                ext_h=lot["ext_h"],
+                door_x=lot["door_x"],
+                door_y=lot["door_y"],
+                roof_color=str(b.get("roof_color") or "#a85646"),
+                wall_tile=str(b.get("wall_tile") or b.get("exterior_wall_tile") or "brick_wall"),
                 road_tile=road_tile,
-                reserved_cells=reserved_lot_cells,
+                category=str(b.get("category") or venue_semantics.default_category_for_role(role)),
+                role=role,
+                restock_profile=str(b.get("restock_profile") or ""),
+                affordances=b.get("affordances"),
+                icon=str(b.get("icon") or venue_semantics.default_icon_for_role(role)),
+                walkway=lot["walkway"],
+                interior_width=iw,
+                interior_height=ih,
+                interior_entry_x=entry_x,
+                interior_palette=str(b.get("interior_palette") or palette_id),
+                interior_ambient=str(b.get("interior_ambient") or f"「{bname}」的室内空间，推门可回到「{clean_name}」。"),
+                interior_floor_tile=ifloor,
+                interior_wall_tile=iwall,
+                interior_items=(),
+                location_id=str(b.get("location_id") or ""),
+                bed_count=bed_cnt,
             )
-        except ValueError:
-            logger.warning("nanami_world: 生成城镇跳过无法选址的建筑 %s", bname)
-            continue
+            floor_plan = building_architect.choose_building_floor_plan(
+                role,
+                bname,
+                bed_count=bed_cnt,
+                ext_w=int(lot["ext_w"]),
+                is_landmark=(idx == 0),
+                special_budget_left=special_budget_left,
+                seed=interior_seed,
+            )
+            if any(fi < 0 or fi >= 3 for fi in floor_plan):
+                special_budget_left = max(0, special_budget_left - 1)
+            mf_res = building_architect.build_multifloor_building_interiors(
+                engine,
+                town_space_id=resolved_tid,
+                space_1f_id=res["interior_space_id"],
+                building_meta=res,
+                role=role,
+                building_name=bname,
+                floor_plan=floor_plan,
+                floor_tile=ifloor,
+                rug_tile=str(b.get("rug_tile") or ("tatami" if role == "home" else "carpet_blue")),
+                wall_tile=iwall,
+                bed_count=bed_cnt,
+                note_text=str(b.get("note_text") or ""),
+                door_coords_1f=[(entry_x, ih - 1)],
+                world_prompt=str(town_spec.get("world_prompt") or clean_name),
+                scene_items=b.get("scene_items") or (),
+                brief=str(b.get("interior_ambient") or ""),
+                seed=interior_seed,
+                used_landmarks=used_landmarks,
+            )
+            all_building_space_ids.extend(mf_res["floor_space_ids"])
+            res["bed_count"] = int(mf_res["beds_1f"])
+            with engine._lock:
+                tsp_live = engine._world["spaces"][resolved_tid]
+                updated_bldgs = list(tsp_live.get("buildings") or [])
+                for b_item in updated_bldgs:
+                    if b_item.get("interior_space_id") == res["interior_space_id"]:
+                        b_item["bed_count"] = int(mf_res["beds_1f"])
+                        break
+                tsp_live["buildings"] = normalize_buildings(updated_bldgs, tw, th)
+            building_results.append(res)
 
-        iw, ih = (14, 10) if role in ("cafe", "arcade", "library", "home") and tw >= 36 else (12, 9)
-        var_i = home_variant if role == "home" else idx
-        if role == "home":
-            home_variant += 1
-        items = synthesize_interior_items(
-            role,
-            width=iw,
-            height=ih,
-            building_name=bname,
-            note_text=str(b.get("note_text") or ""),
-            variant=var_i,
-        )
-        res = build_building_subworld(
+        # Layer 2.5: 户外院落围合、街块微景观（树木/古井/长椅）与沿路自适应街灯
+        with engine._lock:
+            tsp_after_bldg = engine._world["spaces"][resolved_tid]
+            placed_bldg_list = list(tsp_after_bldg.get("buildings") or ())
+            blocked, _ = engine._build_walk_masks_locked(resolved_tid)
+            plaza_start = _town_plaza_start(tsp_after_bldg, blocked)
+            road_like_set = {road_tile, plaza_tile, "cobble", "stone_tile", "wood_floor"} - {ground_tile}
+            road_cells_now = {
+                (x, y)
+                for y in range(1, th - 1)
+                for x in range(1, tw - 1)
+                if _cell_tile_id(tsp_after_bldg, x, y) in road_like_set
+            }
+        outdoor_designer.subdivide_parcels_and_populate_outdoors(
             engine,
             resolved_tid,
-            building_id=f"bldg_{slugify(bname, prefix=str(idx + 1))}",
-            name=bname,
-            zone_id=target_zid,
-            ext_x=lot["ext_x"],
-            ext_y=lot["ext_y"],
-            ext_w=lot["ext_w"],
-            ext_h=lot["ext_h"],
-            door_x=lot["door_x"],
-            door_y=lot["door_y"],
-            roof_color=str(b.get("roof_color") or "#a85646"),
-            wall_tile=str(b.get("wall_tile") or "brick_wall"),
-            road_tile=road_tile,
-            category=str(b.get("category") or venue_semantics.default_category_for_role(role)),
-            role=role,
-            restock_profile=str(b.get("restock_profile") or ""),
-            affordances=b.get("affordances"),
-            icon=str(b.get("icon") or venue_semantics.default_icon_for_role(role)),
-            walkway=lot["walkway"],
-            interior_width=iw,
-            interior_height=ih,
-            interior_palette=str(b.get("interior_palette") or palette_id),
-            interior_ambient=str(b.get("interior_ambient") or f"「{bname}」的室内空间，推门可回到「{clean_name}」。"),
-            interior_floor_tile=str(b.get("interior_floor_tile") or "wood_floor"),
-            interior_wall_tile=str(b.get("interior_wall_tile") or "wood_wall"),
-            interior_items=items,
+            tw=tw,
+            th=th,
+            theme=theme_name,
+            layout_style=layout_style,
+            buildings=placed_bldg_list,
+            road_cells=road_cells_now,
+            plaza_bounds=plaza_bounds,
+            plaza_start=plaza_start,
+            board_note=board_note,
+            rng=rng,
         )
-        building_results.append(res)
 
-    # Layer 3: 初始化主题天气、切换当前场景、放入角色并运行连通校验
-    with engine._lock:
-        sim_now = float(engine._world.get("simulation_minutes") or 0.0)
-        allowed_w = list(town_spec.get("allowed_weathers") or weather.DEFAULT_ALLOWED_WEATHERS)
-        init_w = str(town_spec.get("initial_weather") or allowed_w[0])
-        engine._world.setdefault("weather_by_realm", {})[resolved_tid] = weather.default_weather_state(
-            sim_now,
-            mode="auto",
-            current=init_w,
-            allowed=allowed_w,
-        )
-        tsp = engine._world["spaces"].get(resolved_tid)
-        if tsp is not None:
-            engine._world.setdefault("shop_restock_day_by_realm", {})[resolved_tid] = engine._realm_business_day_locked(
-                tsp, time.time(),
+        # Layer 3: 初始化主题天气、切换当前场景、放入角色并运行连通校验
+        eff_hour = initial_hour if initial_hour is not None else town_spec.get("initial_hour")
+        if eff_hour is not None and hasattr(engine, "set_realm_initial_hour"):
+            engine.set_realm_initial_hour(resolved_tid, float(eff_hour))
+        with engine._lock:
+            sim_now = float(engine._world.get("simulation_minutes") or 0.0)
+            allowed_w = list(town_spec.get("allowed_weathers") or weather.DEFAULT_ALLOWED_WEATHERS)
+            init_w = str(town_spec.get("initial_weather") or allowed_w[0])
+            engine._world.setdefault("weather_by_realm", {})[resolved_tid] = weather.default_weather_state(
+                sim_now,
+                mode="auto",
+                current=init_w,
+                allowed=allowed_w,
             )
-        engine._save_world_locked()
+            tsp = engine._world["spaces"].get(resolved_tid)
+            if tsp is not None:
+                engine._world.setdefault("shop_restock_day_by_realm", {})[resolved_tid] = engine._realm_business_day_locked(
+                    tsp, time.time(),
+                )
+            engine._save_world_locked()
 
-    engine.switch_space(resolved_tid)
+    if switch_active:
+        engine.switch_space(resolved_tid)
     if move_actor_id:
         with engine._lock:
             sp_now = engine._world["spaces"].get(resolved_tid)
             spawn_x, spawn_y = (
-                engine._find_open_floor_cell_locked(sp_now, preferred_x=rx, preferred_y=ry + 1)
+                engine._find_open_floor_cell_locked(sp_now, preferred_x=spawn_hint[0], preferred_y=spawn_hint[1])
                 if sp_now
-                else (rx, ry + 1)
+                else spawn_hint
             )
         try:
             engine.place_actor(move_actor_id, resolved_tid, spawn_x, spawn_y)
@@ -1430,9 +1936,11 @@ def build_generated_town(
         "town_space_id": resolved_tid,
         "name": clean_name,
         "theme": str(town_spec.get("theme") or "sakura"),
+        "layout_style": layout_style,
         "created": True,
-        "building_space_ids": [b["interior_space_id"] for b in building_results],
+        "building_space_ids": all_building_space_ids or [b["interior_space_id"] for b in building_results],
         "buildings": building_results,
+        "hub_location_id": hub_location_id,
         "validation": validation,
     }
 
@@ -1493,57 +2001,70 @@ def add_building_to_town(
         "public": ("#728699", "white_wall", "stone_tile", "white_wall"),
     }
     def_roof, def_wall, def_ifloor, def_iwall = role_defaults.get(norm_role, role_defaults["public"])
-    iw, ih = (14, 10) if norm_role in ("cafe", "arcade", "library") else (12, 9)
-    items = synthesize_interior_items(
-        norm_role,
-        width=iw,
-        height=ih,
-        building_name=clean_name,
-        note_text=note_text,
-        variant=existing_bldg_count,
-    )
-    res = build_building_subworld(
-        engine,
-        resolved_town,
-        building_id=f"bldg_{slugify(clean_name, prefix='ext')}_{int(lot['ext_x'])}_{int(lot['ext_y'])}",
-        name=clean_name,
-        zone_id=zone_id,
-        ext_x=lot["ext_x"],
-        ext_y=lot["ext_y"],
-        ext_w=lot["ext_w"],
-        ext_h=lot["ext_h"],
-        door_x=lot["door_x"],
-        door_y=lot["door_y"],
-        roof_color=roof_color or def_roof,
-        wall_tile=wall_tile or def_wall,
-        road_tile=road_tile,
-        category=venue_semantics.default_category_for_role(norm_role),
-        role=norm_role,
-        restock_profile=venue_semantics.restock_profile_for_building({"role": norm_role, "name": clean_name}),
-        affordances=venue_semantics.building_affordance_hints({"role": norm_role, "name": clean_name}),
-        icon=icon or venue_semantics.default_icon_for_role(norm_role),
-        walkway=lot["walkway"],
-        interior_width=iw,
-        interior_height=ih,
-        interior_palette=interior_palette or town_palette,
-        interior_ambient=interior_ambient or f"刚落成于「{town_name}」的「{clean_name}」，推门即可回到街道。",
-        interior_floor_tile=interior_floor_tile or def_ifloor,
-        interior_wall_tile=interior_wall_tile or def_iwall,
-        interior_items=items,
-    )
+    iw, ih = (16, 11) if norm_role in ("home", "cafe", "arcade", "library") else (14, 10)
+    bed_count = 2 if norm_role == "home" else interior_designer.default_bed_count(norm_role, clean_name)
+    layout = interior_designer.activity_layout(norm_role, clean_name, bed_count)
+    iw, ih = interior_designer.activity_dimensions(layout, (iw, ih))
+    entry_x = interior_designer.interior_entry_x(layout, iw)
+    with engine.batch_mutations():
+        res = build_building_subworld(
+            engine,
+            resolved_town,
+            building_id=f"bldg_{slugify(clean_name, prefix='ext')}_{int(lot['ext_x'])}_{int(lot['ext_y'])}",
+            name=clean_name,
+            zone_id=zone_id,
+            ext_x=lot["ext_x"],
+            ext_y=lot["ext_y"],
+            ext_w=lot["ext_w"],
+            ext_h=lot["ext_h"],
+            door_x=lot["door_x"],
+            door_y=lot["door_y"],
+            roof_color=roof_color or def_roof,
+            wall_tile=wall_tile or def_wall,
+            road_tile=road_tile,
+            category=venue_semantics.default_category_for_role(norm_role),
+            role=norm_role,
+            restock_profile=venue_semantics.restock_profile_for_building({"role": norm_role, "name": clean_name}),
+            affordances=venue_semantics.building_affordance_hints({"role": norm_role, "name": clean_name}),
+            icon=icon or venue_semantics.default_icon_for_role(norm_role),
+            walkway=lot["walkway"],
+            interior_width=iw,
+            interior_height=ih,
+            interior_entry_x=entry_x,
+            interior_palette=interior_palette or town_palette,
+            interior_ambient=interior_ambient or f"刚落成于「{town_name}」的「{clean_name}」，推门即可回到街道。",
+            interior_floor_tile=interior_floor_tile or def_ifloor,
+            interior_wall_tile=interior_wall_tile or def_iwall,
+            interior_items=(),
+            bed_count=bed_count,
+        )
+        map_generator.populate_architectural_interior(
+            engine,
+            res["interior_space_id"],
+            role=norm_role,
+            building_name=clean_name,
+            floor_tile=interior_floor_tile or def_ifloor,
+            wall_tile=interior_wall_tile or def_iwall,
+            partition_style="alcove" if norm_role in ("home", "library") else "none",
+            bed_count=bed_count,
+            note_text=note_text,
+            door_coords=[(entry_x, ih - 1)],
+            variant=existing_bldg_count,
+            build_perimeter_bottom_wall=True,
+        )
 
-    with engine._lock:
-        for ent in engine._world["entities"].values():
-            if ent.get("space_id") != resolved_town or "inscribable" not in (ent.get("traits") or {}):
-                continue
-            if "布告栏" in str(ent.get("name") or "") or "notice_board" in (ent.get("tags") or ()):
-                ins = ent["traits"]["inscribable"]
-                entries = ins.setdefault("entries", [])
-                max_e = int(ins.get("max_entries") or 12)
-                if len(entries) < max_e:
-                    entries.append({"by": "town", "ts": time.time(), "text": f"小镇新添了一处去处：「{clean_name}」。"})
-                break
-        engine._save_world_locked()
+        with engine._lock:
+            for ent in engine._world["entities"].values():
+                if ent.get("space_id") != resolved_town or "inscribable" not in (ent.get("traits") or {}):
+                    continue
+                if "布告栏" in str(ent.get("name") or "") or "notice_board" in (ent.get("tags") or ()):
+                    ins = ent["traits"]["inscribable"]
+                    entries = ins.setdefault("entries", [])
+                    max_e = int(ins.get("max_entries") or 12)
+                    if len(entries) < max_e:
+                        entries.append({"by": "town", "ts": time.time(), "text": f"小镇新添了一处去处：「{clean_name}」。"})
+                    break
+            engine._save_world_locked()
 
     res["validation"] = validate_town_layout(engine, resolved_town)
     return res
@@ -1585,29 +2106,15 @@ def validate_town_layout(engine: WorldEngine, town_space_id: str) -> dict[str, A
             if "portal" in traits:
                 town_portals_at[(int(ent["x"]), int(ent["y"]))] = ent
                 continue
-            if ent.get("solid"):
-                fw, fh = ent.get("footprint") or [1, 1]
-                for dx in range(int(fw)):
-                    for dy in range(int(fh)):
-                        town_solids.add((int(ent["x"]) + dx, int(ent["y"]) + dy))
+            if int(ent.get("z", 0)) == 0 and engine._is_entity_blocking_locked(ent):
+                town_solids.update(engine._entity_cells(ent))
 
         def _town_passable(x: int, y: int) -> bool:
             return 0 <= x < tw and 0 <= y < th and _is_walkable_tile_id(_cell_tile_id(tsp, x, y)) and (x, y) not in town_solids
 
-        # BFS from central spawn across town ground.
-        rx, ry = engine._find_open_floor_cell_locked(tsp, preferred_x=tw // 2 - 1, preferred_y=th // 2)
-        reachable_town: set[tuple[int, int]] = set()
-        if _town_passable(rx, ry):
-            q: deque[tuple[int, int]] = deque([(rx, ry)])
-            reachable_town.add((rx, ry))
-            while q:
-                cx, cy = q.popleft()
-                for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                    nx, ny = cx + dx, cy + dy
-                    if (nx, ny) not in reachable_town and _town_passable(nx, ny):
-                        reachable_town.add((nx, ny))
-                        q.append((nx, ny))
-        else:
+        rx, ry = _town_plaza_start(tsp, town_solids)
+        reachable_town = _town_reachable_cells(tsp, (rx, ry), town_solids)
+        if not reachable_town:
             errors.append(f"城镇广场落脚点 ({rx}, {ry}) 不可通行")
 
         reachable_doors = 0
@@ -1626,70 +2133,145 @@ def validate_town_layout(engine: WorldEngine, town_space_id: str) -> dict[str, A
             if not ext_ent or (ext_ent.get("traits") or {}).get("portal", {}).get("target_space_id") != int_sid:
                 errors.append(f"建筑「{bname}」在 ({dx}, {dy}) 缺少指向室内的正门传送点")
 
-            if any((dx + ox, dy + oy) in reachable_town for ox, oy in ((0, 1), (0, -1), (1, 0), (-1, 0))):
-                reachable_doors += 1
-            else:
-                errors.append(f"广场无法步行到达「{bname}」正门 ({dx}, {dy})")
+            # Validate interior landing, exit portal, and interior entity reachability (traversing unlocked interior_doors & subfloors).
+            def _validate_interior_space(
+                sp_obj: Mapping[str, Any],
+                land_x: int,
+                land_y: int,
+                label: str,
+                *,
+                expected_exit_sid: str,
+                visited_sids: set[str],
+            ) -> None:
+                sid_cur = str(sp_obj["space_id"])
+                if sid_cur in visited_sids:
+                    return
+                visited_sids.add(sid_cur)
+                sw, sh = int(sp_obj["width"]), int(sp_obj["height"])
+                solids: set[tuple[int, int]] = set()
+                ents: list[dict[str, Any]] = []
+                exit_ent: dict[str, Any] | None = None
+                portals_by_target: dict[str, dict[str, Any]] = {}
+                for ent in entities.values():
+                    if ent.get("space_id") != sid_cur or int(ent.get("z", 0)) < 0:
+                        continue
+                    tr = ent.get("traits") or {}
+                    pt = tr.get("portal")
+                    if isinstance(pt, Mapping):
+                        tsid = str(pt.get("target_space_id") or "").strip()
+                        if tsid == expected_exit_sid:
+                            exit_ent = ent
+                            continue
+                        if tsid:
+                            portals_by_target[tsid] = ent
+                            continue
+                        if "interior_door" in (ent.get("tags") or ()) and not bool(pt.get("is_locked", False)):
+                            ents.append(ent)
+                            continue
+                    ents.append(ent)
+                    if ent.get("solid"):
+                        fw, fh = ent.get("footprint") or [1, 1]
+                        for fx in range(int(fw)):
+                            for fy in range(int(fh)):
+                                solids.add((int(ent["x"]) + fx, int(ent["y"]) + fy))
 
-            # Validate interior landing, exit portal, and interior entity reachability.
-            iw, ih = int(int_sp["width"]), int(int_sp["height"])
-            int_solids: set[tuple[int, int]] = set()
-            int_entities: list[dict[str, Any]] = []
-            exit_ent: dict[str, Any] | None = None
-            for ent in entities.values():
-                if ent.get("space_id") != int_sid or int(ent.get("z", 0)) < 0:
-                    continue
-                traits = ent.get("traits") or {}
-                if "portal" in traits and traits["portal"].get("target_space_id") == town_space_id:
-                    exit_ent = ent
-                    continue
-                int_entities.append(ent)
-                if ent.get("solid"):
+                if exit_ent is None:
+                    errors.append(f"建筑「{label}」室内缺少返回上级空间的出口")
+                elif expected_exit_sid == town_space_id:
+                    ep = exit_ent["traits"]["portal"]
+                    tx, ty = int(ep.get("target_x", dx)), int(ep.get("target_y", dy + 1))
+                    if (tx, ty) in reachable_town:
+                        nonlocal reachable_doors
+                        reachable_doors += 1
+                    elif not _town_passable(tx, ty):
+                        errors.append(f"建筑「{label}」出门落脚点 ({tx}, {ty}) 被阻挡")
+                    else:
+                        errors.append(f"广场无法步行到达「{label}」正门 ({dx}, {dy})")
+
+                def _sp_passable(x: int, y: int) -> bool:
+                    return (
+                        0 <= x < sw and 0 <= y < sh
+                        and not engine.is_wall_cell(sp_obj, x, y)
+                        and _is_walkable_tile_id(_cell_tile_id(sp_obj, x, y))
+                        and (x, y) not in solids
+                    )
+
+                reach_cur: set[tuple[int, int]] = set()
+                if _sp_passable(land_x, land_y):
+                    iq: deque[tuple[int, int]] = deque([(land_x, land_y)])
+                    reach_cur.add((land_x, land_y))
+                    while iq:
+                        cx, cy = iq.popleft()
+                        for ox, oy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            nx, ny = cx + ox, cy + oy
+                            if (
+                                (nx, ny) not in reach_cur
+                                and _sp_passable(nx, ny)
+                                and engine.can_step_elevation(sp_obj, cx, cy, nx, ny)
+                            ):
+                                reach_cur.add((nx, ny))
+                                iq.append((nx, ny))
+                else:
+                    errors.append(f"建筑「{label}」室内入门落脚点 ({land_x}, {land_y}) 不可站立")
+
+                for ent in ents:
+                    if ent.get("placement") == "wall" or int(ent.get("y", 0)) < int(sp_obj.get("wall_rows", 1)):
+                        continue
+                    ex, ey = int(ent["x"]), int(ent["y"])
                     fw, fh = ent.get("footprint") or [1, 1]
-                    for fx in range(int(fw)):
-                        for fy in range(int(fh)):
-                            int_solids.add((int(ent["x"]) + fx, int(ent["y"]) + fy))
+                    adj_ok = any(
+                        (ex + fx + ox, ey + fy + oy) in reach_cur
+                        for fx in range(int(fw))
+                        for fy in range(int(fh))
+                        for ox in (-1, 0, 1)
+                        for oy in (-1, 0, 1)
+                    )
+                    if not adj_ok:
+                        errors.append(f"建筑「{label}」室内物件「{ent['name']}」({ex}, {ey}) 不可到达")
 
-            if exit_ent is None:
-                errors.append(f"建筑「{bname}」室内缺少返回城镇的出口大门")
-            else:
-                ep = exit_ent["traits"]["portal"]
-                tx, ty = int(ep.get("target_x", dx)), int(ep.get("target_y", dy + 1))
-                if not _town_passable(tx, ty):
-                    errors.append(f"建筑「{bname}」出门落脚点 ({tx}, {ty}) 被阻挡")
+                for sub_meta in (sp_obj.get("buildings") or ()):
+                    sub_sid = str(sub_meta.get("interior_space_id") or "").strip()
+                    sub_lbl = str(sub_meta.get("name") or sub_sid)
+                    sub_sp = spaces.get(sub_sid)
+                    if sub_sp is None:
+                        errors.append(f"建筑「{label}」缺少附属楼层「{sub_sid}」")
+                        continue
+                    if sub_sp.get("parent_space_id") != sid_cur:
+                        errors.append(f"建筑「{sub_lbl}」父级楼层关系无效")
+                    stair_ent = portals_by_target.get(sub_sid)
+                    if stair_ent is None:
+                        errors.append(f"建筑「{label}」缺少前往「{sub_lbl}」的楼梯传送点")
+                        continue
+                    sx, sy = int(stair_ent["x"]), int(stair_ent["y"])
+                    if (sx, sy) not in reach_cur and not any(
+                        (sx + ox, sy + oy) in reach_cur for ox, oy in ((0, 1), (0, -1), (1, 0), (-1, 0))
+                    ):
+                        errors.append(f"建筑「{label}」楼梯「{stair_ent['name']}」({sx}, {sy}) 不可到达")
+                    spt = (stair_ent.get("traits") or {}).get("portal") or {}
+                    sub_lx = int(spt.get("target_x", 1))
+                    sub_ly = int(spt.get("target_y", 1))
+                    _validate_interior_space(
+                        sub_sp,
+                        sub_lx,
+                        sub_ly,
+                        sub_lbl,
+                        expected_exit_sid=sid_cur,
+                        visited_sids=visited_sids,
+                    )
 
+            iw = int(int_sp["width"])
+            ih = int(int_sp["height"])
             ext_pt = ((ext_ent or {}).get("traits") or {}).get("portal") or {}
             land_x = int(ext_pt.get("target_x", iw // 2))
             land_y = int(ext_pt.get("target_y", max(1, ih - 2)))
-
-            def _int_passable(x: int, y: int) -> bool:
-                return (
-                    0 <= x < iw and 0 <= y < ih
-                    and not engine.is_wall_cell(int_sp, x, y)
-                    and _is_walkable_tile_id(_cell_tile_id(int_sp, x, y))
-                    and (x, y) not in int_solids
-                )
-
-            reach_int: set[tuple[int, int]] = set()
-            if _int_passable(land_x, land_y):
-                iq: deque[tuple[int, int]] = deque([(land_x, land_y)])
-                reach_int.add((land_x, land_y))
-                while iq:
-                    cx, cy = iq.popleft()
-                    for ox, oy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                        nx, ny = cx + ox, cy + oy
-                        if (nx, ny) not in reach_int and _int_passable(nx, ny):
-                            reach_int.add((nx, ny))
-                            iq.append((nx, ny))
-            else:
-                errors.append(f"建筑「{bname}」室内入门落脚点 ({land_x}, {land_y}) 不可站立")
-
-            for ent in int_entities:
-                if ent.get("placement") == "wall" or int(ent.get("y", 0)) < int(int_sp.get("wall_rows", 1)):
-                    continue
-                ex, ey = int(ent["x"]), int(ent["y"])
-                if not any((ex + ox, ey + oy) in reach_int for ox in (-1, 0, 1) for oy in (-1, 0, 1)):
-                    errors.append(f"建筑「{bname}」室内物件「{ent['name']}」({ex}, {ey}) 不可到达")
+            _validate_interior_space(
+                int_sp,
+                land_x,
+                land_y,
+                bname,
+                expected_exit_sid=town_space_id,
+                visited_sids=set(),
+            )
 
         return {
             "ok": len(errors) == 0,

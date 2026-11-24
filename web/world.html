@@ -97,6 +97,7 @@
     font-size: 10px; font-family: var(--px-font); cursor: pointer;
     display: flex; align-items: center; justify-content: center; padding: 0;
   }
+  a.px-btn { text-decoration: none; }
   .expand-edge-btn:hover { border-color: var(--accent); color: var(--text); background: #2d243b; }
   .expand-n { grid-area: north; }
   .expand-s { grid-area: south; }
@@ -298,6 +299,8 @@
   .inventory-catalog-footer { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
   .inventory-catalog-footer .px-btn { flex-shrink:0; }
   .inventory-catalog-empty { grid-column:1 / -1; padding:8px 0; }
+  .external-overlay-card { display:flex; gap:8px; align-items:center; text-align:left; white-space:normal; }
+  .external-overlay-card[aria-pressed="true"] { border-color:var(--accent-2); background:var(--panel-2); }
   @media (max-width:600px) {
     .inventory-panes.with-catalog { grid-template-columns:1fr; }
     .inventory-catalog { padding:12px 0 0; border-left:0; border-top:1px solid var(--border); }
@@ -520,6 +523,7 @@
     <button class="px-btn" id="btn-hub-gen-world">🗺️ LLM 生成新世界</button>
     <button class="px-btn" id="btn-hub-new-world">➕ 新建空白世界</button>
     <button class="px-btn" id="btn-hub-popout" title="在独立浏览器窗口中打开世界大厅">↗ 独立窗口</button>
+    <a class="px-btn hidden" id="hub-story-link">故事大厅</a>
     <button class="px-btn" id="btn-hub-refresh">🔄 刷新</button>
   </header>
   <div class="hub-body">
@@ -556,6 +560,7 @@
       <option value="0">暂停</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
     </select>
     <button class="px-btn" id="btn-sound" title="开关 8-bit Web Audio 音效">🔊 音效</button>
+    <button class="px-btn hidden" id="btn-external-overlay" title="打开外部事件/情报面板">📜 外部面板</button>
     <button class="px-btn" id="btn-world-menu" title="地图生成、导入角色、调色板、时间与管理菜单">⚙ 世界菜单</button>
   </header>
 
@@ -847,6 +852,7 @@ const state = {
   drag: null,
   imageCache: new Map(),
   terrainCache: { key: "", canvas: null },
+  roomVis: { sid: "", w: 0, h: 0, alpha: null, animating: false },
 };
 
 const el = (id) => document.getElementById(id);
@@ -992,6 +998,9 @@ function toast(msg, isErr) {
 
 async function runAction(actionId, values, apply = true) {
   const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/actions/" + encodeURIComponent(actionId));
+  if (actionId === "get_world_snapshot") {
+    values = { ...values, strict_space: Boolean(isStoryWorld()), sandbox_only: state.view === "hub" };
+  }
   const resp = await fetch(url, {
     method: "POST",
     credentials: "same-origin",
@@ -1003,11 +1012,27 @@ async function runAction(actionId, values, apply = true) {
   try { data = await resp.json(); } catch {}
   if (!resp.ok) throw new Error((data && (data.message || data.error)) || ("HTTP " + resp.status));
   const res = (data && data.result) || {};
+  if (res.snapshot && ((state.storyRealm && res.snapshot.realm_space_id !== state.storyRealm)
+      || (state.expectStory && !res.snapshot.isolated_persona))) {
+    throw new Error("该故事舞台已不可用，请返回故事局列表。");
+  }
   if (res.ok === false) throw new Error(res.error || "操作失败");
   if (apply && res.snapshot) {
     applySnapshot(res.snapshot, res.terminal, res.chat_history);
   }
   return res;
+}
+
+function isStoryWorld() {
+  return state.view === "world" && Boolean(state.expectStory || state.storyRealm || state.snap?.isolated_persona);
+}
+
+function allowedWorldMode(mode) {
+  return !isStoryWorld() || mode === (state.snap?.external_overlay?.view_only ? "play" : "roam");
+}
+
+function storyLobbyUrl() {
+  return withToken("/api/plugins/community.nanami.story/frontend/story_lobby/");
 }
 
 function renderViewShell() {
@@ -1020,6 +1045,16 @@ function renderViewShell() {
     document.title = "世界大厅 · 七海千秋";
     SoundFX.syncWeather("clear", false);
   }
+
+  const story = isStoryWorld();
+  const viewOnly = story && state.snap?.external_overlay?.view_only;
+  for (const id of ["btn-world-menu", "btn-auto-step", "btn-weather-pill", "btn-open-expr", "btn-chat-clear"]) {
+    el(id).classList.toggle("hidden", Boolean(story));
+  }
+  el("btn-go-hub").textContent = story ? "← 故事局" : "🌍 世界列表";
+  el("btn-go-hub").title = story ? "返回故事大厅" : "返回世界选择大厅";
+  el("ui-mode-switch").classList.toggle("hidden", Boolean(story));
+  el("actor-select").classList.toggle("hidden", Boolean(story && !viewOnly));
 
   const isRoam = state.uiMode === "roam";
   const isBuild = state.uiMode === "build";
@@ -1036,10 +1071,10 @@ function renderViewShell() {
   if (el("roam-hud")) el("roam-hud").classList.toggle("hidden", !isRoam);
   renderInventoryHud();
   el("btn-chat-gift").classList.toggle("hidden", !isRoam);
-  const showDock = state.dockOpen && !isBuild;
+  const showDock = state.dockOpen && !isBuild && !viewOnly;
   if (el("dialogue-dock")) el("dialogue-dock").classList.toggle("hidden", !showDock);
   if (el("split-dock-h")) el("split-dock-h").classList.toggle("hidden", !showDock);
-  if (el("btn-dock-reopen")) el("btn-dock-reopen").classList.toggle("hidden", showDock || isBuild || isRoam);
+  if (el("btn-dock-reopen")) el("btn-dock-reopen").classList.toggle("hidden", showDock || isBuild || isRoam || Boolean(viewOnly));
   updateRoamPromptUi();
 
   document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
@@ -1109,13 +1144,17 @@ function refreshLocalRoamPrompt(p = state.snap?.actors.find((a) => a.actor_id ==
   };
   let frontActor = null;
   for (const actor of state.snap.actors || []) {
-    if (actor.actor_id === state.playerId || actor.space_id !== sp.space_id) continue;
+    if (actor.actor_id === state.playerId || actor.space_id !== sp.space_id || actor.actor_status === "missing") continue;
     const dist = Math.max(Math.abs(actor.x - px), Math.abs(actor.y - py));
     if (dist > 1) continue;
     const front = actor.x === fx && actor.y === fy;
     if (front) frontActor = actor;
+    const isIncap = actor.actor_status === "incapacitated";
+    const label = isIncap
+      ? ("查探 " + actor.name + (actor.status_note ? ("（" + actor.status_note + "）") : ""))
+      : ("和 " + actor.name + " 对话");
     consider(front ? 1 : 10 + dist, 3, 0, {
-      kind: "actor", target_id: actor.actor_id, name: actor.name, label: "和 " + actor.name + " 对话",
+      kind: "actor", target_id: actor.actor_id, name: actor.name, label,
     });
   }
   const blockedApproach = frontActor && isCellWalkableLocal(fx, fy, frontActor.actor_id);
@@ -1131,13 +1170,38 @@ function refreshLocalRoamPrompt(p = state.snap?.actors.find((a) => a.actor_id ==
     if (dist > 1 && !throughActor) continue;
     const score = contains(fx, fy) || throughActor ? 1 : 10 + dist;
     if (isDoor) {
+      const isStair = Array.isArray(ent.tags) && ent.tags.includes("stair");
       consider(score, throughActor ? 2 : 0, 0, {
-        kind: "portal", target_id: ent.entity_id, name: ent.name, label: "推开「" + ent.name + "」",
+        kind: "portal", target_id: ent.entity_id, name: ent.name,
+        label: (isStair ? "🪜 踏上「" : "推开「") + ent.name + "」",
+      });
+      continue;
+    }
+    if (tr.portal && !tr.portal.is_open && Array.isArray(ent.tags) && ent.tags.includes("interior_door")) {
+      consider(score, 0, 0, {
+        kind: "entity", target_id: ent.entity_id, name: ent.name, action: "open",
+        label: "推开「" + ent.name + "」",
+      });
+      continue;
+    }
+    const doorOccupied = Boolean(
+      tr.portal && !isDoor && (
+        contains(px, py)
+        || (state.snap.actors || []).some((a) => (
+          a.space_id === sp.space_id && a.actor_id !== state.playerId
+          && a.actor_status !== "missing" && contains(a.x, a.y)
+        ))
+      )
+    );
+    if (tr.portal && tr.portal.is_open && !isDoor && !tr.container && !doorOccupied) {
+      consider(score, 1, z, {
+        kind: "entity", target_id: ent.entity_id, name: ent.name, action: "close",
+        label: "关上「" + ent.name + "」",
       });
       continue;
     }
     const occupiedBy = tr.restable?.occupied_by;
-    const hasAction = tr.container || tr.switchable || tr.inscribable || tr.portal
+    const hasAction = tr.container || tr.switchable || tr.inscribable || (tr.portal && !doorOccupied)
       || (tr.restable && (occupiedBy == null || occupiedBy === p.actor_id))
       || (tr.portable && (tr.portable.weight ?? "light") === "light" && occupiedBy !== p.actor_id)
       || tr.consumable?.uses_left > 0
@@ -1151,6 +1215,7 @@ function refreshLocalRoamPrompt(p = state.snap?.actors.find((a) => a.actor_id ==
 }
 
 function setUiMode(mode) {
+  if (!allowedWorldMode(mode) || (isStoryWorld() && !state.snap)) return;
   state.uiMode = (mode === "roam" || mode === "build" || mode === "status") ? mode : "play";
   if (state.uiMode === "roam") {
     state.dockOpen = false;
@@ -1228,7 +1293,9 @@ function _openPopupOrShareUrl(url, targetName, fallbackSpaceId) {
 }
 
 function openStandaloneWorld(spaceId) {
-  const url = withToken(window.location.pathname + "?space_id=" + encodeURIComponent(spaceId) + "&view=world");
+  const params = new URLSearchParams({ space_id: spaceId, view: "world" });
+  if (isStoryWorld()) params.set("mode", "story");
+  const url = withToken(window.location.pathname + "?" + params);
   _openPopupOrShareUrl(url, "nanami_world_" + String(spaceId || "main"), spaceId);
 }
 
@@ -1266,7 +1333,8 @@ function runDoorTransition(portalEntityId) {
   if (wrap) wrap.classList.add("fading");
   runAction("enter_portal", {
     entity_id: portalEntityId,
-    actor_id: (state.snap && state.snap.active_actor_id) || "",
+    actor_id: isStoryWorld() && state.uiMode === "roam" ? state.playerId : state.snap?.active_actor_id || "",
+    observe_only: Boolean(isStoryWorld() && state.snap?.external_overlay?.view_only),
   }).then((res) => {
     state.selectedEntityId = "";
     state.selectedBlueprintId = "";
@@ -1300,13 +1368,23 @@ function enterWorld(spaceId) {
   state.windowSpaceId = spaceId;
   state.view = "world";
   renderViewShell();
-  runAction("switch_space", { space_id: spaceId }).then(() => {
+  runAction(isStoryWorld() ? "get_world_snapshot" : "switch_space", { space_id: spaceId }).then(() => {
     focusActiveActor();
   }).catch((e) => toast(e.message, true));
 }
 
 function applySnapshot(snap, terminal, chatHistory) {
+  const enteringStory = state.view === "world" && snap.isolated_persona && !state.snap?.isolated_persona;
+  const wasObserving = state.snap?.external_overlay?.live_autonomy;
   state.snap = snap;
+  if (state.view === "world") {
+    if (snap.isolated_persona) {
+      state.storyRealm = snap.realm_space_id;
+      state.uiMode = snap.external_overlay?.view_only ? "play" : "roam";
+      if (enteringStory) state.dockOpen = false;
+    }
+    state.playerId = snap.player_actor_id || "player_avatar";
+  }
   if (typeof ROAM_POS !== "undefined" && ROAM_POS.active) {
     if (!snap || !snap.space || snap.space.space_id !== ROAM_POS.sid) {
       ROAM_POS.active = false;
@@ -1338,6 +1416,17 @@ function applySnapshot(snap, terminal, chatHistory) {
   renderDialogueDock();
   refreshLocalRoamPrompt();
   renderViewport();
+  if (state.view === "world" && snap.external_overlay?.live_autonomy
+      && state.liveAutoStartedRealm !== snap.realm_space_id) {
+    state.liveAutoStartedRealm = snap.realm_space_id;
+    setLiveEnabled(true);
+  } else if (wasObserving && !snap.external_overlay?.live_autonomy && state.autoLife) {
+    setLiveEnabled(false);
+  }
+  if (state.externalOverlayContext != null && snap.external_overlay
+      && state.externalOverlayContext !== (snap.external_overlay.context_id || "")) {
+    openExternalOverlayModal(snap.external_overlay);
+  }
 }
 
 function setBuilderTool(toolName) {
@@ -2740,6 +2829,242 @@ function drawWeatherOverlay(ctx, W, H, wCode, intensity, nowMs) {
   ctx.restore();
 }
 
+const ELEV_LIFT_PX = 8;
+
+function cellElev(sp, x, y) {
+  const elevs = sp && sp.elevations;
+  if (!elevs) return 0;
+  const v = Number(elevs[Math.round(x) + "," + Math.round(y)] || 0);
+  return v > 0 ? Math.min(2, v) : 0;
+}
+
+function cellStair(sp, x, y) {
+  const stairs = sp && sp.stairs;
+  if (!stairs) return "";
+  return String(stairs[Math.round(x) + "," + Math.round(y)] || "");
+}
+
+function canStepElevLocal(sp, x0, y0, x1, y1) {
+  const elevs = sp && sp.elevations;
+  if (!elevs) return true;
+  const ix0 = Math.round(x0), iy0 = Math.round(y0);
+  const ix1 = Math.round(x1), iy1 = Math.round(y1);
+  if (ix0 === ix1 && iy0 === iy1) return true;
+  const e0 = cellElev(sp, ix0, iy0);
+  const e1 = cellElev(sp, ix1, iy1);
+  if (e0 === e1) return true;
+  if (Math.abs(e0 - e1) > 1) return false;
+  if (ix0 !== ix1 && iy0 !== iy1) return false;
+  const need = ix0 === ix1 ? "ns" : "ew";
+  const s0 = cellStair(sp, ix0, iy0);
+  const s1 = cellStair(sp, ix1, iy1);
+  return s0 === need || s0 === "both" || s1 === need || s1 === "both";
+}
+
+function sampleSmoothElev(sp, gx, gy) {
+  const elevs = sp && sp.elevations;
+  if (!elevs) return 0;
+  const x0 = Math.max(0, Math.floor(gx));
+  const y0 = Math.max(0, Math.floor(gy));
+  const x1 = Math.min(Math.max(0, (sp.width || 1) - 1), x0 + 1);
+  const y1 = Math.min(Math.max(0, (sp.height || 1) - 1), y0 + 1);
+  const fx = Math.max(0, Math.min(1, gx - x0));
+  const fy = Math.max(0, Math.min(1, gy - y0));
+  const e00 = cellElev(sp, x0, y0);
+  const e10 = cellElev(sp, x1, y0);
+  const e01 = cellElev(sp, x0, y1);
+  const e11 = cellElev(sp, x1, y1);
+  return (e00 * (1 - fx) + e10 * fx) * (1 - fy) + (e01 * (1 - fx) + e11 * fx) * fy;
+}
+
+function drawIndoorWindowPane(octx, winX, winW, lighting, period, wCode, pal) {
+  const skyMap = { dawn: "#e89f8e", day: "#89cff0", dusk: "#c97968", night: "#1c2447" };
+  let winSky = skyMap[period] || "#89cff0";
+  if (period !== "night") {
+    if (wCode === "rain") winSky = "#5c6f8c";
+    else if (wCode === "cloudy") winSky = "#8c9bb0";
+    else if (wCode === "snow") winSky = "#9eb3cc";
+  }
+  const frameCol = pal.sprite_base.outline || "#21181b";
+  octx.fillStyle = frameCol;
+  octx.fillRect(winX + 4, 4, winW - 8, TILE - 10);
+  octx.fillStyle = winSky;
+  octx.fillRect(winX + 8, 8, winW - 16, TILE - 18);
+  if (period === "night") {
+    octx.fillStyle = "#fff5b8";
+    for (let sx = winX + 14; sx < winX + winW - 12; sx += 24) {
+      octx.fillRect(sx, 14 + ((sx >> 3) % 8), 3, 3);
+    }
+  } else if (wCode === "clear" || wCode === "sakura") {
+    octx.fillStyle = "rgba(255,255,255,0.65)";
+    octx.fillRect(winX + 14, 13, Math.min(18, Math.max(8, winW - 28)), 5);
+    if (winW >= TILE * 2) octx.fillRect(winX + TILE + 6, 17, 14, 4);
+  }
+  if (wCode === "rain") {
+    octx.strokeStyle = "rgba(190, 224, 255, 0.75)";
+    octx.lineWidth = 1.2;
+    for (let rx = winX + 12; rx < winX + winW - 10; rx += 12) {
+      octx.beginPath();
+      octx.moveTo(rx, 11);
+      octx.lineTo(rx - 4, 24);
+      octx.stroke();
+    }
+  } else if (wCode === "snow") {
+    octx.fillStyle = "#eef6ff";
+    for (let sx = winX + 14; sx < winX + winW - 12; sx += 18) {
+      octx.fillRect(sx, 13 + ((sx >> 2) % 10), 2, 2);
+    }
+  } else if (wCode === "sakura") {
+    octx.fillStyle = "#ffb6cf";
+    for (let sx = winX + 16; sx < winX + winW - 12; sx += 20) {
+      octx.fillRect(sx, 14 + ((sx >> 2) % 9), 3, 2);
+    }
+  }
+  octx.fillStyle = frameCol;
+  const colsSpan = Math.max(1, Math.round(winW / TILE));
+  if (colsSpan === 1) {
+    octx.fillRect(winX + Math.round(winW / 2) - 1, 7, 2, TILE - 16);
+    octx.fillRect(winX + 8, Math.round((TILE - 10) / 2) + 2, winW - 16, 2);
+  } else {
+    for (let ci = 1; ci < colsSpan; ci++) {
+      octx.fillRect(winX + ci * TILE - 2, 6, 4, TILE - 14);
+    }
+  }
+}
+
+function computeIndoorVisibilityMask(space, entities, actors) {
+  if (!space || space.space_kind === "town") return null;
+  const sid = space.space_id;
+  const cols = Number(space.width || 0);
+  const rows = Number(space.height || 0);
+  if (cols <= 0 || rows <= 0) return null;
+  const wallRows = space.wall_rows != null ? Number(space.wall_rows) : 1;
+  const total = cols * rows;
+
+  let hasInteriorDoors = false;
+  const closedDoors = new Set();
+  for (const ent of entities) {
+    if (ent.space_id !== sid || Number(ent.z || 0) < 0) continue;
+    const tags = Array.isArray(ent.tags) ? ent.tags : [];
+    if (!tags.includes("interior_door")) continue;
+    hasInteriorDoors = true;
+    const pt = ent.traits && ent.traits.portal;
+    if (pt && !pt.is_open) {
+      const [fw, fh] = ent.footprint || [1, 1];
+      for (let fx = 0; fx < fw; fx++) {
+        for (let fy = 0; fy < fh; fy++) {
+          closedDoors.add((ent.x + fx) + "," + (ent.y + fy));
+        }
+      }
+    }
+  }
+  if (!hasInteriorDoors) return null;
+
+  const blocked = new Uint8Array(total);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (resolveTileMeta(space, x, y).meta.is_wall || closedDoors.has(x + "," + y)) {
+        blocked[y * cols + x] = 1;
+      }
+    }
+  }
+
+  let seedPt = null;
+  const playerAct = actors.find((a) => a.space_id === sid && a.is_player);
+  if (state.uiMode === "roam" && playerAct) {
+    const gx = ROAM_POS.active && ROAM_POS.sid === sid ? Math.round(ROAM_POS.gx) : playerAct.x;
+    const gy = ROAM_POS.active && ROAM_POS.sid === sid ? Math.round(ROAM_POS.gy) : playerAct.y;
+    seedPt = [gx, gy];
+  } else {
+    const focusAct = actors.find((a) => a.space_id === sid && a.actor_id === state.snap?.active_actor_id && a.actor_status !== "missing")
+      || actors.find((a) => a.space_id === sid && a.actor_status !== "missing");
+    if (focusAct) {
+      seedPt = [focusAct.x, focusAct.y];
+    } else {
+      const portalEnt = entities.find((e) => e.space_id === sid && e.traits?.portal?.target_space_id);
+      if (portalEnt) {
+        for (const [ox, oy] of [[0, -1], [0, 1], [-1, 0], [1, 0], [0, 0]]) {
+          const sx = portalEnt.x + ox, sy = portalEnt.y + oy;
+          if (sx >= 0 && sx < cols && sy >= wallRows && sy < rows && !blocked[sy * cols + sx]) {
+            seedPt = [sx, sy];
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (!seedPt) {
+    outer: for (let y = rows - 1; y >= wallRows; y--) {
+      for (let x = 0; x < cols; x++) {
+        if (!blocked[y * cols + x]) { seedPt = [x, y]; break outer; }
+      }
+    }
+  }
+  if (!seedPt) return null;
+
+  const target = new Float32Array(total);
+  const visitedFloor = new Uint8Array(total);
+  const qx = [];
+  const qy = [];
+  const s0x = Math.max(0, Math.min(cols - 1, seedPt[0]));
+  const s0y = Math.max(0, Math.min(rows - 1, seedPt[1]));
+  if (blocked[s0y * cols + s0x]) {
+    for (const [ox, oy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
+      const nx = s0x + ox, ny = s0y + oy;
+      if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !blocked[ny * cols + nx]) {
+        qx.push(nx); qy.push(ny); visitedFloor[ny * cols + nx] = 1; target[ny * cols + nx] = 1;
+      }
+    }
+  }
+  if (!qx.length) {
+    qx.push(s0x); qy.push(s0y); visitedFloor[s0y * cols + s0x] = 1; target[s0y * cols + s0x] = 1;
+  }
+
+  for (let head = 0; head < qx.length; head++) {
+    const cx = qx[head], cy = qy[head];
+    for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cx + ox, ny = cy + oy;
+      if (nx < 0 || nx >= cols || ny < wallRows || ny >= rows) continue;
+      const idx = ny * cols + nx;
+      if (visitedFloor[idx] || blocked[idx]) continue;
+      visitedFloor[idx] = 1;
+      target[idx] = 1;
+      qx.push(nx); qy.push(ny);
+    }
+  }
+
+  // Reveal framing perimeter walls and closed interior doors touching any lit floor tile.
+  for (let head = 0; head < qx.length; head++) {
+    const cx = qx[head], cy = qy[head];
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        const nx = cx + ox, ny = cy + oy;
+        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+          target[ny * cols + nx] = 1;
+        }
+      }
+    }
+  }
+
+  const rv = state.roomVis;
+  if (!rv || rv.sid !== sid || rv.w !== cols || rv.h !== rows || !rv.alpha || rv.alpha.length !== total) {
+    state.roomVis = { sid, w: cols, h: rows, alpha: new Float32Array(target), animating: false };
+    return state.roomVis.alpha;
+  }
+  let moving = false;
+  for (let i = 0; i < total; i++) {
+    const diff = target[i] - rv.alpha[i];
+    if (Math.abs(diff) < 0.02) {
+      rv.alpha[i] = target[i];
+    } else {
+      rv.alpha[i] += diff * 0.2;
+      moving = true;
+    }
+  }
+  rv.animating = moving;
+  return rv.alpha;
+}
+
 function renderViewport() {
   const snap = state.snap;
   if (!snap) return;
@@ -2773,8 +3098,10 @@ function renderViewport() {
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
 
-  // 1. 离屏静态地形 + 区域标签 + 建筑外立面屋顶缓存
+  // 1. 离屏静态地形 + 2.5D 台地崖壁/石阶 + 区域标签 + 建筑外立面屋顶缓存
   const spaceTiles = space.tiles || {};
+  const spaceElevs = space.elevations || {};
+  const spaceStairs = space.stairs || {};
   const zonesList = Array.isArray(space.zones) ? space.zones : [];
   const buildingsList = Array.isArray(space.buildings) ? space.buildings : [];
   const previous = state.terrainCache;
@@ -2782,9 +3109,10 @@ function renderViewport() {
   const wData = snap.weather || {};
   const wCode = wData.current || "clear";
   const cacheKey = previous?.space === space && previous?.palette === pal && previous?.period === period && previous?.weatherCode === wCode ? previous.key : [
-    space.space_id, cols, rows, wallRows, space.space_kind || "room",
+    space.space_id, cols, rows, wallRows, space.space_kind || "room", Number(space.floor_index || 0),
     pal.palette_id || "", period, wCode,
-    JSON.stringify(spaceTiles), JSON.stringify(zonesList), JSON.stringify(buildingsList),
+    JSON.stringify(spaceTiles), JSON.stringify(spaceElevs), JSON.stringify(spaceStairs),
+    JSON.stringify(zonesList), JSON.stringify(buildingsList),
   ].join("|");
   if (!state.terrainCache || state.terrainCache.key !== cacheKey || !state.terrainCache.canvas) {
     const off = document.createElement("canvas");
@@ -2792,16 +3120,228 @@ function renderViewport() {
     off.height = H;
     const octx = off.getContext("2d");
     octx.imageSmoothingEnabled = false;
+    const hasRelief = Object.keys(spaceElevs).length > 0;
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         const px = x * TILE;
         const py = y * TILE;
         const rawTid = spaceTiles[x + "," + y] || "";
+        const ev = hasRelief ? cellElev(space, x, y) : 0;
         drawCellTile(octx, rawTid, x, y, wallRows, px, py, pal, TILE);
+        if (ev > 0) {
+          const lift = ev * ELEV_LIFT_PX;
+          drawCellTile(octx, rawTid, x, y, wallRows, px, py - lift, pal, TILE);
+          octx.fillStyle = ev === 2 ? "rgba(255, 250, 224, 0.13)" : "rgba(255, 248, 220, 0.065)";
+          octx.fillRect(px, py - lift, TILE, TILE);
+        }
       }
     }
-    // 区域软标（仅城镇或含分区地图绘制）
+
+    // 地块边缘自然衔接（草坪叶缘 / 水岸白沫压边，消除生硬马赛克拼接感）
+    const pavedSet = new Set(["cobble", "stone_tile", "wood_floor", "sand", "tatami", "carpet_blue", "carpet_pink"]);
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const tid = spaceTiles[x + "," + y] || "";
+        const ev = hasRelief ? cellElev(space, x, y) : 0;
+        const py = y * TILE - ev * ELEV_LIFT_PX;
+        const px = x * TILE;
+        if (tid === "water") {
+          octx.fillStyle = "rgba(218, 246, 255, 0.55)";
+          if (y > 0 && (spaceTiles[x + "," + (y - 1)] || "") !== "water") octx.fillRect(px, py, TILE, 3);
+          if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") !== "water") octx.fillRect(px, py + TILE - 3, TILE, 3);
+          if (x > 0 && (spaceTiles[(x - 1) + "," + y] || "") !== "water") octx.fillRect(px, py, 3, TILE);
+          if (x + 1 < cols && (spaceTiles[(x + 1) + "," + y] || "") !== "water") octx.fillRect(px + TILE - 3, py, 3, TILE);
+        } else if (pavedSet.has(tid)) {
+          octx.fillStyle = "rgba(24, 20, 28, 0.18)";
+          const nTid = y > 0 ? (spaceTiles[x + "," + (y - 1)] || "") : tid;
+          const sTid = y + 1 < rows ? (spaceTiles[x + "," + (y + 1)] || "") : tid;
+          const wTid = x > 0 ? (spaceTiles[(x - 1) + "," + y] || "") : tid;
+          const eTid = x + 1 < cols ? (spaceTiles[(x + 1) + "," + y] || "") : tid;
+          if (nTid && nTid !== tid && !pavedSet.has(nTid)) octx.fillRect(px, py, TILE, 2);
+          if (sTid && sTid !== tid && !pavedSet.has(sTid)) octx.fillRect(px, py + TILE - 2, TILE, 2);
+          if (wTid && wTid !== tid && !pavedSet.has(wTid)) octx.fillRect(px, py, 2, TILE);
+          if (eTid && eTid !== tid && !pavedSet.has(eTid)) octx.fillRect(px + TILE - 2, py, 2, TILE);
+        }
+      }
+    }
+
+    // 室内墙踢脚线与墙脚 AO 阴影（增强房间隔断纵深感）
+    if (space.space_kind !== "town") {
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          if (!resolveTileMeta(space, x, y).meta.is_wall) continue;
+          const px = x * TILE;
+          const py = y * TILE;
+          if (y + 1 < rows && !resolveTileMeta(space, x, y + 1).meta.is_wall) {
+            octx.fillStyle = "rgba(18, 12, 24, 0.52)";
+            octx.fillRect(px, py + TILE - 3, TILE, 3);
+            const ao = octx.createLinearGradient(0, py + TILE, 0, py + TILE + 10);
+            ao.addColorStop(0, "rgba(10, 8, 18, 0.30)");
+            ao.addColorStop(1, "rgba(10, 8, 18, 0)");
+            octx.fillStyle = ao;
+            octx.fillRect(px, py + TILE, TILE, 10);
+          }
+          if (y >= wallRows && x + 1 < cols && !resolveTileMeta(space, x + 1, y).meta.is_wall) {
+            octx.fillStyle = "rgba(10, 8, 18, 0.16)";
+            octx.fillRect(px + TILE, py, 5, TILE);
+          }
+        }
+      }
+    }
+
+    // 2.5D 挡土石崖壁、顶沿护栏与立体石阶绘制
+    if (hasRelief) {
+      for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+          const ev = cellElev(space, x, y);
+          if (ev <= 0) continue;
+          const lift = ev * ELEV_LIFT_PX;
+          const px = x * TILE;
+          const py = y * TILE - lift;
+          const st = cellStair(space, x, y);
+
+          // 北向顶沿亮脊（当前格高于北邻格）
+          if (y > 0 && ev > cellElev(space, x, y - 1)) {
+            const stN = cellStair(space, x, y - 1);
+            const isStairN = st === "ns" || st === "both" || stN === "ns" || stN === "both";
+            if (!isStairN) {
+              octx.fillStyle = "#1f1924";
+              octx.fillRect(px, py, TILE, 2);
+              octx.fillStyle = "#e6dfd0";
+              octx.fillRect(px, py + 2, TILE, 3);
+            } else {
+              // 北向阶梯踏步
+              const steps = 5;
+              const stepH = Math.floor((TILE - 6) / steps);
+              for (let si = 0; si < steps; si++) {
+                const sy = py + 3 + si * stepH;
+                octx.fillStyle = "#dfd7c6";
+                octx.fillRect(px + 4, sy, TILE - 8, stepH - 2);
+                octx.fillStyle = "#5c5563";
+                octx.fillRect(px + 4, sy + stepH - 2, TILE - 8, 2);
+              }
+              octx.fillStyle = "#3b3542";
+              octx.fillRect(px + 1, py + 2, 3, TILE - 4);
+              octx.fillRect(px + TILE - 4, py + 2, 3, TILE - 4);
+            }
+          }
+
+          // 西向断崖边沿与落影
+          if (x > 0 && ev > cellElev(space, x - 1, y)) {
+            const stW = cellStair(space, x - 1, y);
+            const isStairW = st === "ew" || st === "both" || stW === "ew" || stW === "both";
+            if (!isStairW) {
+              octx.fillStyle = "rgba(12, 9, 18, 0.28)";
+              octx.fillRect(px - 5, py + 2, 5, TILE);
+              octx.fillStyle = "#1f1924";
+              octx.fillRect(px, py, 2, TILE);
+              octx.fillStyle = "#dbd3c3";
+              octx.fillRect(px + 2, py, 3, TILE);
+            } else {
+              const steps = 5;
+              const stepW = Math.floor((TILE - 6) / steps);
+              for (let si = 0; si < steps; si++) {
+                const sx = px + 3 + si * stepW;
+                octx.fillStyle = "#dfd7c6";
+                octx.fillRect(sx, py + 4, stepW - 2, TILE - 8);
+                octx.fillStyle = "#5c5563";
+                octx.fillRect(sx, py + 4, 2, TILE - 8);
+              }
+              octx.fillStyle = "#3b3542";
+              octx.fillRect(px + 2, py + 1, TILE - 4, 3);
+              octx.fillRect(px + 2, py + TILE - 4, TILE - 4, 3);
+            }
+          }
+
+          // 东向断崖边沿与落影
+          if (x + 1 < cols && ev > cellElev(space, x + 1, y)) {
+            const stE = cellStair(space, x + 1, y);
+            const isStairE = st === "ew" || st === "both" || stE === "ew" || stE === "both";
+            if (!isStairE) {
+              octx.fillStyle = "rgba(12, 9, 18, 0.32)";
+              octx.fillRect(px + TILE, py + 3, 6, TILE);
+              octx.fillStyle = "#c9c0af";
+              octx.fillRect(px + TILE - 5, py, 3, TILE);
+              octx.fillStyle = "#1f1924";
+              octx.fillRect(px + TILE - 2, py, 2, TILE);
+            } else {
+              const steps = 5;
+              const stepW = Math.floor((TILE - 6) / steps);
+              for (let si = 0; si < steps; si++) {
+                const sx = px + 3 + si * stepW;
+                octx.fillStyle = "#dfd7c6";
+                octx.fillRect(sx, py + 4, stepW - 2, TILE - 8);
+                octx.fillStyle = "#5c5563";
+                octx.fillRect(sx + stepW - 2, py + 4, 2, TILE - 8);
+              }
+              octx.fillStyle = "#3b3542";
+              octx.fillRect(px + 2, py + 1, TILE - 4, 3);
+              octx.fillRect(px + 2, py + TILE - 4, TILE - 4, 3);
+            }
+          }
+
+          // 南向正面 2.5D 砌石挡土崖壁 / 南向宽石阶（视觉立体感核心）
+          if (y + 1 < rows && ev > cellElev(space, x, y + 1)) {
+            const evS = cellElev(space, x, y + 1);
+            const dropLv = Math.max(1, ev - evS);
+            const cliffH = dropLv * ELEV_LIFT_PX + 8;
+            const rimY = py + TILE - 4;
+            const stS = cellStair(space, x, y + 1);
+            const isStairS = st === "ns" || st === "both" || stS === "ns" || stS === "both";
+            if (!isStairS) {
+              // 顶部石压条
+              octx.fillStyle = "#e6dfd0";
+              octx.fillRect(px, rimY, TILE, 3);
+              octx.fillStyle = "#1e1824";
+              octx.fillRect(px, rimY + 3, TILE, 2);
+              // 立面分层砌石
+              const faceY = rimY + 5;
+              octx.fillStyle = ev === 2 ? "#7a7482" : "#6b6673";
+              octx.fillRect(px, faceY, TILE, cliffH);
+              octx.fillStyle = "#4c4754";
+              octx.fillRect(px, faceY + Math.floor(cliffH * 0.52), TILE, Math.ceil(cliffH * 0.48));
+              // 石缝与错缝纹理
+              octx.fillStyle = "#2b2633";
+              const midRow = faceY + Math.floor(cliffH * 0.5);
+              octx.fillRect(px, midRow, TILE, 1);
+              octx.fillRect(px, faceY + cliffH - 2, TILE, 2);
+              for (let bxOff = ((x + y) % 2) * 8 + 8; bxOff < TILE - 4; bxOff += 16) {
+                octx.fillRect(px + bxOff, faceY, 1, midRow - faceY);
+              }
+              for (let bxOff = ((x + y + 1) % 2) * 8 + 12; bxOff < TILE - 4; bxOff += 16) {
+                octx.fillRect(px + bxOff, midRow + 1, 1, faceY + cliffH - midRow - 2);
+              }
+              // 崖脚投影
+              octx.fillStyle = "rgba(10, 8, 16, 0.34)";
+              octx.fillRect(px, faceY + cliffH, TILE, 5);
+            } else {
+              // 南向立体石阶（带左右护石耳墙）
+              const stairTop = py + 10;
+              const totalH = (TILE - 10) + dropLv * ELEV_LIFT_PX + 2;
+              const steps = 6;
+              const stepH = Math.max(4, Math.floor(totalH / steps));
+              octx.fillStyle = "rgba(10, 8, 16, 0.25)";
+              octx.fillRect(px + 2, stairTop + totalH, TILE - 4, 4);
+              for (let si = 0; si < steps; si++) {
+                const sy = stairTop + si * stepH;
+                octx.fillStyle = si % 2 === 0 ? "#e6dfd2" : "#dad1c1";
+                octx.fillRect(px + 4, sy, TILE - 8, Math.max(2, stepH - 2));
+                octx.fillStyle = "#595261";
+                octx.fillRect(px + 4, sy + Math.max(2, stepH - 2), TILE - 8, 2);
+              }
+              const leftAlsoStair = x > 0 && (cellStair(space, x - 1, y) === "ns" || cellStair(space, x - 1, y + 1) === "ns");
+              const rightAlsoStair = x + 1 < cols && (cellStair(space, x + 1, y) === "ns" || cellStair(space, x + 1, y + 1) === "ns");
+              octx.fillStyle = "#3c3645";
+              if (!leftAlsoStair) octx.fillRect(px + 1, stairTop - 2, 4, totalH + 2);
+              if (!rightAlsoStair) octx.fillRect(px + TILE - 5, stairTop - 2, 4, totalH + 2);
+            }
+          }
+        }
+      }
+    }
+    // 区域软标（密闭隔间改为动态 Pass 4 随照明显示）
     for (const z of zonesList) {
+      if (z.enclosed) continue;
       const zx = Number(z.x || 0) * TILE;
       const zy = Number(z.y || 0) * TILE;
       const zw = Number(z.w || 1) * TILE;
@@ -2822,106 +3362,97 @@ function renderViewport() {
       octx.fillText(zLbl, zx + 10, zy + 12.5);
       octx.restore();
     }
-    // 墙面窗景（仅室内房间绘制，户外城镇跳过）
+    // 墙面窗景（地下室绘铁栅通风窗；地上按 glass_wall 窗格位置绘制真实窗景，无则保留经典双窗兜底）
     if (wallRows > 0 && space.space_kind !== "town") {
-      const winCellX = Math.max(1, Math.min(cols - 3, Math.floor(cols / 2) - 1));
-      const winTileA = resolveTileMeta(space, winCellX, 0);
-      const winTileB = resolveTileMeta(space, winCellX + 1, 0);
-      if (winTileA.meta.is_wall && winTileB.meta.is_wall) {
-        const winX = winCellX * TILE;
-        const skyMap = { dawn: "#e89f8e", day: "#89cff0", dusk: "#c97968", night: "#1c2447" };
-        let winSky = skyMap[lighting.period] || "#89cff0";
-        if (lighting.period !== "night") {
-          if (wCode === "rain") winSky = "#5c6f8c";
-          else if (wCode === "cloudy") winSky = "#8c9bb0";
-          else if (wCode === "snow") winSky = "#9eb3cc";
+      if (Number(space.floor_index || 0) < 0) {
+        const ventX = Math.max(1, Math.min(cols - 2, Math.floor(cols / 2))) * TILE + 8;
+        octx.fillStyle = "#18141c";
+        octx.fillRect(ventX, 10, TILE - 16, 16);
+        octx.fillStyle = "#4b5162";
+        for (let vx = ventX + 4; vx < ventX + TILE - 18; vx += 6) {
+          octx.fillRect(vx, 12, 2, 12);
         }
-        octx.fillStyle = pal.sprite_base.outline || "#21181b";
-        octx.fillRect(winX + 4, 4, TILE * 2 - 8, TILE - 10);
-        octx.fillStyle = winSky;
-        octx.fillRect(winX + 8, 8, TILE * 2 - 16, TILE - 18);
-        if (lighting.period === "night") {
-          octx.fillStyle = "#fff5b8";
-          octx.fillRect(winX + 16, 14, 3, 3);
-          octx.fillRect(winX + 44, 18, 3, 3);
-          octx.fillRect(winX + 64, 12, 4, 4);
-        } else if (wCode === "clear" || wCode === "sakura") {
-          octx.fillStyle = "rgba(255,255,255,0.65)";
-          octx.fillRect(winX + 16, 13, 18, 5);
-          octx.fillRect(winX + 48, 16, 14, 4);
+      } else {
+        const glassRuns = [];
+        let runStart = -1;
+        for (let x = 0; x < cols; x++) {
+          const isGlass = (spaceTiles[x + ",0"] || "") === "glass_wall";
+          if (isGlass && runStart < 0) runStart = x;
+          else if (!isGlass && runStart >= 0) { glassRuns.push([runStart, x - runStart]); runStart = -1; }
         }
-        if (wCode === "rain") {
-          octx.strokeStyle = "rgba(190, 224, 255, 0.75)";
-          octx.lineWidth = 1.2;
-          for (let ri = 0; ri < 5; ri++) {
-            const rx = winX + 14 + ri * 14;
-            octx.beginPath();
-            octx.moveTo(rx, 11);
-            octx.lineTo(rx - 4, 24);
-            octx.stroke();
+        if (runStart >= 0) glassRuns.push([runStart, cols - runStart]);
+
+        if (glassRuns.length > 0) {
+          for (const [rx0, span] of glassRuns) {
+            drawIndoorWindowPane(octx, rx0 * TILE, span * TILE, lighting, period, wCode, pal);
           }
-        } else if (wCode === "snow") {
-          octx.fillStyle = "#eef6ff";
-          for (const [sx, sy] of [[16, 13], [30, 22], [54, 15], [68, 24]]) {
-            octx.fillRect(winX + sx, sy, 2, 2);
-          }
-        } else if (wCode === "sakura") {
-          octx.fillStyle = "#ffb6cf";
-          for (const [sx, sy] of [[18, 15], [56, 20], [66, 12]]) {
-            octx.fillRect(winX + sx, sy, 3, 2);
+        } else {
+          const winCellX = Math.max(1, Math.min(cols - 3, Math.floor(cols / 2) - 1));
+          const winTileA = resolveTileMeta(space, winCellX, 0);
+          const winTileB = resolveTileMeta(space, winCellX + 1, 0);
+          if (winTileA.meta.is_wall && winTileB.meta.is_wall) {
+            drawIndoorWindowPane(octx, winCellX * TILE, TILE * 2, lighting, period, wCode, pal);
           }
         }
-        octx.fillStyle = pal.sprite_base.outline || "#21181b";
-        octx.fillRect(winX + TILE - 2, 6, 4, TILE - 14);
       }
     }
     // 建筑屋顶、窗灯与招牌铭牌
     const warmWindow = lighting.period === "night" || lighting.period === "dusk";
+    const isTownHub = space.space_kind === "town";
     for (const b of buildingsList) {
+      const bElev = cellElev(space, Number(b.x || 0), Number(b.y || 0));
       const bx = Number(b.x || 0) * TILE;
-      const by = Number(b.y || 0) * TILE;
+      const by = Number(b.y || 0) * TILE - bElev * ELEV_LIFT_PX;
       const bw = Math.max(1, Number(b.w || 1)) * TILE;
       const bh = Math.max(1, Number(b.h || 1)) * TILE;
       const roofH = Math.max(TILE, Math.round(bh * 0.56));
-      const roofCol = b.roof_color || "#a85646";
       octx.save();
-      // 屋顶主体 + 檐口深边 + 屋脊亮条
-      octx.fillStyle = "#18131d";
-      octx.fillRect(bx - 3, by - 3, bw + 6, roofH + 5);
-      octx.fillStyle = roofCol;
-      octx.fillRect(bx, by, bw, roofH);
-      octx.fillStyle = "rgba(255,255,255,0.22)";
-      octx.fillRect(bx + 2, by + 3, bw - 4, 6);
-      octx.fillStyle = "rgba(0,0,0,0.25)";
-      octx.fillRect(bx, by + roofH - 6, bw, 6);
-      for (let rx = bx + 12; rx < bx + bw - 6; rx += 18) {
-        octx.fillStyle = "rgba(0,0,0,0.14)";
-        octx.fillRect(rx, by + 10, 2, roofH - 16);
-      }
-      // 下方立面小窗（避开门洞位置）
-      const winY = by + roofH + 8;
-      if (winY + 18 < by + bh) {
-        for (let wxCell = Number(b.x || 0); wxCell < Number(b.x || 0) + Number(b.w || 1); wxCell++) {
-          if (wxCell === Number(b.door_x) && Number(b.y || 0) + Number(b.h || 1) - 1 === Number(b.door_y)) {
-            continue;
-          }
-          if ((wxCell - Number(b.x || 0)) % 2 === 1) {
-            const wx = wxCell * TILE + 12;
-            octx.fillStyle = "#21181b";
-            octx.fillRect(wx, winY, 24, 18);
-            octx.fillStyle = warmWindow ? "#ffe484" : "#9cd4ec";
-            octx.fillRect(wx + 3, winY + 3, 18, 12);
-            octx.fillStyle = "#21181b";
-            octx.fillRect(wx + 11, winY + 3, 2, 12);
+      if (isTownHub) {
+        const roofCol = b.roof_color || "#a85646";
+        // 屋顶主体 + 檐口深边 + 屋脊亮条
+        octx.fillStyle = "#18131d";
+        octx.fillRect(bx - 3, by - 3, bw + 6, roofH + 5);
+        octx.fillStyle = roofCol;
+        octx.fillRect(bx, by, bw, roofH);
+        octx.fillStyle = "rgba(255,255,255,0.22)";
+        octx.fillRect(bx + 2, by + 3, bw - 4, 6);
+        octx.fillStyle = "rgba(0,0,0,0.25)";
+        octx.fillRect(bx, by + roofH - 6, bw, 6);
+        for (let rx = bx + 12; rx < bx + bw - 6; rx += 18) {
+          octx.fillStyle = "rgba(0,0,0,0.14)";
+          octx.fillRect(rx, by + 10, 2, roofH - 16);
+        }
+        // 下方立面小窗（避开门洞位置）
+        const winY = by + roofH + 8;
+        if (winY + 18 < by + bh) {
+          for (let wxCell = Number(b.x || 0); wxCell < Number(b.x || 0) + Number(b.w || 1); wxCell++) {
+            if (wxCell === Number(b.door_x) && Number(b.y || 0) + Number(b.h || 1) - 1 === Number(b.door_y)) {
+              continue;
+            }
+            if ((wxCell - Number(b.x || 0)) % 2 === 1) {
+              const wx = wxCell * TILE + 12;
+              octx.fillStyle = "#21181b";
+              octx.fillRect(wx, winY, 24, 18);
+              octx.fillStyle = warmWindow ? "#ffe484" : "#9cd4ec";
+              octx.fillRect(wx + 3, winY + 3, 18, 12);
+              octx.fillStyle = "#21181b";
+              octx.fillRect(wx + 11, winY + 3, 2, 12);
+            }
           }
         }
       }
-      // 建筑招牌铭牌
-      const signText = (b.icon ? b.icon + " " : "") + String(b.name || "建筑");
+      // 建筑招牌铭牌（室外城镇绘在屋顶，室内建筑群绘在门洞上方）
+      const signText = (b.icon ? b.icon + " " : "") + String(b.name || (isTownHub ? "建筑" : "房间"));
       octx.font = "bold 11px sans-serif";
-      const sw = Math.min(bw + 24, Math.max(72, Math.ceil(octx.measureText(signText).width) + 14));
-      const sx = Math.max(2, Math.min(W - sw - 2, bx + Math.round((bw - sw) / 2)));
-      const sy = Math.max(2, by + Math.round(roofH * 0.36) - 9);
+      const sw = isTownHub
+        ? Math.min(bw + 24, Math.max(72, Math.ceil(octx.measureText(signText).width) + 14))
+        : Math.max(56, Math.ceil(octx.measureText(signText).width) + 14);
+      const sx = isTownHub
+        ? Math.max(2, Math.min(W - sw - 2, bx + Math.round((bw - sw) / 2)))
+        : Math.max(2, Math.min(W - sw - 2, Number(b.door_x || 0) * TILE + Math.round((TILE - sw) / 2)));
+      const sy = isTownHub
+        ? Math.max(2, by + Math.round(roofH * 0.36) - 9)
+        : Math.max(2, Math.min(H - 20, Number(b.door_y || 0) * TILE - 20));
       octx.fillStyle = "rgba(18, 14, 24, 0.90)";
       octx.fillRect(sx, sy, sw, 18);
       octx.strokeStyle = "#ffd166";
@@ -2937,7 +3468,8 @@ function renderViewport() {
   }
   ctx.drawImage(state.terrainCache.canvas, 0, 0);
 
-  // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色
+  // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色（同步计算推门点亮遮罩）
+  const visAlphaGrid = computeIndoorVisibilityMask(space, snap.entities || [], snap.actors || []);
   const drawList = [];
   for (const ent of snap.entities) {
     if (Number(ent.z) < 0) continue;
@@ -2951,7 +3483,7 @@ function renderViewport() {
   let loopMoving = false;
   let loopResting = false;
   for (const act of snap.actors) {
-    if (act.space_id !== space.space_id) continue;
+    if (act.space_id !== space.space_id || act.actor_status === "missing") continue;
     const useDoll = act.map_style !== "portrait" && !!act.appearance;
     const st = pdStep(act, nowMs);
     let yBottom = st.cy + 1 + 0.12;
@@ -2972,8 +3504,9 @@ function renderViewport() {
   for (const item of drawList) {
     if (item.kind === "entity") {
       const ent = item.ent;
+      const entElev = cellElev(space, ent.x, ent.y);
       const dx = ent.x * TILE;
-      const dy = ent.y * TILE - (Number(ent.z) === 1 ? 12 : 0);
+      const dy = ent.y * TILE - entElev * ELEV_LIFT_PX - (Number(ent.z) === 1 ? 12 : 0);
       const dw = item.fw * TILE;
       const dh = item.fh * TILE;
       // 地面/桌面小投影
@@ -2996,6 +3529,8 @@ function renderViewport() {
       }
     } else {
       const act = item.act;
+      if (act.actor_status === "missing") continue;
+      const isIncap = act.actor_status === "incapacitated";
       const useDoll = item.useDoll;
       const st = item.st;
       const sp = act.sprite || {};
@@ -3004,11 +3539,26 @@ function renderViewport() {
       const useStandee = Boolean(standeeImg && standeeImg.complete && standeeImg.naturalWidth > 0);
       const gx = useDoll ? st.cx : act.x;
       const gy = useDoll ? st.cy : act.y;
+      const actLift = Math.round(sampleSmoothElev(space, gx, gy) * ELEV_LIFT_PX);
       let dw = TILE;
       let dh = Math.round(TILE * 1.5);
       let dx = gx * TILE;
-      let dy = (gy + 1) * TILE - dh;
+      let dy = (gy + 1) * TILE - dh - actLift;
       let dollIcon = "";
+      const drawBody = (fn) => {
+        if (!isIncap) {
+          fn();
+          return;
+        }
+        ctx.save();
+        const rcx = dx + dw / 2;
+        const rcy = (gy + 1) * TILE - actLift - Math.min(dw, dh) * 0.45;
+        ctx.translate(rcx, rcy);
+        ctx.rotate(Math.PI / 2);
+        ctx.translate(-rcx, -rcy);
+        fn();
+        ctx.restore();
+      };
 
       if (useDoll) {
         const app = act.appearance;
@@ -3021,7 +3571,7 @@ function renderViewport() {
           const bfw = bed ? ((bed.footprint && bed.footprint[0]) || 1) : 1;
           const bfh = bed ? ((bed.footprint && bed.footprint[1]) || 1) : 1;
           const ccx = bed ? (bed.x + bfw / 2) * TILE : (act.x + 0.5) * TILE;
-          const ccy = bed ? (bed.y + bfh / 2) * TILE : (act.y + 0.5) * TILE;
+          const ccy = (bed ? (bed.y + bfh / 2) * TILE : (act.y + 0.5) * TILE) - actLift;
           const breathe = Math.floor(nowMs / 700) % 2;
           const cv = pdSprite(app, "down", breathe, "", "lying");
           dw = Math.round(cv.width * S);
@@ -3032,22 +3582,22 @@ function renderViewport() {
           pdDrawZzz(ctx, dx + dw * 0.22, dy + 4, nowMs);
         } else {
           const live = act.runtime_activity;
-          const liveVerb = live && live.phase === "engaging" && !st.moving ? live.verb : "";
+          const liveVerb = !isIncap && live && live.phase === "engaging" && !st.moving ? live.verb : "";
           const cv = pdSprite(app, st.dir, st.frame, pdPoseForVerb(liveVerb) || st.pose, st.sleep === "sit" ? "sit" : "");
           dw = Math.round(cv.width * S);
           dh = Math.round(cv.height * S);
           dx = Math.round(gx * TILE + (TILE - dw) / 2);
-          const bob = (st.moving && (st.frame === 1 || st.frame === 2))
+          const bob = isIncap ? 0 : ((st.moving && (st.frame === 1 || st.frame === 2))
             ? -Math.round(S)
-            : (!st.moving ? Math.round(Math.sin(nowMs * 0.0045 + gx + gy)) : 0);
-          dy = Math.round((gy + 1) * TILE - dh + bob);
+            : (!st.moving ? Math.round(Math.sin(nowMs * 0.0045 + gx + gy)) : 0));
+          dy = Math.round((gy + 1) * TILE - dh + bob - actLift);
           if (act.is_player) {
             if (state.uiMode === "roam" && !state.drag) {
               const wrap = el("stage-wrap");
               if (wrap) {
                 const zoom = state.zoom || 1;
                 const targetX = Math.max(0, (gx + 0.5) * TILE * zoom - wrap.clientWidth / 2);
-                const targetY = Math.max(0, (gy + 0.5) * TILE * zoom - wrap.clientHeight / 2);
+                const targetY = Math.max(0, ((gy + 0.5) * TILE - actLift) * zoom - wrap.clientHeight / 2);
                 const maxX = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
                 const maxY = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
                 const clampedX = Math.min(maxX, targetX);
@@ -3060,35 +3610,41 @@ function renderViewport() {
             ctx.strokeStyle = "#7cd4ff";
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.ellipse(gx * TILE + TILE / 2, (gy + 1) * TILE - 4, 15, 6, 0, 0, Math.PI * 2);
+            ctx.ellipse(gx * TILE + TILE / 2, (gy + 1) * TILE - 4 - actLift, 15, 6, 0, 0, Math.PI * 2);
             ctx.stroke();
             ctx.restore();
           }
           ctx.fillStyle = "rgba(0,0,0,0.28)";
-          ctx.fillRect(Math.round(gx * TILE + 8), Math.round((gy + 1) * TILE - 6), TILE - 16, 5);
-          ctx.drawImage(cv, dx, dy, dw, dh);
-          if (liveVerb || st.pose) dollIcon = pdIconForVerb(liveVerb || st.poseVerb);
+          ctx.fillRect(Math.round(gx * TILE + 8), Math.round((gy + 1) * TILE - 6 - actLift), TILE - 16, 5);
+          drawBody(() => ctx.drawImage(cv, dx, dy, dw, dh));
+          if (liveVerb || (!isIncap && st.pose)) dollIcon = pdIconForVerb(liveVerb || st.poseVerb);
         }
       } else if (useStandee) {
         const ratio = standeeImg.naturalWidth / Math.max(1, standeeImg.naturalHeight);
         dh = Math.round(TILE * 2.15);
         dw = Math.max(Math.round(TILE * 0.95), Math.min(Math.round(TILE * 1.85), Math.round(dh * ratio)));
         dx = Math.round((gx + 0.5) * TILE - dw / 2);
-        dy = (gy + 1) * TILE - dh - 2;
+        dy = (gy + 1) * TILE - dh - 2 - actLift;
         ctx.fillStyle = "rgba(0,0,0,0.3)";
-        ctx.fillRect(gx * TILE + 8, (gy + 1) * TILE - 7, TILE - 16, 5);
-        ctx.save();
-        ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(standeeImg, dx, dy, dw, dh);
-        ctx.restore();
+        ctx.fillRect(gx * TILE + 8, (gy + 1) * TILE - 7 - actLift, TILE - 16, 5);
+        drawBody(() => {
+          ctx.save();
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(standeeImg, dx, dy, dw, dh);
+          ctx.restore();
+        });
       } else {
         ctx.fillStyle = "rgba(0,0,0,0.28)";
-        ctx.fillRect(dx + 10, (gy + 1) * TILE - 7, TILE - 20, 5);
-        drawSprite(ctx, sp, sp.pixels || [], pal, dx, dy, dw, dh, act.name, sp.accent_color);
+        ctx.fillRect(dx + 10, (gy + 1) * TILE - 7 - actLift, TILE - 20, 5);
+        drawBody(() => drawSprite(ctx, sp, sp.pixels || [], pal, dx, dy, dw, dh, act.name, sp.accent_color));
       }
       if (dollIcon) pdDrawIcon(ctx, dx + dw / 2, dy, dollIcon);
 
-      // 名字标与实时心情标签
+      // 名字标与实时心情标签（未点亮密闭隔间中的 NPC 暂隐去头顶标与对白）
+      const cellVis = visAlphaGrid ? (visAlphaGrid[Math.max(0, Math.min(rows - 1, Math.round(gy))) * cols + Math.max(0, Math.min(cols - 1, Math.round(gx)))] ?? 1) : 1;
+      if (!act.is_player && cellVis < 0.35) {
+        continue;
+      }
       const labelCx = gx * TILE + TILE / 2;
       const labelW = Math.max(TILE - 4, 58);
       const labelX = Math.max(2, Math.min(W - labelW - 2, labelCx - labelW / 2));
@@ -3103,9 +3659,16 @@ function renderViewport() {
       const badgeText = act.is_player ? "你·主控" : (exprTag ? (act.name.slice(0, 3) + "·" + exprTag.slice(0, 3)) : act.name.slice(0, 4));
       ctx.fillText(badgeText, labelX + labelW / 2, labelY + 6.5);
 
-      // 状态静态角标（休息 Zzz / 沉默 ... / 多行彩色对白气泡 / 手持）
-      const thoughtTxt = String((act.autonomy && act.autonomy.last_thought) || "").trim();
-      if (act.posture === "resting") {
+      // 状态静态角标（异常 ❗ / 休息 Zzz / 沉默 ... / 多行彩色对白气泡 / 手持）
+      const mindHidden = Boolean(snap.opaque_minds && !act.is_player);
+      const thoughtTxt = mindHidden ? "" : String((act.autonomy && act.autonomy.last_thought) || "").trim();
+      if (isIncap) {
+        ctx.fillStyle = "#5a1820";
+        ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 13), 20, 13);
+        ctx.fillStyle = "#ff7878";
+        ctx.font = "bold 10px monospace";
+        ctx.fillText("❗", labelX + labelW - 10, Math.max(8, labelY - 6.5));
+      } else if (act.posture === "resting") {
         if (!useDoll) {
           ctx.fillStyle = "#181d2e";
           ctx.fillRect(labelX + labelW - 22, Math.max(2, labelY - 12), 22, 12);
@@ -3113,7 +3676,7 @@ function renderViewport() {
           ctx.font = "bold 10px monospace";
           ctx.fillText("Zzz", labelX + labelW - 11, Math.max(8, labelY - 6));
         }
-      } else if (act.vitals && act.vitals.disengaged) {
+      } else if (!mindHidden && act.vitals && act.vitals.disengaged) {
         ctx.fillStyle = "#2b1b24";
         ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 12), 20, 12);
         ctx.fillStyle = "#ff9dbb";
@@ -3150,7 +3713,7 @@ function renderViewport() {
         ctx.strokeRect(px0, py0, pw, 14);
         ctx.fillStyle = "#cceeff";
         ctx.font = "bold 10px monospace";
-        ctx.fillText("[E] 对话", px0 + pw / 2, py0 + 7);
+        ctx.fillText(isIncap ? "[E] 查探" : "[E] 对话", px0 + pw / 2, py0 + 7);
       }
       if (act.holding_id) {
         ctx.fillStyle = "#ffd166";
@@ -3162,12 +3725,65 @@ function renderViewport() {
     }
   }
 
-  // 4. 夜晚光影暗罩与台灯暖光圈 + 轻天气粒子
+  // 4. 夜晚光影暗罩、窗前光束、灯火暖光圈与「推门点亮」黑幕 + 轻天气粒子
+  if (space.space_kind !== "town" && Number(space.floor_index || 0) >= 0 && wallRows > 0 && wCode !== "rain") {
+    const shaftColorMap = {
+      dawn: [255, 204, 148, 0.16],
+      day: [255, 248, 205, 0.14],
+      dusk: [255, 165, 105, 0.18],
+      night: [155, 190, 255, 0.11],
+    };
+    const [sr, sg, sb, sa] = shaftColorMap[period] || shaftColorMap.day;
+    for (let x = 0; x < cols; x++) {
+      if ((spaceTiles[x + ",0"] || "") !== "glass_wall") continue;
+      const wVis = visAlphaGrid ? (visAlphaGrid[Math.min(rows - 1, wallRows) * cols + x] ?? 1) : 1;
+      if (wVis < 0.35) continue;
+      const bx0 = x * TILE + 6;
+      const bx1 = (x + 1) * TILE - 6;
+      const by0 = wallRows * TILE - 3;
+      const by1 = Math.min(H, by0 + TILE * 2.35);
+      const shiftX = TILE * 0.7;
+      const sGrad = ctx.createLinearGradient(bx0, by0, bx0 + shiftX, by1);
+      sGrad.addColorStop(0, "rgba(" + sr + "," + sg + "," + sb + "," + (sa * wVis).toFixed(3) + ")");
+      sGrad.addColorStop(1, "rgba(" + sr + "," + sg + "," + sb + ",0)");
+      ctx.fillStyle = sGrad;
+      ctx.beginPath();
+      ctx.moveTo(bx0, by0);
+      ctx.lineTo(bx1, by0);
+      ctx.lineTo(bx1 + shiftX, by1);
+      ctx.lineTo(bx0 + shiftX, by1);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  if (space.space_kind !== "town" && !lighting.is_dark) {
+    const haloAlpha = (period === "night" || period === "dusk") ? 0.25 : 0.14;
+    for (const ent of snap.entities || []) {
+      if (ent.space_id !== space.space_id || Number(ent.z || 0) < 0) continue;
+      const tags = Array.isArray(ent.tags) ? ent.tags : [];
+      if (!tags.some((t) => t === "light_source" || t === "lamp" || t === "stove" || t === "fireplace")) continue;
+      if (ent.traits?.switchable && ent.traits.switchable.is_on === false) continue;
+      const cyCell = Math.max(0, Math.min(rows - 1, Math.round(ent.y + ((ent.footprint && ent.footprint[1]) || 1) - 1)));
+      const cxCell = Math.max(0, Math.min(cols - 1, Math.round(ent.x)));
+      const lVis = visAlphaGrid ? (visAlphaGrid[cyCell * cols + cxCell] ?? 1) : 1;
+      if (lVis < 0.35) continue;
+      const [fw, fh] = ent.footprint || [1, 1];
+      const lx = (ent.x + fw * 0.5) * TILE;
+      const ly = (ent.y + fh * 0.5) * TILE;
+      const grad = ctx.createRadialGradient(lx, ly, 4, lx, ly, TILE * 2.1);
+      grad.addColorStop(0, "rgba(255, 208, 132, " + (haloAlpha * lVis).toFixed(3) + ")");
+      grad.addColorStop(1, "rgba(255, 208, 132, 0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(lx - TILE * 2.2, ly - TILE * 2.2, TILE * 4.4, TILE * 4.4);
+    }
+  }
   if (lighting.is_dark) {
     ctx.fillStyle = pal.room.night_mask || "rgba(14, 18, 42, 0.48)";
     ctx.fillRect(0, 0, W, H);
   } else if (lighting.has_lamp_on) {
     for (const lp of lighting.lamp_positions || []) {
+      const lVis = visAlphaGrid ? (visAlphaGrid[Math.max(0, Math.min(rows - 1, lp.y)) * cols + Math.max(0, Math.min(cols - 1, lp.x))] ?? 1) : 1;
+      if (lVis < 0.35) continue;
       const cx = (lp.x + 0.5) * TILE;
       const cy = (lp.y + 0.5) * TILE;
       const grad = ctx.createRadialGradient(cx, cy, 8, cx, cy, TILE * 2.5);
@@ -3175,6 +3791,45 @@ function renderViewport() {
       grad.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, W, H);
+    }
+  }
+  if (visAlphaGrid) {
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const v = visAlphaGrid[y * cols + x];
+        if (v < 0.99) {
+          ctx.fillStyle = "rgba(8, 7, 15, " + ((1 - v) * 0.80).toFixed(3) + ")";
+          ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        }
+      }
+    }
+    for (const z of zonesList) {
+      if (!z.enclosed) continue;
+      let bestVis = 0;
+      const zx0 = Math.max(0, Number(z.x || 0));
+      const zy0 = Math.max(0, Number(z.y || 0));
+      const zx1 = Math.min(cols, zx0 + Math.max(1, Number(z.w || 1)));
+      const zy1 = Math.min(rows, zy0 + Math.max(1, Number(z.h || 1)));
+      for (let y = zy0; y < zy1; y++) {
+        for (let x = zx0; x < zx1; x++) {
+          const cv = visAlphaGrid[y * cols + x];
+          if (cv > bestVis) bestVis = cv;
+        }
+      }
+      if (bestVis < 0.45) continue;
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, (bestVis - 0.30) / 0.70);
+      ctx.font = "bold 10px monospace";
+      const zLbl = "✦ " + String(z.name || "");
+      const zbw = Math.ceil(ctx.measureText(zLbl).width) + 10;
+      const px0 = zx0 * TILE + 4;
+      const py0 = zy0 * TILE + 4;
+      ctx.fillStyle = "rgba(12, 10, 18, 0.72)";
+      ctx.fillRect(px0, py0, zbw, 15);
+      ctx.fillStyle = z.color || "#ffd166";
+      ctx.textBaseline = "middle";
+      ctx.fillText(zLbl, px0 + 5, py0 + 7.5);
+      ctx.restore();
     }
   }
   if (space.space_kind === "town") {
@@ -3310,18 +3965,21 @@ function renderTownNavBar() {
   }
   const sp = snap.space;
   const kind = sp.space_kind || "room";
-  if (kind !== "town" && kind !== "building") {
+  const hasChildren = Array.isArray(snap.child_spaces) && snap.child_spaces.length > 0;
+  const buildingFloors = Array.isArray(snap.building_floors) ? snap.building_floors : [];
+  const isMultiFloorBuilding = kind === "building" && buildingFloors.length > 1;
+  if (kind !== "town" && kind !== "building" && !hasChildren) {
     bar.classList.add("hidden");
     return;
   }
   bar.classList.remove("hidden");
   bar.innerHTML = "";
 
-  if (kind === "town") {
+  if (kind === "town" || (hasChildren && !isMultiFloorBuilding && !snap.parent_space)) {
     const titlePill = document.createElement("span");
     titlePill.className = "pill";
     titlePill.style.color = "var(--accent-2)";
-    titlePill.textContent = "🏘️ " + (sp.name || "城镇");
+    titlePill.textContent = (kind === "town" ? "🏘️ " : "🏛️ ") + (sp.name || (kind === "town" ? "城镇" : "建筑群"));
     bar.appendChild(titlePill);
 
     if (snap.current_zone && snap.current_zone.name) {
@@ -3359,14 +4017,45 @@ function renderTownNavBar() {
     const crumb = document.createElement("span");
     crumb.className = "pill";
     crumb.style.color = "var(--accent-2)";
-    crumb.textContent = "🏘️ " + (parent ? parent.name : "城镇") + " › " + (sp.name || "室内") + (sp.district ? (" · " + sp.district) : "");
+    const parentIcon = parent && parent.space_kind === "town" ? "🏘️ " : "🏛️ ";
+    crumb.textContent = parentIcon + (parent ? parent.name : "主厅") + " › " + (sp.name || "室内") + (sp.district ? (" · " + sp.district) : "");
     bar.appendChild(crumb);
 
-    const exitPortal = (snap.entities || []).find((e) => e.traits && e.traits.portal && e.traits.portal.target_space_id);
+    if (snap.current_zone && snap.current_zone.name) {
+      const zPill = document.createElement("span");
+      zPill.className = "pill";
+      zPill.style.color = snap.current_zone.color || "#ffd166";
+      zPill.textContent = "📍 " + snap.current_zone.name;
+      bar.appendChild(zPill);
+    }
+
+    if (buildingFloors.length > 1) {
+      const ascFloors = [...buildingFloors].sort((a, b) => Number(a.floor_index || 0) - Number(b.floor_index || 0));
+      for (const fl of ascFloors) {
+        const flBtn = document.createElement("button");
+        flBtn.className = "town-chip" + (fl.is_current ? " has-actor" : "");
+        if (fl.is_current) {
+          flBtn.style.borderColor = "#ffd166";
+          flBtn.style.color = "#fff8e8";
+        }
+        flBtn.title = fl.is_current ? "当前所在楼层" : ("前往「" + (fl.name || fl.floor_label) + "」");
+        flBtn.textContent = (fl.is_current ? "🪜 " : "") + String(fl.floor_label || fl.name || "");
+        flBtn.onclick = () => {
+          if (fl.is_current) return;
+          const directStair = (snap.entities || []).find((e) => e.traits?.portal?.target_space_id === fl.space_id);
+          if (directStair) runDoorTransition(directStair.entity_id);
+          else enterWorld(fl.space_id);
+        };
+        bar.appendChild(flBtn);
+      }
+    }
+
+    const exitPortal = (parent && (snap.entities || []).find((e) => e.traits?.portal?.target_space_id === parent.space_id))
+      || (snap.entities || []).find((e) => e.traits?.portal?.target_space_id);
     const btnBack = document.createElement("button");
     btnBack.className = "px-btn primary";
     btnBack.style.padding = "3px 9px";
-    btnBack.textContent = "🚪 走出大门返回" + (parent ? ("「" + parent.name + "」") : "街道");
+    btnBack.textContent = (parent && parent.space_kind === "town" ? "🚪 走出大门返回" : "🪜 返回") + (parent ? ("「" + parent.name + "」") : "街道");
     btnBack.onclick = () => {
       if (exitPortal) runDoorTransition(exitPortal.entity_id);
       else if (parent && parent.space_id) enterWorld(parent.space_id);
@@ -3427,12 +4116,28 @@ function renderTownMinimap() {
   const ctx = mm.getContext("2d");
   ctx.imageSmoothingEnabled = false;
   const tiles = sp.tiles || {};
+  const hasMinimapElev = Boolean(sp.elevations && Object.keys(sp.elevations).length > 0);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const tid = tiles[x + "," + y] || "";
       const meta = state.tileMap.get(tid);
       ctx.fillStyle = (meta && meta.main) || "#4e8c46";
       ctx.fillRect(x * scale, y * scale, scale, scale);
+      if (hasMinimapElev) {
+        const ev = cellElev(sp, x, y);
+        if (ev > 0) {
+          ctx.fillStyle = ev === 2 ? "rgba(255,255,255,0.24)" : "rgba(255,255,255,0.12)";
+          ctx.fillRect(x * scale, y * scale, scale, scale);
+        }
+        if (cellStair(sp, x, y)) {
+          ctx.fillStyle = "#ffe29a";
+          ctx.fillRect(x * scale, y * scale, scale, scale);
+        } else if (ev > 0) {
+          ctx.fillStyle = "#1c1624";
+          if (y + 1 < h && ev > cellElev(sp, x, y + 1)) ctx.fillRect(x * scale, (y + 1) * scale - 1, scale, 1);
+          if (x + 1 < w && ev > cellElev(sp, x + 1, y)) ctx.fillRect((x + 1) * scale - 1, y * scale, 1, scale);
+        }
+      }
     }
   }
   for (const b of sp.buildings || []) {
@@ -3468,7 +4173,7 @@ function renderTownMinimap() {
 function renderWorldHub() {
   const snap = state.snap;
   const grid = el("world-card-grid");
-  if (!grid || !snap) return;
+  if (!grid || !snap || state.view !== "hub") return;
 
   const spaces = snap.spaces || [];
   const childrenByParent = new Map();
@@ -3498,7 +4203,7 @@ function renderWorldHub() {
   const hubWPill = el("hub-weather-pill");
   if (hubWPill) hubWPill.textContent = (hw.icon || "☀️") + " " + (hw.label || "晴朗");
 
-  const actors = snap.actors || [];
+  const actors = (snap.actors || []).filter((actor) => spaceIdSet.has(actor.space_id));
   el("hub-actor-summary").textContent = actors.length
     ? ("已导入角色：" + actors.map((a) => a.name).join("、"))
     : "尚未导入角色（点击上方「导入角色」）";
@@ -3632,9 +4337,22 @@ function renderTopbar() {
   }
   SoundFX.syncWeather(wInfo.current || "clear", (sp.space_kind || "room") === "town");
 
+  const ovBtn = el("btn-external-overlay");
+  if (ovBtn) {
+    const ov = snap.external_overlay;
+    const hasOv = Boolean(
+      ov && (ov.title || ov.badge || ov.summary || ov.sections?.length || ov.actions?.length || ov.cards?.length)
+    );
+    ovBtn.classList.toggle("hidden", !hasOv);
+    if (hasOv) {
+      ovBtn.textContent = "📜 " + (ov.badge || ov.title || "外部面板");
+      ovBtn.title = ov.summary || ov.title || "打开外部事件/情报面板";
+    }
+  }
+
   const sel = el("actor-select");
   sel.innerHTML = "";
-  const npcActors = (snap.actors || []).filter((a) => !a.is_player);
+  const npcActors = (snap.actors || []).filter((a) => !a.is_player && a.actor_status !== "missing");
   if (!npcActors.length) {
     const opt = document.createElement("option");
     opt.value = "";
@@ -3653,6 +4371,121 @@ function renderTopbar() {
       sel.appendChild(opt);
     }
   }
+}
+
+function isActorMindHidden(act) {
+  return Boolean(state.snap?.opaque_minds && act && !act.is_player);
+}
+
+function openExternalOverlayModal(ov = state.snap?.external_overlay) {
+  if (!ov) return toast("当前暂无可查看的外部面板", true);
+  const cards = [];
+  const selected = new Set();
+  const limit = ov.select_limit || 0;
+  function renderCards(rows) {
+    if (!rows?.length) return "";
+    const markup = rows.map((card) => {
+      const index = cards.push(card) - 1;
+      const icon = /^data:image\/png;base64,[a-zA-Z0-9+/=]+$/.test(card.icon_data_url || "")
+        ? '<img width="24" height="24" style="image-rendering:pixelated" alt="" src="' + esc(card.icon_data_url) + '">'
+        : "";
+      const content = icon + '<span><strong>' + esc(card.title || "") + '</strong>'
+        + (card.tag ? ' <small>' + esc(card.tag) + '</small>' : "")
+        + (card.subtitle ? '<br><span class="muted">' + esc(card.subtitle) + '</span>' : "") + '</span>';
+      if (!limit) {
+        const items = card.items?.length ? '<ul>' + card.items.map((item) => '<li>' + esc(item) + '</li>').join("") + '</ul>' : "";
+        return '<div class="external-overlay-card"><div>' + content + items + '</div></div>';
+      }
+      if (card.selected && selected.size < limit) selected.add(card.id);
+      return '<button type="button" class="px-btn external-overlay-card" data-external-card="' + index
+        + '" aria-pressed="' + selected.has(card.id) + '">' + content + '</button>';
+    }).join("");
+    return '<div style="display:grid;gap:6px;margin:6px 0;">' + markup + '</div>';
+  }
+  let body = "";
+  if (ov.badge) {
+    body += '<div style="margin-bottom:8px;"><span class="pill">' + esc(ov.badge) + "</span></div>";
+  }
+  if (ov.summary) {
+    body += '<div style="font-size:12px;line-height:1.65;margin-bottom:10px;color:var(--text);">' + esc(ov.summary) + "</div>";
+  }
+  for (const sec of (ov.sections || [])) {
+    body += '<div style="border:1px solid var(--border);background:var(--panel-2);padding:8px 10px;margin-bottom:8px;">';
+    if (sec.heading) {
+      body += '<div style="font-size:12px;font-weight:bold;color:var(--accent-2);margin-bottom:4px;">' + esc(sec.heading) + "</div>";
+    }
+    if (sec.body) {
+      body += '<div style="font-size:11px;line-height:1.6;color:var(--text);">' + esc(sec.body) + "</div>";
+    }
+    if (Array.isArray(sec.items) && sec.items.length) {
+      body += '<ul style="margin:4px 0 0 16px;padding:0;font-size:11px;line-height:1.55;color:var(--muted);">';
+      for (const item of sec.items) {
+        body += "<li>" + esc(item) + "</li>";
+      }
+      body += "</ul>";
+    }
+    body += renderCards(sec.cards) + "</div>";
+  }
+  body += renderCards(ov.cards);
+  if (!body) body = '<div style="font-size:12px;color:var(--muted);">暂无详情内容。</div>';
+  const buttons = (ov.actions || []).map((actBtn) => ({
+    label: actBtn.label,
+    cls: actBtn.style === "primary" ? "primary" : "",
+    onClick: async (btnEl) => {
+      if (actBtn.required_selection && selected.size !== actBtn.required_selection) return;
+      btnEl.disabled = true;
+      try {
+        const res = await runAction("external_overlay_action", {
+          space_id: state.snap?.space?.space_id || "",
+          action_id: actBtn.action_id,
+          payload: { selected_ids: [...selected], context_id: ov.context_id || "" },
+        }, false);
+        if (res.snapshot) applySnapshot(res.snapshot, res.terminal, res.chat_history);
+        const ovRes = res.overlay_result || {};
+        if (!res.handled && ovRes.error) {
+          toast(ovRes.error, true);
+        } else if (ovRes.message) {
+          toast(ovRes.message);
+        }
+        if (ovRes.close_modal || !state.snap?.external_overlay) {
+          closeModal();
+        } else {
+          openExternalOverlayModal(state.snap.external_overlay);
+        }
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btnEl.disabled = false;
+      }
+    },
+  }));
+  buttons.push({ label: "关闭", cls: "", onClick: closeModal });
+  showModal(ov.title || "外部事件面板", body, buttons);
+  state.externalOverlayContext = ov.context_id || "";
+  const cardButtons = [...el("modal-body").querySelectorAll("[data-external-card]")];
+  const actionButtons = [...el("modal-foot").querySelectorAll("button")];
+  const updateSelection = () => {
+    cardButtons.forEach((button) => {
+      const id = cards[Number(button.dataset.externalCard)].id;
+      button.setAttribute("aria-pressed", String(selected.has(id)));
+      button.disabled = !selected.has(id) && selected.size >= limit && limit !== 1;
+    });
+    (ov.actions || []).forEach((action, index) => {
+      actionButtons[index].disabled = Boolean(action.required_selection && selected.size !== action.required_selection);
+    });
+  };
+  cardButtons.forEach((button) => {
+    button.onclick = () => {
+      const id = cards[Number(button.dataset.externalCard)].id;
+      if (selected.has(id)) selected.delete(id);
+      else {
+        if (limit === 1) selected.clear();
+        if (selected.size < limit) selected.add(id);
+      }
+      updateSelection();
+    };
+  });
+  updateSelection();
 }
 
 function makeThumbCanvas(bp, palette, frame = null) {
@@ -3860,9 +4693,14 @@ function renderDialogueDock() {
   moodEl.textContent = moodWord + " · 精力 " + Math.round(Number(vit.energy || 0) * 100) + "%";
   const goalBadge = el("chat-goal-badge");
   if (goalBadge) {
-    const aut = act.autonomy || {};
-    goalBadge.textContent = "🎯 " + (aut.current_goal || "四处打量");
-    goalBadge.title = aut.last_thought ? ("心声：" + aut.last_thought) : goalBadge.textContent;
+    if (isActorMindHidden(act)) {
+      goalBadge.textContent = "🕶 暗箱视角";
+      goalBadge.title = "暗箱视角下不可查看他人内在目标";
+    } else {
+      const aut = act.autonomy || {};
+      goalBadge.textContent = "🎯 " + (aut.current_goal || "四处打量");
+      goalBadge.title = aut.last_thought ? ("心声：" + aut.last_thought) : goalBadge.textContent;
+    }
   }
 
   const hist = state.chatHistory || [];
@@ -4073,14 +4911,20 @@ function renderStatusPanel() {
     el("v-energy").textContent = Number(vit.energy || 0).toFixed(2);
     el("v-sleep").textContent = Number(vit.sleep_pressure || 0).toFixed(2);
     el("v-mood").textContent = Number(vit.mood_v || 0).toFixed(2);
-    el("aut-drive").textContent = aut.current_drive || "curiosity";
-    el("aut-goal").textContent = "🎯 " + (aut.current_goal || "四处打量");
-    el("aut-thought").textContent = aut.last_thought ? ("💭 " + aut.last_thought) : "💭 安静地待在房间里";
+    if (isActorMindHidden(act)) {
+      el("aut-drive").textContent = "—";
+      el("aut-goal").textContent = "🔒 内心未公开";
+      el("aut-thought").textContent = "💭（处于暗箱视角，无法窥视他人内心）";
+    } else {
+      el("aut-drive").textContent = aut.current_drive || "curiosity";
+      el("aut-goal").textContent = "🎯 " + (aut.current_goal || "四处打量");
+      el("aut-thought").textContent = aut.last_thought ? ("💭 " + aut.last_thought) : "💭 安静地待在房间里";
+    }
     el("v-full").textContent = Math.max(0, Math.round((1 - Number(aut.hunger || 0)) * 100)) + "%";
     el("v-curiosity").textContent = Math.round(Number(aut.curiosity || 0) * 100) + "%";
   }
 
-  renderCognitiveStatus(act && snap.active_cognition);
+  renderCognitiveStatus(isActorMindHidden(act) ? null : (act && snap.active_cognition));
   renderScheduleStatus(act, snap.active_schedule);
   const relBox = el("actor-relations-list");
   if (relBox) {
@@ -4201,6 +5045,10 @@ function renderInspector() {
   const subEl = el("insp-sub");
   const actsEl = el("insp-acts");
   actsEl.innerHTML = "";
+  if (isStoryWorld()) {
+    boxEl.classList.add("hidden");
+    return;
+  }
 
   const ent = snap && snap.entities.find((e) => e.entity_id === state.selectedEntityId);
   if (!ent) {
@@ -4218,7 +5066,7 @@ function renderInspector() {
 
   const tags = (ent.state_tags || []).join(" · ");
   titleEl.textContent = "[" + ent.entity_id + "] " + ent.name + " (" + ent.x + "," + ent.y + " z=" + ent.z + ")" + (tags ? "｜" + tags : "");
-  subEl.textContent = ent.brief + " — " + ent.detail;
+  subEl.textContent = ent.detail ? ent.brief + " — " + ent.detail : ent.brief;
 
   const tr = ent.traits || {};
   const addAct = (label, fn, cls) => {
@@ -4419,6 +5267,7 @@ function setupCanvasEvents() {
       }
       return;
     }
+    if (isStoryWorld()) return;
     const cell = canvasCellFromEvent(ev);
     if (state.tool === "paint_tile") {
       state.drag = {
@@ -4556,7 +5405,8 @@ function setupCanvasEvents() {
   });
 
   canvas.addEventListener("dblclick", (ev) => {
-    if (!state.snap || state.uiMode === "build" || state.tool !== "select" || state.selectedBlueprintId) return;
+    if (!state.snap || state.uiMode === "build" || state.tool !== "select" || state.selectedBlueprintId
+        || (isStoryWorld() && state.uiMode === "roam")) return;
     const cell = canvasCellFromEvent(ev);
     const hit = hitTestCanvas(cell.x, cell.y);
     if (hit && hit.kind === "entity") {
@@ -4566,7 +5416,7 @@ function setupCanvasEvents() {
         return;
       }
     }
-    if (!hit && state.uiMode === "play" && state.snap.active_actor_id) {
+    if (!hit && !isStoryWorld() && state.uiMode === "play" && state.snap.active_actor_id) {
       const act = (state.snap.actors || []).find((a) => a.actor_id === state.snap.active_actor_id);
       if (act && act.space_id === state.snap.active_space_id) {
         runAction("move_actor", {
@@ -4584,6 +5434,7 @@ function setupCanvasEvents() {
 
 /* ── 页内像素弹层实现（禁止原生 alert / confirm / prompt）── */
 function showModal(title, bodyHtml, buttons, narrow) {
+  state.externalOverlayContext = null;
   el("modal-title").textContent = title;
   el("modal-card").className = "modal-card" + (narrow ? " narrow" : "");
   el("modal-body").innerHTML = bodyHtml;
@@ -4599,6 +5450,7 @@ function showModal(title, bodyHtml, buttons, narrow) {
   el("modal-mask").classList.remove("hidden");
 }
 function closeModal() {
+  state.externalOverlayContext = null;
   el("modal-mask").classList.add("hidden");
   state.inventoryPanel = null;
 }
@@ -4696,7 +5548,7 @@ async function inventoryCommand(operation, args = {}) {
     while (roamSyncInFlight) await roamSyncInFlight;
     if (state.snap?.space?.space_id !== sid) return false;
     const res = await runAction("player_inventory", {
-      space_id: sid, operation, facing, chest_id: panel?.chestId || "", ...args,
+      player_id: state.playerId, space_id: sid, operation, facing, chest_id: panel?.chestId || "", ...args,
     }, false);
     if (state.snap?.space?.space_id !== sid) return false;
     state._interactGen = (state._interactGen | 0) + 1;
@@ -6044,6 +6896,7 @@ function openAddTownBuildingModal(townSid) {
 }
 
 function openWorldMenuModal() {
+  if (isStoryWorld()) return;
   const snap = state.snap;
   if (!snap) return;
   const sp = snap.space || {};
@@ -6141,10 +6994,14 @@ function renderLiveActivity(live) {
     adjusted: "根据行动结果降低偏置", unavailable: "反思暂不可用",
     preempted: "前额叶切换目标", social_act: "对话形成约定",
   };
-  const latest = live && live.reflection && live.reflection.at(-1);
-  el("live-reflection").textContent = latest
-    ? (labels[latest.status] || latest.status) + (latest.detail ? " · " + latest.detail : "")
-    : (live && live.llm_enabled === false ? "纯本地模式（在插件设置开启「自主心跳使用大模型」后可自动对话与反思）" : "");
+  const activeAct = state.snap?.actors?.find((a) => a.actor_id === state.snap?.active_actor_id);
+  const mindHidden = isActorMindHidden(activeAct);
+  const latest = !mindHidden && live && live.reflection && live.reflection.at(-1);
+  el("live-reflection").textContent = mindHidden
+    ? ""
+    : (latest
+      ? (labels[latest.status] || latest.status) + (latest.detail ? " · " + latest.detail : "")
+      : (live && live.llm_enabled === false ? "纯本地模式（在插件设置开启「自主心跳使用大模型」后可自动对话与反思）" : ""));
 }
 
 async function controlLive(actor, command, speed = Number(el("live-speed").value)) {
@@ -6189,7 +7046,9 @@ async function pollLive(generation) {
   let delay = 120;
   try {
     if (!aid) return;
-    if (document.hidden || state.drag || !el("modal-mask").classList.contains("hidden")) {
+    const observer = Boolean(state.snap?.external_overlay?.live_autonomy);
+    const blockingModal = !el("modal-mask").classList.contains("hidden");
+    if (!observer && (document.hidden || state.drag || blockingModal)) {
       delay = 800;
       if (state.liveActor) {
         if (!state.liveUiPaused) {
@@ -6262,7 +7121,11 @@ async function pollLive(generation) {
         const autonomy = {...actor.autonomy, ...row.actor.autonomy};
         Object.assign(actor, row.actor, { autonomy });
         if (row.actor_id === aid) {
-          if (row.actor.cognition) state.snap.active_cognition = row.actor.cognition;
+          if (state.snap.opaque_minds && !row.actor.is_player) {
+            state.snap.active_cognition = {};
+          } else if (row.actor.cognition) {
+            state.snap.active_cognition = row.actor.cognition;
+          }
           if (row.actor.zone?.zone_id !== state.snap.current_zone?.zone_id) {
             state.snap.current_zone = row.actor.zone;
             renderTownNavBar();
@@ -6305,6 +7168,9 @@ function init() {
   state.token = tokenFromUrl();
   const params = new URLSearchParams(window.location.search);
   const urlSpaceId = (params.get("space_id") || "").trim();
+  state.expectStory = params.get("mode") === "story";
+  const storyLink = el("hub-story-link");
+  storyLink.href = storyLobbyUrl();
   const urlView = (params.get("view") || "").trim().toLowerCase();
   if (urlSpaceId || urlView === "world") {
     state.view = "world";
@@ -6312,6 +7178,8 @@ function init() {
     state.isPopout = Boolean(urlSpaceId || urlView === "world");
   } else {
     state.view = "hub";
+    fetch(storyLink.href, { cache: "no-store" })
+      .then((res) => storyLink.classList.toggle("hidden", !res.ok)).catch(() => {});
   }
   renderViewShell();
 
@@ -6363,6 +7231,10 @@ function init() {
 
   /* ── 独立世界窗口顶栏与 3 模式切换 ── */
   el("btn-go-hub").onclick = () => {
+    if (isStoryWorld()) {
+      window.location.assign(storyLobbyUrl());
+      return;
+    }
     if (state.autoLife || state.watchLive) setLiveEnabled(false);
     state.view = "hub";
     state.windowSpaceId = "";
@@ -6648,7 +7520,7 @@ function openWeatherModal() {
   const sendWorldChat = () => {
     const inp = el("chat-input");
     const btn = el("btn-chat-send");
-    if (btn.disabled) return;
+    if (btn.disabled || (isStoryWorld() && state.snap?.external_overlay?.view_only)) return;
     const text = inp.value.trim();
     if (!text) return toast("先输入想对她说的话", true);
     const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
@@ -6757,7 +7629,7 @@ function openWeatherModal() {
     // The interaction syncs the captured position after the one movement request already on the wire.
     roamSyncQueue.length = 0;
     state._interactGen = (state._interactGen | 0) + 1;
-    if (prompt.kind === "portal") SoundFX.door();
+    if (prompt.kind === "portal" || (prompt.kind === "entity" && (prompt.action === "open" || prompt.action === "close"))) SoundFX.door();
     else if (prompt.kind === "actor") SoundFX.talk(prompt.name);
     else SoundFX.action();
     try {
@@ -6789,6 +7661,15 @@ function openWeatherModal() {
         renderDialogueDock();
         sendChatPresence(true);
         setTimeout(() => { if (el("chat-input")) el("chat-input").focus(); }, 60);
+      } else if (inter.kind === "inspect_actor") {
+        showModal(
+          "🔍 查探情况 · " + esc(inter.name || ""),
+          '<div style="font-size:13px;line-height:1.7;">' + esc(inter.status_note || inter.message || "对方当前无法回应。") + "</div>",
+          [{ label: "知道了", cls: "primary", onClick: closeModal }],
+          true
+        );
+        refreshLocalRoamPrompt();
+        renderViewport();
       } else if (inter.kind === "container") {
         state.inventoryPanel = { chestId: inter.entity_id, slot: state.hotbarSlot, side: "pack" };
         renderInventoryModal();
@@ -6814,6 +7695,7 @@ function openWeatherModal() {
     }
   };
   if (el("btn-roam-interact")) el("btn-roam-interact").onclick = triggerRoamInteract;
+  if (el("btn-external-overlay")) el("btn-external-overlay").onclick = () => openExternalOverlayModal();
   el("btn-player-pack").onclick = () => openInventoryPanel();
   el("btn-pack-offers").onclick = () => openInventoryPanel();
   el("btn-chat-gift").onclick = () => {
@@ -6841,16 +7723,25 @@ function openWeatherModal() {
   let lastRafAt = performance.now();
   const ROAM_SPEED = 6.2;
 
-  const canStandAt = (cx, cy) => {
+  const tryRoamStep = (x, y) => {
+    const gx = Math.round(x), gy = Math.round(y);
+    const dx = gx - ROAM_POS.gx, dy = gy - ROAM_POS.gy;
+    // Terrain changes follow the tile under the player's feet. The wider
+    // collision box still keeps the sprite clear of walls and objects.
+    if (!canStepElevLocal(state.snap.space, ROAM_POS.gx, ROAM_POS.gy, gx, gy)) return;
     const r = 0.28;
-    const xs = [Math.round(cx - r), Math.round(cx + r)];
-    const ys = [Math.round(cy - r), Math.round(cy + r)];
+    const xs = [Math.round(x - r), Math.round(x + r)];
+    const ys = [Math.round(y - r), Math.round(y + r)];
     for (const tx of xs) {
       for (const ty of ys) {
-        if (!isCellWalkableLocal(tx, ty)) return false;
+        if (!isCellWalkableLocal(tx, ty)) return;
       }
     }
-    return true;
+    ROAM_POS.x = x;
+    ROAM_POS.y = y;
+    ROAM_POS.gx = gx;
+    ROAM_POS.gy = gy;
+    if (dx || dy) roamSyncQueue.push([dx, dy]);
   };
 
   const flushRoamSync = () => {
@@ -6928,33 +7819,18 @@ function openWeatherModal() {
         refreshLocalRoamPrompt(p);
       }
     }
-    const oldX = ROAM_POS.x, oldY = ROAM_POS.y;
-    if (stepX && canStandAt(ROAM_POS.x + stepX, ROAM_POS.y)) ROAM_POS.x += stepX;
-    if (stepY && canStandAt(ROAM_POS.x, ROAM_POS.y + stepY)) ROAM_POS.y += stepY;
+    const { x: oldX, y: oldY, gx: oldGx, gy: oldGy } = ROAM_POS;
+    if (stepX) tryRoamStep(ROAM_POS.x + stepX, ROAM_POS.y);
+    if (stepY) tryRoamStep(ROAM_POS.x, ROAM_POS.y + stepY);
     const movedDist = Math.hypot(ROAM_POS.x - oldX, ROAM_POS.y - oldY);
     ROAM_POS.moving = movedDist > 0.0001;
     ROAM_POS.dist += movedDist;
 
-    const gx = Math.round(ROAM_POS.x), gy = Math.round(ROAM_POS.y);
-    if (gx !== ROAM_POS.gx || gy !== ROAM_POS.gy) {
-      let cx = ROAM_POS.gx, cy = ROAM_POS.gy;
-      const dx = Math.sign(gx - cx), dy = Math.sign(gy - cy);
-      if (dx !== 0 && dy !== 0) {
-        if (isCellWalkableLocal(cx + dx, cy)) {
-          roamSyncQueue.push([dx, 0], [0, dy]);
-        } else {
-          roamSyncQueue.push([0, dy], [dx, 0]);
-        }
-      } else if (dx !== 0) {
-        roamSyncQueue.push([dx, 0]);
-      } else if (dy !== 0) {
-        roamSyncQueue.push([0, dy]);
-      }
-      ROAM_POS.gx = gx;
-      ROAM_POS.gy = gy;
+    const { gx, gy } = ROAM_POS;
+    if (gx !== oldGx || gy !== oldGy) {
       p.x = gx;
       p.y = gy;
-      p.move_seq = (p.move_seq | 0) + 1;
+      p.move_seq = (p.move_seq | 0) + Math.abs(gx - oldGx) + Math.abs(gy - oldGy);
       refreshLocalRoamPrompt(p);
       const tmeta = resolveTileMeta(state.snap.space, gx, gy);
       SoundFX.footstep((tmeta && tmeta.tid) || "wood_floor");
@@ -7022,14 +7898,16 @@ function openWeatherModal() {
   });
   window.addEventListener("blur", () => { keysHeld.length = 0; ROAM_POS.moving = false; });
 
-  runAction("get_world_snapshot", { space_id: state.windowSpaceId || "" })
-    .then(() => {
+  runAction("get_world_snapshot", { space_id: state.windowSpaceId || "", roaming: true })
+    .then((res) => {
+      if (state.uiMode === "roam") void showPlayerGreeting(res.player_greeting);
       if (state.view === "world") setTimeout(() => focusActiveActor(), 100);
     })
     .catch((e) => toast("加载世界失败：" + e.message, true));
   setInterval(() => {
-    if (!el("modal-mask").classList.contains("hidden") || state.drag || roamInteractBusy || state.inventoryBusy) return;
-    if (state.autoLife && state.view === "world" && state.liveActor) return;
+    if ((!el("modal-mask").classList.contains("hidden") && state.externalOverlayContext == null)
+        || state.drag || roamInteractBusy || state.inventoryBusy) return;
+    if (!isStoryWorld() && state.autoLife && state.view === "world" && state.liveActor) return;
     const view = state.view;
     const sid = (view === "world" && state.windowSpaceId) || "";
     const interactGen = state._interactGen | 0;
@@ -7046,7 +7924,7 @@ function openWeatherModal() {
       const roamMoved = state.uiMode === "roam" ? updateRoamMotion(dt) : false;
       const wCodeNow = state.snap.weather?.current || "clear";
       const activeWeatherAnim = state.snap.space?.space_kind === "town" && (wCodeNow === "rain" || wCodeNow === "sakura" || wCodeNow === "snow");
-      if (PD_LOOP.moving || roamMoved) {
+      if (PD_LOOP.moving || roamMoved || state.roomVis?.animating) {
         renderViewport();
       } else if (activeWeatherAnim && !document.hidden) {
         const wPh = Math.floor(now / 45);

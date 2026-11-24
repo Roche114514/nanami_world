@@ -21,12 +21,14 @@ from . import (
     PLUGIN_ID,
     PLUGIN_NAME,
     PLUGIN_VERSION,
+    external_bridge,
     projector,
     text_compiler,
     world_page,
     world_tools,
 )
 from .engine import WorldEngine
+from .external_bridge import WorldBridge
 from .heartbeat import WorldHeartbeat
 from .settings import SETTINGS_FILENAME, SettingsStore
 from .world_chat import WorldChatService
@@ -64,6 +66,7 @@ class NanamiWorldPlugin(PluginBase):
         self._engine: WorldEngine | None = None
         self._heartbeat: WorldHeartbeat | None = None
         self._world_chat: WorldChatService | None = None
+        self._bridge: WorldBridge | None = None
         self._session_character: str = ""
         self._lock = threading.RLock()
 
@@ -160,6 +163,14 @@ class NanamiWorldPlugin(PluginBase):
         if hasattr(register, "register_llm_tool"):
             register.register_llm_tool(world_tools.register_tools)
 
+        self._bridge = WorldBridge(
+            self._engine,
+            world_chat=self._world_chat,
+            heartbeat=self._heartbeat,
+            settings_provider=self._settings_store.get,
+        )
+        external_bridge.register_world_bridge(self._bridge)
+
         world_page.register_pages(
             register,
             code_dir=code_dir,
@@ -168,6 +179,7 @@ class NanamiWorldPlugin(PluginBase):
             heartbeat=self._heartbeat,
             world_chat=self._world_chat,
             submit_user_input=_submit_user_input,
+            bridge=self._bridge,
         )
 
         if settings.enabled and settings.heartbeat_enabled:
@@ -248,5 +260,8 @@ class NanamiWorldPlugin(PluginBase):
                 context.tools = existing
 
     def shutdown(self) -> None:
+        if self._bridge is not None:
+            external_bridge.unregister_world_bridge()
+            self._bridge = None
         if self._heartbeat is not None:
             self._heartbeat.stop()

@@ -165,5 +165,33 @@ class LiveSimulationTests(unittest.TestCase):
             self.assertNotIn("chat_history", unchanged)
             self.assertNotIn("changes", unchanged)
 
+    def test_observer_clock_keeps_running_through_a_dialogue_and_actors_resume(self) -> None:
+        room = self.engine.create_space(name="观剧场景", width=12, height=10, wall_rows=0)["space_id"]
+        first = self.engine.import_actor(name="甲", space_id=room, x=5, y=4)["actor_id"]
+        second = self.engine.import_actor(name="乙", space_id=room, x=6, y=4)["actor_id"]
+        entered, release = threading.Event(), threading.Event()
+
+        def conversation(*_args, **_kwargs):
+            entered.set()
+            release.wait(8)
+            return {"turns": [{"line_a": "我先看看这边。", "line_b": "我再去确认一下。"}]}
+
+        with patch.object(self.chat, "conduct_actor_social_exchange", side_effect=conversation):
+            self.live.set_background_roster(room, [first, second])
+            self.live.control(first, "viewer", "start", 4)
+            self.live._meet(first, second, "核对情况", user_requested=True)
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue({first, second} <= self.live._chatting)
+                during = self.engine._world["simulation_minutes"]
+                self.until(lambda: self.engine._world["simulation_minutes"] > during, timeout=4.5)
+                self.assertTrue(self.live.queue_action(first, {"tool": "world_move", "x": 2, "y": 4})[0])
+            finally:
+                release.set()
+            self.until(lambda: self.engine.live_actor_frame(first)["x"] == 2, timeout=5)
+            self.assertFalse({first, second} & self.live._chatting)
+            self.live.control(first, "viewer", "stop", 1)
+            self.assertTrue(self.live.managed(first))
+
 if __name__ == "__main__":
     unittest.main()

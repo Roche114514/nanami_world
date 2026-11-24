@@ -506,7 +506,14 @@ class WorldChatService:
             words.extend(str(x).strip() for x in raw if str(x).strip())
         return words[:18]
 
-    def _persona_full_context_for(self, host_character: str, *, corpus_limit: int = 5) -> dict[str, Any]:
+    def _persona_full_context_for(
+        self,
+        host_character: str,
+        *,
+        corpus_limit: int = 5,
+        strict_lookup: bool = False,
+        isolated_realm_id: str = "",
+    ) -> dict[str, Any]:
         """只读探测 nanami_persona 的全套上下文：mind.mjs / guard_bridge.mjs / soul.md / corpus.tsv / off-voice.json。"""
         settings = self._settings_provider()
         custom = str(getattr(settings, "persona_data_dir", "") or "").strip()
@@ -529,8 +536,9 @@ class WorldChatService:
         state_root: Path | None = None
         profile_dir: Path | None = None
         soul_text = ""
+        clean_host = str(host_character or "").strip()
         if base_dir is not None:
-            state_root, _pfx = persona_bridge._resolve_persona_pointer(base_dir, host_character)
+            state_root, _pfx = persona_bridge._resolve_persona_pointer(base_dir, clean_host, strict=strict_lookup)
             if state_root is not None:
                 if state_root.name == "runtime":
                     profile_dir = state_root.parent
@@ -543,7 +551,8 @@ class WorldChatService:
                 soul_cands.extend([state_root / "soul.md", state_root.parent / "soul.md"])
             if profile_dir is not None:
                 soul_cands.append(profile_dir / "soul.md")
-            if str(host_character or "").strip() in ("", "七海千秋"):
+            allow_nanami_fallback = (clean_host == "七海千秋") if strict_lookup else (clean_host in ("", "七海千秋"))
+            if allow_nanami_fallback:
                 soul_cands.extend([
                     base_dir / "profiles" / "nanami_chiaki" / "soul.md",
                     self._project_root / "plugins" / "nanami_persona" / "soul" / "chiaki-soul.md",
@@ -556,13 +565,24 @@ class WorldChatService:
                     except OSError:
                         pass
 
-        corpus_examples = self._sample_corpus_examples(profile_dir, base_dir, limit=corpus_limit)
+        corpus_base = None if (strict_lookup and profile_dir is None) else base_dir
+        corpus_examples = self._sample_corpus_examples(profile_dir, corpus_base, limit=corpus_limit)
         off_voice_words = self._read_off_voice_ban(profile_dir)
+        effective_state_root = state_root
+        if isolated_realm_id and state_root is not None:
+            sandbox_root = persona_bridge.ensure_isolated_persona_sandbox(
+                self._project_root,
+                self._engine.data_root,
+                isolated_realm_id,
+                clean_host,
+                custom_persona_dir=custom,
+            )
+            effective_state_root = sandbox_root
         return {
             "mind_mjs": mind_mjs,
             "guard_mjs": guard_mjs,
             "toolkit_dir": toolkit_dir,
-            "state_root": state_root,
+            "state_root": effective_state_root,
             "profile_dir": profile_dir,
             "soul_text": soul_text,
             "corpus_examples": corpus_examples,
@@ -770,11 +790,23 @@ class WorldChatService:
         return None
 
     def _character_setting_of(self, actor: dict[str, Any]) -> str:
+        brief = str(actor.get("persona_brief") or "").strip()
+        if actor.get("is_native_npc"):
+            return f"你是{actor['name']}。{brief}" if brief else f"你是{actor['name']}，居住在这个像素文字世界里。"
         host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
         for row in self._engine.list_host_characters():
             if row.get("name") == host_char and row.get("setting"):
-                return str(row["setting"])[:1000]
+                base = str(row["setting"])[:1000]
+                return f"{base}\n【角色补充设定】{brief}" if brief else base
+        if brief:
+            return f"你是{actor['name']}。{brief}"
         return f"你是{actor['name']}，居住在这个像素文字世界里。"
+
+    def _setting_with_brief(self, actor: Mapping[str, Any], soul_text: str) -> str:
+        brief = str(actor.get("persona_brief") or "").strip()
+        if soul_text:
+            return f"{soul_text}\n【角色补充设定】{brief}" if brief else soul_text
+        return self._character_setting_of(dict(actor))
 
     # ── 执行 LLM 返回的世界动作 ──────────────────────────────────────────
     def _execute_world_actions(
@@ -1007,14 +1039,23 @@ class WorldChatService:
             raise ValueError("请先在文字世界里导入一个角色。")
         if actor.get("is_player"):
             raise ValueError("请选择要交谈的角色。主控的台词由你输入。")
+        if str(actor.get("actor_status") or "active") != "active":
+            note = str(actor.get("status_note") or actor.get("actor_status") or "无法回应")
+            raise ValueError(f"「{actor['name']}」此刻无法回应对话（{note}）。")
 
         eff_sid = str(space_id or actor.get("space_id") or "room_default").strip() or "room_default"
         realm_sid = self._realm_space_id(eff_sid)
+        is_isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
         with self._lock:
             self._append_msg_locked(actor_id, "user", clean_user, space_id=eff_sid)
 
         host_char = str(actor.get("host_character") or actor.get("name") or "").strip()
-        pctx = self._persona_full_context_for(host_char, corpus_limit=5)
+        pctx = self._persona_full_context_for(
+            host_char,
+            corpus_limit=5,
+            strict_lookup=bool(actor.get("is_native_npc")),
+            isolated_realm_id=realm_sid if is_isolated else "",
+        )
         mind_mjs, state_root, soul_text = pctx["mind_mjs"], pctx["state_root"], pctx["soul_text"]
         mind_data = self._run_mind_mjs(mind_mjs, state_root, actor_id, "--his", clean_user, space_id=realm_sid)
         mind_card_text = ""
@@ -1042,7 +1083,7 @@ class WorldChatService:
             include_memories=include_memories and self._realm_space_id(actor["space_id"]) == realm_sid,
             player_conversation=True,
         )
-        setting_text = soul_text or self._character_setting_of(actor)
+        setting_text = self._setting_with_brief(actor, soul_text)
         puzzle_recall = (
             projector.recall_puzzle(self._engine, actor_id, eff_sid, clean_user)
             if include_memories else ""
@@ -1054,6 +1095,7 @@ class WorldChatService:
             space_id=realm_sid,
             world_data_root=self._engine.data_root,
             custom_persona_dir=custom_pdir,
+            isolated_persona=is_isolated,
         )
         u_rel = rels_now.get("user") or {}
         if u_rel.get("known"):
@@ -1128,9 +1170,17 @@ class WorldChatService:
             if has_town_scope else ""
         )
 
+        private_brief = ""
+        if hasattr(self._engine, "get_actor_private_brief"):
+            private_brief = self._engine.get_actor_private_brief(actor_id, space_id=eff_sid)
+
         system_prompt = (
             f"你是「{actor['name']}」的决策大脑（负责结合世界现实与心理状态，想清楚这轮要做什么动作与表达什么语义意图，不负责雕琢口吻）。\n\n"
             f"【角色底色】\n{setting_text}\n\n"
+            + (
+                f"【私密背景与立场（仅你本人知晓，请自然贯彻但不要机械复述）】\n{private_brief}\n\n"
+                if private_brief else ""
+            )
             + f"【你与用户的关系指针】{u_rel_line}\n\n"
             + l0_block
             + (f"【心理模型状态】\n{mind_card_text}\n\n" if mind_card_text else "")
@@ -1274,6 +1324,22 @@ class WorldChatService:
         self._engine.record_player_conversation(
             actor_id, eff_sid, f"玩家说「{clip_text(clean_user, 30)}」，我说「{clip_text(reply, 28)}」。",
         )
+        self._engine.record_custom_event(
+            "dialogue_exchange",
+            actor_id=actor_id,
+            space_id=eff_sid,
+            payload={
+                "mode": "player_chat",
+                "speaker_id": actor_id,
+                "speaker_name": actor["name"],
+                "partner_id": self._engine.player_actor_id(eff_sid),
+                "partner_name": "玩家",
+                "user_text": clip_text(clean_user, 240),
+                "reply_text": clip_text(reply, 280),
+                "emotion": emotion or str(expr.get("tag") or ""),
+                "summary": clip_text(f"玩家与{actor['name']}交谈：{clean_user[:50]} / {reply[:60]}", 180),
+            },
+        )
         if mind_mjs is not None and state_root is not None:
             self._run_mind_mjs(mind_mjs, state_root, actor_id, "--her", reply, space_id=realm_sid)
 
@@ -1304,7 +1370,7 @@ class WorldChatService:
         return speaker
 
     def greet_player(
-        self, actor_id: str, player_id: str, *, reason: str = "", use_llm: bool = True,
+        self, actor_id: str, player_id: str, *, reason: str = "", use_llm: bool = True, urgent: bool = False,
     ) -> dict[str, Any] | None:
         """邀请附近主控对话，可附上一句 NPC 开场。"""
         speaker = self._nearby_player(actor_id, player_id)
@@ -1314,7 +1380,7 @@ class WorldChatService:
         now = time.monotonic()
         with self._lock:
             pending = self._player_greeting
-            if (pending and pending["expires_at"] > now) or self._greeting_cooldowns.get(actor_id, 0) > now:
+            if (pending and pending["expires_at"] > now) or (not urgent and self._greeting_cooldowns.get(actor_id, 0) > now):
                 return None
             self._greeting_cooldowns = {aid: until for aid, until in self._greeting_cooldowns.items() if until > now}
             self._greeting_cooldowns[actor_id] = now + _PLAYER_GREETING_COOLDOWN
@@ -1331,13 +1397,24 @@ class WorldChatService:
                 if scene and scene["space"]["space_id"] == sid:
                     actor = scene["actor"]
                     host = actor.get("host_character") or actor["name"]
-                    persona = self._persona_full_context_for(host, corpus_limit=5)
-                    setting = persona.get("soul_text") or self._character_setting_of(actor)
+                    realm_sid = str(scene.get("realm") or self._realm_space_id(sid))
+                    is_isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
+                    persona = self._persona_full_context_for(
+                        host,
+                        corpus_limit=5,
+                        strict_lookup=bool(actor.get("is_native_npc")),
+                        isolated_realm_id=realm_sid if is_isolated else "",
+                    )
+                    setting = self._setting_with_brief(actor, persona.get("soul_text") or "")
                     settings = self._settings_provider()
                     relation = persona_bridge.read_actor_relations(
                         self._project_root, host, space_id=scene["realm"], world_data_root=self._engine.data_root,
                         custom_persona_dir=str(getattr(settings, "persona_data_dir", "") or ""),
+                        isolated_persona=is_isolated,
                     ).get("user", {})
+                    private_brief = str(scene.get("external_private_brief") or "").strip()
+                    if not private_brief and hasattr(self._engine, "get_actor_private_brief"):
+                        private_brief = self._engine.get_actor_private_brief(actor_id, space_id=sid)
                     observed = "、".join(item["name"] for item in scene["visible"][:8]) or "无"
                     recent = [
                         row["text"] for row in self.get_history(actor_id, space_id=sid)
@@ -1347,7 +1424,9 @@ class WorldChatService:
                         f"你只扮演「{actor['name']}」。你刚走到玩家控制的人物旁边，想打个招呼。"
                         '仅输出 JSON {"greeting":"一句你说出口的开场白","emotion":"情绪"}。'
                         "只写你这句台词。不要扮演玩家，不要写叙述，也不要假定对方已经说话或同意了什么。",
-                        f"人物设定：{setting[:500]}\n所在场景：{scene['space']['name']}\n眼前物件：{observed}\n"
+                        f"人物设定：{setting[:500]}"
+                        + (f"\n私密背景与立场（仅你本人知晓，请自然体现在语气或通报中但不要机械复述）：{private_brief[:360]}" if private_brief else "")
+                        + f"\n所在场景：{scene['space']['name']}\n眼前物件：{observed}\n"
                         f"对玩家态度：{relation.get('attitude_stance', 'neutral')}\n"
                         f"开口原因：{clip_text(reason, 80)}\n最近说过的话：{' | '.join(recent)}",
                         adapter_provider=self._adapter_provider, timeout_sec=10.0, max_tokens=120,
@@ -1371,6 +1450,20 @@ class WorldChatService:
                 return None
             greeting.update(line=line, emotion=emotion, ready=True,
                             expires_at=time.monotonic() + _PLAYER_GREETING_SECONDS)
+        self._engine.record_custom_event(
+            "dialogue_exchange",
+            actor_id=actor_id,
+            space_id=sid,
+            payload={
+                "mode": "npc_greet_player",
+                "speaker_id": actor_id,
+                "speaker_name": speaker["name"],
+                "partner_id": player_id,
+                "partner_name": "玩家",
+                "reply_text": clip_text(line or reason, 200),
+                "summary": clip_text(f"{speaker['name']}走近玩家搭话：{line or reason}", 160),
+            },
+        )
         return {"actor_id": actor_id, "player_id": player_id, "space_id": sid, "used_llm": bool(line),
                 "greeting_id": greeting["id"], "summary": "准备向主控打招呼。", "wait_seconds": _PLAYER_GREETING_SECONDS}
 
@@ -1421,6 +1514,13 @@ class WorldChatService:
             raise ValueError("发起社交的角色或目标角色不存在。")
         if actor_a.get("is_player"):
             raise ValueError("主控的台词由你输入。")
+        if (
+            str(actor_a.get("actor_status") or "active") != "active"
+            or str(actor_b.get("actor_status") or "active") != "active"
+        ):
+            if generated_only:
+                return {"turns": [], "used_llm": False}
+            raise ValueError("角色当前状态异常，无法进行当面交流。")
         if actor_a["space_id"] != actor_b["space_id"]:
             raise ValueError("两位角色当前不在同一个世界空间内，无法当面交流。")
         if actor_b.get("is_player"):
@@ -1433,6 +1533,7 @@ class WorldChatService:
 
         sid = str(actor_a.get("space_id") or "room_default").strip() or "room_default"
         realm_sid = self._realm_space_id(sid)
+        is_isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
         a_name = str(actor_a.get("name") or initiator_id).strip()
         b_name = str(actor_b.get("name") or target_actor_id).strip()
         a_host = str(actor_a.get("host_character") or a_name).strip()
@@ -1447,6 +1548,7 @@ class WorldChatService:
             world_data_root=self._engine.data_root,
             custom_persona_dir=custom_pdir,
             known_actors=[b_host, b_name],
+            isolated_persona=is_isolated,
         )
         rels_b = persona_bridge.read_actor_relations(
             self._project_root,
@@ -1455,6 +1557,7 @@ class WorldChatService:
             world_data_root=self._engine.data_root,
             custom_persona_dir=custom_pdir,
             known_actors=[a_host, a_name],
+            isolated_persona=is_isolated,
         )
         edge_ab = rels_a.get(f"char:{b_host}") or rels_a.get(f"char:{b_name}") or {}
         edge_ba = rels_b.get(f"char:{a_host}") or rels_b.get(f"char:{a_name}") or {}
@@ -1522,14 +1625,22 @@ class WorldChatService:
         }
         action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in nearby_objects[:24]) or "无"
         room_clean_nouns = "、".join(dict.fromkeys((l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]])) or "空房间"
-        pctx_a = self._persona_full_context_for(a_host, corpus_limit=7)
-        pctx_b = self._persona_full_context_for(b_host, corpus_limit=7)
+        pctx_a = self._persona_full_context_for(
+            a_host, corpus_limit=7,
+            strict_lookup=bool(actor_a.get("is_native_npc")),
+            isolated_realm_id=realm_sid if is_isolated else "",
+        )
+        pctx_b = self._persona_full_context_for(
+            b_host, corpus_limit=7,
+            strict_lookup=bool(actor_b.get("is_native_npc")),
+            isolated_realm_id=realm_sid if is_isolated else "",
+        )
         mind_a = self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--his", reason or "看到同伴想聊几句", space_id=realm_sid) or {}
         mind_b = self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--his", reason or "同伴走近搭话", space_id=realm_sid) or {}
         card_a = str(mind_a.get("card") or "")[:360]
         card_b = str(mind_b.get("card") or "")[:360]
-        setting_a = (pctx_a.get("soul_text") or self._character_setting_of(actor_a))[:650]
-        setting_b = (pctx_b.get("soul_text") or self._character_setting_of(actor_b))[:650]
+        setting_a = self._setting_with_brief(actor_a, pctx_a.get("soul_text") or "")[:650]
+        setting_b = self._setting_with_brief(actor_b, pctx_b.get("soul_text") or "")[:650]
         corpus_a = pctx_a.get("corpus_examples") or ""
         corpus_b = pctx_b.get("corpus_examples") or ""
 
@@ -1649,6 +1760,8 @@ class WorldChatService:
                 if is_town_realm
                 else "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】里实际存在的东西、此刻时间与双方关系经历；**严禁虚构房间外不存在的店铺、餐馆、猪扒饭或外出逛街**！想吃东西或玩耍只能针对屋里真实存在的物件；\n"
             )
+            brief_a = self._engine.get_actor_private_brief(initiator_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
+            brief_b = self._engine.get_actor_private_brief(target_actor_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
             sys_prompt = (
                 f"你是「{a_name}」与「{b_name}」的双人决策大脑（第 {turn_idx} 轮来回，只输出纯语义意图，口吻由各自嘴巴层负责）。\n"
                 "原则：\n"
@@ -1673,8 +1786,10 @@ class WorldChatService:
                 + (f"【本镇真实场所（仅填 speech_act 时用 ID）】{realm_places_ref}\n" if is_town_realm else "")
                 + f"【{a_name}底色】{setting_a}\n"
                 + (f"【{a_name}心理状态卡】{card_a}\n" if card_a else "")
+                + (f"【{a_name}私密背景与立场（仅{a_name}本人知晓，对话中只能影响{a_name}的言行且不可直接读出设定原文）】{brief_a}\n" if brief_a else "")
                 + f"【{b_name}底色】{setting_b}\n"
                 + (f"【{b_name}心理状态卡】{card_b}\n" if card_b else "")
+                + (f"【{b_name}私密背景与立场（仅{b_name}本人知晓，对话中只能影响{b_name}的言行且不可直接读出设定原文）】{brief_b}\n" if brief_b else "")
                 + f"【指针1】{_rel_desc(a_name, b_name, edge_ab)}\n"
                 + f"【指针2】{_rel_desc(b_name, a_name, edge_ba)}\n"
                 + f"【实时状态】{state_brief}\n"
@@ -1869,6 +1984,7 @@ class WorldChatService:
             call_a_to_b=b_name if first_meet else "",
             call_b_to_a=a_name if first_meet else "",
             custom_persona_dir=custom_pdir,
+            isolated_persona=is_isolated,
         )
 
         # 长短对话同步轻微反馈到双方精力与心情
@@ -2003,6 +2119,24 @@ class WorldChatService:
                 "summary": mem_note,
                 "line_a": line_a,
                 "line_b": line_b,
+            },
+        )
+        self._engine.record_custom_event(
+            "dialogue_exchange",
+            actor_id=initiator_id,
+            space_id=actor_a["space_id"],
+            payload={
+                "mode": "npc_social",
+                "speaker_id": initiator_id,
+                "speaker_name": a_name,
+                "partner_id": target_actor_id,
+                "partner_name": b_name,
+                "turns_count": len(turns),
+                "transcript": [
+                    {"a": clip_text(t["line_a"], 160), "b": clip_text(t["line_b"], 160)}
+                    for t in turns[:4]
+                ],
+                "summary": clip_text(mem_note, 180),
             },
         )
 

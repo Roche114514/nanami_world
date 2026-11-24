@@ -28,6 +28,7 @@ VALID_TRAITS: tuple[str, ...] = (
 VALID_PLACEMENTS: frozenset[str] = frozenset({"floor", "wall", "surface_only", "any"})
 VALID_LIGHT_MODES: frozenset[str] = frozenset({"auto", "dawn", "day", "dusk", "night"})
 VALID_SPACE_KINDS: frozenset[str] = frozenset({"room", "town", "building"})
+VALID_ACTOR_STATUSES: tuple[str, ...] = ("active", "incapacitated", "missing")
 PIXEL_SLOTS: frozenset[str] = frozenset({".", "o", "1", "2", "3", "a", "b"})
 
 MAX_BRIEF_CHARS = 25
@@ -589,6 +590,7 @@ def normalize_sprite(raw: Mapping[str, Any] | None, *, default_w: int = 16, defa
 
 def normalize_blueprint(raw: Mapping[str, Any], *, builtin: bool = False) -> dict[str, Any]:
     name = clip_text(raw.get("name"), MAX_NAME_CHARS, "未命名物件")
+    realm = str(raw.get("ephemeral_realm_id") or "").strip()
     bp_id = str(raw.get("blueprint_id") or "").strip() or slugify(name, prefix="bp")
     footprint = normalize_footprint(raw.get("footprint"))
     placement = str(raw.get("placement") or "any").strip().lower()
@@ -601,7 +603,7 @@ def normalize_blueprint(raw: Mapping[str, Any], *, builtin: bool = False) -> dic
         def_w = 32
     if def_h > 32:
         def_h = 32
-    tags = [clip_text(t, 16, "").lower() for t in (raw.get("tags") or []) if clip_text(t, 16, "")]
+    tags = [clip_text(t, 32 if realm else 16).lower() for t in (raw.get("tags") or []) if clip_text(t, 16)]
     traits = normalize_traits(raw.get("traits") if isinstance(raw.get("traits"), Mapping) else {})
     solid = bool(raw.get("solid", footprint[0] * footprint[1] > 1 or placement == "floor"))
     if "restable" in traits:
@@ -611,9 +613,10 @@ def normalize_blueprint(raw: Mapping[str, Any], *, builtin: bool = False) -> dic
         solid = not bool(traits["portal"].get("is_open", False))
     return {
         "blueprint_id": bp_id,
+        "ephemeral_realm_id": realm,
         "name": name,
-        "brief": clip_text(raw.get("brief"), MAX_BRIEF_CHARS, name),
-        "detail": clip_text(raw.get("detail"), MAX_DETAIL_CHARS, f"一件安静待在这里的{name}。"),
+        "brief": clip_text(raw.get("brief"), 60 if realm else MAX_BRIEF_CHARS, name),
+        "detail": clip_text(raw.get("detail"), 180 if realm else MAX_DETAIL_CHARS, f"一件安静待在这里的{name}。"),
         "tags": tags[:6],
         "footprint": footprint,
         "placement": placement,
@@ -644,6 +647,48 @@ def normalize_space_tiles(raw: Any, width: int, height: int) -> dict[str, str]:
     return out
 
 
+def normalize_space_elevations(raw: Any, width: int, height: int) -> dict[str, int]:
+    """稀疏台地高度表：仅保存高度为 1 或 2 的格子，默认海拔 0 不落盘。"""
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for raw_k, raw_v in raw.items():
+        m = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", str(raw_k or ""))
+        if not m:
+            continue
+        x = int(m.group(1))
+        y = int(m.group(2))
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        elev = clamp_int(raw_v, 0, 2, 0)
+        if elev > 0:
+            out[f"{x},{y}"] = elev
+    return out
+
+
+def normalize_space_stairs(raw: Any, width: int, height: int) -> dict[str, str]:
+    """稀疏台阶坡道表：值为 'ns'（南北向阶梯）或 'ew'（东西向阶梯）。"""
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for raw_k, raw_v in raw.items():
+        m = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", str(raw_k or ""))
+        if not m:
+            continue
+        x = int(m.group(1))
+        y = int(m.group(2))
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        if not raw_v:
+            continue
+        orient = str(raw_v).strip().lower()
+        if orient in ("ew", "both"):
+            out[f"{x},{y}"] = orient
+        else:
+            out[f"{x},{y}"] = "ns"
+    return out
+
+
 def normalize_zones(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return []
@@ -659,7 +704,7 @@ def normalize_zones(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
         y = clamp_int(item.get("y"), 0, max_h - 1, 0)
         w = clamp_int(item.get("w"), 1, max_w - x, 1)
         h = clamp_int(item.get("h"), 1, max_h - y, 1)
-        out.append({
+        entry: dict[str, Any] = {
             "zone_id": zid,
             "name": name,
             "x": x,
@@ -668,7 +713,10 @@ def normalize_zones(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
             "h": h,
             "color": _hex_color(item.get("color"), "#ffd166"),
             "description": clip_text(item.get("description"), 60, ""),
-        })
+        }
+        if "enclosed" in item:
+            entry["enclosed"] = bool(item.get("enclosed", False))
+        out.append(entry)
     return out
 
 
@@ -706,7 +754,7 @@ def normalize_buildings(raw: Any, width: int, height: int) -> list[dict[str, Any
                 "affordances": item.get("affordances"),
             }
         )
-        out.append({
+        b_entry: dict[str, Any] = {
             "building_id": bid,
             "name": name,
             "zone_id": str(item.get("zone_id") or "").strip(),
@@ -723,7 +771,12 @@ def normalize_buildings(raw: Any, width: int, height: int) -> list[dict[str, Any
             "restock_profile": restock_profile,
             "affordances": affordances,
             "icon": clip_text(item.get("icon"), 4, venue_semantics.default_icon_for_role(role)),
-        })
+        }
+        if item.get("location_id"):
+            b_entry["location_id"] = str(item["location_id"]).strip()
+        if item.get("bed_count") is not None:
+            b_entry["bed_count"] = clamp_int(item.get("bed_count"), 0, 8, 0)
+        out.append(b_entry)
     return out
 
 
@@ -739,6 +792,12 @@ def normalize_space(raw: Mapping[str, Any]) -> dict[str, Any]:
     space_kind = str(raw.get("space_kind") or "room").strip().lower()
     if space_kind not in VALID_SPACE_KINDS:
         space_kind = "room"
+    try:
+        clock_off = float(raw.get("clock_offset_minutes") or 0.0)
+    except (TypeError, ValueError):
+        clock_off = 0.0
+    if clock_off != clock_off:
+        clock_off = 0.0
     return {
         "space_id": sid,
         "name": name,
@@ -747,11 +806,20 @@ def normalize_space(raw: Mapping[str, Any]) -> dict[str, Any]:
         "wall_rows": wall_rows,
         "space_kind": space_kind,
         "parent_space_id": str(raw.get("parent_space_id") or "").strip(),
+        "floor_index": clamp_int(raw.get("floor_index"), -2, 5, 1),
+        "floor_label": clip_text(raw.get("floor_label"), 8, ""),
+        "building_group_id": str(raw.get("building_group_id") or "").strip(),
+        "hub_location_id": str(raw.get("hub_location_id") or "").strip(),
         "district": clip_text(raw.get("district"), 16, ""),
         "ambient_phrase": clip_text(raw.get("ambient_phrase"), 60, "一间安静的小房间，墙边开着一扇窗。"),
         "palette_id": str(raw.get("palette_id") or "warm_stardew").strip() or "warm_stardew",
         "ambient_light": light,
+        "clock_offset_minutes": clock_off,
+        "opaque_minds": bool(raw.get("opaque_minds", False)),
+        "isolated_persona": bool(raw.get("isolated_persona", False)),
         "tiles": normalize_space_tiles(raw.get("tiles"), width, height),
+        "elevations": normalize_space_elevations(raw.get("elevations"), width, height),
+        "stairs": normalize_space_stairs(raw.get("stairs"), width, height),
         "zones": normalize_zones(raw.get("zones"), width, height),
         "buildings": normalize_buildings(raw.get("buildings"), width, height),
     }
@@ -1062,6 +1130,9 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     posture = str(raw.get("posture") or "standing").strip().lower()
     if posture not in ("standing", "resting"):
         posture = "standing"
+    actor_status = str(raw.get("actor_status") or "active").strip().lower()
+    if actor_status not in VALID_ACTOR_STATUSES:
+        actor_status = "active"
     cur_sid = str(raw.get("space_id") or "room_default").strip() or "room_default"
     vitals = _normalize_vitals(raw.get("vitals"))
     expression = _normalize_expression(raw.get("expression"))
@@ -1093,6 +1164,12 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
         "host_character": str(raw.get("host_character") or "").strip(),
         "name": name,
         "is_player": bool(raw.get("is_player", False)),
+        "is_native_npc": bool(raw.get("is_native_npc", False)),
+        "native_realm_id": str(raw.get("native_realm_id") or "").strip(),
+        "ephemeral_realm_id": str(raw.get("ephemeral_realm_id") or "").strip(),
+        "actor_status": actor_status,
+        "status_note": clip_text(raw.get("status_note"), 60, ""),
+        "persona_brief": clip_text(raw.get("persona_brief"), 360, ""),
         "space_id": cur_sid,
         "x": clamp_int(raw.get("x"), 0, MAX_SPACE_WIDTH - 1, 5),
         "y": clamp_int(raw.get("y"), 0, MAX_SPACE_HEIGHT - 1, 4),

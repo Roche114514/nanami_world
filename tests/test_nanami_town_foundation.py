@@ -218,6 +218,9 @@ class TownFoundationTests(unittest.TestCase):
         self.assertEqual(len(rebuilt["building_space_ids"]), 6)
 
     def test_town_rpcs_and_big_map_scenic_performance(self) -> None:
+        host_config = self.root / "data" / "config" / "characters.yaml"
+        host_config.parent.mkdir(parents=True)
+        host_config.write_text("- name: 七海千秋\n  setting: 体验小镇的游戏玩家\n", encoding="utf-8")
         registry = PluginCapabilityRegistry()
         registry.set_settings_ui_plugin_context(PLUGIN_ID, PLUGIN_VERSION)
         world_page.register_pages(

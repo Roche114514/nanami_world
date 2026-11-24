@@ -110,18 +110,21 @@ class WorldHeartbeat:
 
     def _sync_persona_vitals(self, settings: WorldSettings) -> None:
         for act in self._engine.list_actors():
-            if act.get("is_player"):
+            if act.get("is_player") or act.get("actor_status", "active") != "active":
                 continue
             aid = act["actor_id"]
             sid = str(act.get("space_id") or "room_default")
             realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
             host_name = str(act.get("host_character") or act.get("name") or "").strip()
+            isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
             synced = persona_bridge.read_persona_state(
                 self._project_root,
                 host_name,
                 custom_persona_dir=settings.persona_data_dir,
                 space_id=realm_sid,
                 actor_id=aid,
+                world_data_root=self._engine.data_root,
+                isolated_persona=isolated,
             )
             if synced is None:
                 continue
@@ -165,10 +168,13 @@ class WorldHeartbeat:
                 if actor:
                     attempts += 1
                     ev_realm_sid = self._engine.realm_space_id(event["space_id"]) if hasattr(self._engine, "realm_space_id") else event["space_id"]
+                    ev_isolated = self._engine.is_isolated_persona_realm(ev_realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
                     result = persona_bridge.emit_world_event_to_persona(
                         self._project_root, str(actor.get("host_character") or actor["name"]),
                         space_id=ev_realm_sid, actor_id=aid, event_payload=payload,
                         custom_persona_dir=settings.persona_data_dir,
+                        world_data_root=self._engine.data_root,
+                        isolated_persona=ev_isolated,
                     ) or {}
                 mood = result.get("moodV")
                 if result.get("ok") and isinstance(mood, (int, float)):
@@ -192,7 +198,7 @@ class WorldHeartbeat:
         eff_llm = settings.heartbeat_use_llm if use_llm is None else bool(use_llm)
 
         for act in self._engine.list_actors():
-            if act.get("is_player"):
+            if act.get("is_player") or act.get("actor_status", "active") != "active":
                 continue
             aid = act["actor_id"]
             if target_actor_id and aid != target_actor_id:
@@ -374,8 +380,13 @@ class WorldHeartbeat:
                 if peer.get("is_player"):
                     chat_svc = self._chat_service_provider() if self._chat_service_provider else None
                     if chat_svc is not None:
-                        greeting = chat_svc.greet_player(actor_id, tgt_aid, reason=reason,
-                                                         use_llm=self._settings_provider().heartbeat_use_llm)
+                        active_int = ((me.get("autonomy") or {}).get("cognition") or {}).get("active_intention") or {}
+                        is_urgent = active_int.get("kind") == "seek_player"
+                        greeting = chat_svc.greet_player(
+                            actor_id, tgt_aid, reason=reason,
+                            use_llm=self._settings_provider().heartbeat_use_llm,
+                            urgent=is_urgent,
+                        )
                         if greeting:
                             self.live.hold_for_user_chat(actor_id, greeting["wait_seconds"])
                             logs.append(greeting["summary"])
@@ -397,6 +408,7 @@ class WorldHeartbeat:
                     b_host = str(peer.get("host_character") or peer.get("name") or "").strip()
                     me_sid = str(me.get("space_id") or "room_default")
                     me_realm = self._engine.realm_space_id(me_sid) if hasattr(self._engine, "realm_space_id") else me_sid
+                    me_isolated = self._engine.is_isolated_persona_realm(me_realm) if hasattr(self._engine, "is_isolated_persona_realm") else False
                     settings = self._settings_provider()
                     rels_a = persona_bridge.read_actor_relations(
                         self._project_root,
@@ -405,6 +417,7 @@ class WorldHeartbeat:
                         world_data_root=self._engine.data_root,
                         custom_persona_dir=settings.persona_data_dir,
                         known_actors=[b_host],
+                        isolated_persona=me_isolated,
                     )
                     edge_ab = rels_a.get(f"char:{b_host}") or {}
                     first_meet = not bool(edge_ab.get("known"))
@@ -421,6 +434,7 @@ class WorldHeartbeat:
                         call_a_to_b=peer["name"] if first_meet else "",
                         call_b_to_a=me["name"] if first_meet else "",
                         custom_persona_dir=settings.persona_data_dir,
+                        isolated_persona=me_isolated,
                     )
                     self._engine.record_custom_event(
                         "actor_social_talk",
@@ -512,6 +526,7 @@ class WorldHeartbeat:
         )
         peer_hosts = [str(p.get("host_character") or p.get("name") or "").strip() for p in peers if not p.get("is_player")]
         realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
+        isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
         rels = persona_bridge.read_actor_relations(
             self._project_root,
             actor_host,
@@ -519,6 +534,7 @@ class WorldHeartbeat:
             world_data_root=self._engine.data_root,
             custom_persona_dir=settings.persona_data_dir,
             known_actors=peer_hosts,
+            isolated_persona=isolated,
         )
 
         best: tuple[float, dict[str, Any], dict[str, Any], tuple[int, int] | None] | None = None
@@ -725,6 +741,7 @@ class WorldHeartbeat:
         other_actors = [a for a in (sp_snap.get("actors") or []) if a.get("actor_id") != aid]
         if other_actors:
             realm_sid = self._engine.realm_space_id(sid) if hasattr(self._engine, "realm_space_id") else sid
+            isolated = self._engine.is_isolated_persona_realm(realm_sid) if hasattr(self._engine, "is_isolated_persona_realm") else False
             rels_chk = persona_bridge.read_actor_relations(
                 self._project_root,
                 host_char,
@@ -732,6 +749,7 @@ class WorldHeartbeat:
                 world_data_root=self._engine.data_root,
                 custom_persona_dir=settings.persona_data_dir,
                 known_actors=[str(a.get("host_character") or a.get("name") or "") for a in other_actors],
+                isolated_persona=isolated,
             )
             peer_known = any(bool(v.get("known")) for k, v in rels_chk.items() if k.startswith("char:"))
         l0_frame = persona_bridge.build_percept_frame(
@@ -1096,7 +1114,7 @@ class WorldHeartbeat:
                 }
 
         # 10. 打开关着的门，或推门去联通空间探索，或在好看的风景格子间漫步欣赏
-        is_town_realm = space.get("space_kind") in ("town", "building")
+        is_town_realm = space.get("space_kind") in ("town", "building") or bool(space.get("buildings"))
         if not is_town_realm:
             closed_door = next(
                 (
@@ -1284,9 +1302,10 @@ class WorldHeartbeat:
             logger.debug("nanami_world: 自主日记写入跳过", exc_info=True)
 
     def _export_bridges(self) -> None:
-        snap = self._engine.snapshot_for_ui()
         include_memories = self._settings_provider().episodic_memory_enabled
-        for act in snap["actors"]:
+        for act in self._engine.list_actors():
+            if act.get("actor_status") == "missing" or self._engine.is_isolated_persona_realm(act["space_id"]):
+                continue
             aid = act["actor_id"]
             view = projector.project_view(self._engine, aid, include_memories=include_memories)
             persona_bridge.write_world_bridge(self._engine, aid, self._engine.bridge_dir, view_text=view)

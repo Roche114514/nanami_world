@@ -112,6 +112,11 @@ def project_terminal_data(
     now = time.time()
     looked_map = snap.get("looked_entities") or {}
 
+    def has_examined(entity: dict[str, Any]) -> bool:
+        if entity.get("ephemeral_realm_id"):
+            return actor_id in entity.get("examined_by", ())
+        return now - float(looked_map.get(entity["entity_id"]) or 0) <= _LOOK_WINDOW_SEC
+
     held_ent = None
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
     top_level: list[dict[str, Any]] = []
@@ -131,11 +136,11 @@ def project_terminal_data(
     for ent in top_level:
         eid = ent["entity_id"]
         dist = engine.chebyshev_distance(actor, ent)
-        show_detail = (now - float(looked_map.get(eid) or 0)) <= _LOOK_WINDOW_SEC
+        show_detail = has_examined(ent)
         child_lines: list[str] = []
         for ch in children_by_parent.get(eid, []):
             cid = ch["entity_id"]
-            c_show = (now - float(looked_map.get(cid) or 0)) <= _LOOK_WINDOW_SEC
+            c_show = has_examined(ch)
             c_verbs = [lbl for _c, lbl in engine.legal_verbs(ch, actor)]
             c_tags = engine.entity_state_tags(ch)
             c_brief = engine.entity_display_brief(ch)
@@ -170,6 +175,7 @@ def project_terminal_data(
     actor_host = str(actor.get("host_character") or actor.get("name") or "").strip()
     peer_names = [str(a.get("host_character") or a.get("name") or "").strip() for a in peer_actors]
     realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
+    isolated_persona = engine.is_isolated_persona_realm(realm_sid) if hasattr(engine, "is_isolated_persona_realm") else False
     relations_map = (
         persona_bridge.read_actor_relations(
             engine.project_root,
@@ -177,6 +183,7 @@ def project_terminal_data(
             space_id=realm_sid,
             world_data_root=engine.data_root,
             known_actors=peer_names,
+            isolated_persona=isolated_persona,
         )
         if peer_actors
         else {}

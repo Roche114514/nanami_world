@@ -33,7 +33,19 @@ def _ok_with_snap(
 ) -> dict[str, Any]:
     snap = engine.snapshot_for_ui(space_id)
     eff_sid = str(snap.get("active_space_id") or space_id or "room_default").strip() or "room_default"
+    realm_id = snap["realm_space_id"]
+    isolated = snap["isolated_persona"]
+    isolated_roots = {sp["space_id"] for sp in snap["spaces"] if sp.get("isolated_persona")}
+    if isolated:
+        spaces = [sp for sp in snap["spaces"] if sp["realm_space_id"] == realm_id]
+    else:
+        spaces = [sp for sp in snap["spaces"] if sp["realm_space_id"] not in isolated_roots]
+    space_ids = {sp["space_id"] for sp in spaces}
+    snap["spaces"] = spaces
+    snap["actors"] = [actor for actor in snap["actors"] if actor["space_id"] in space_ids]
     aid = snap.get("active_actor_id") or ""
+    if not any(actor["actor_id"] == aid for actor in snap["actors"]):
+        aid = snap["active_actor_id"] = ""
     snap["active_cognition"] = {}
     snap["key_loans"] = engine.key_loans_for(aid) if aid else []
     snap["pending_key_loan"] = engine.pending_key_loan_response(aid) if aid else None
@@ -45,10 +57,12 @@ def _ok_with_snap(
         }
         or aid in (event.get("payload") or {}).get("witness_ids", [])
     ]
+    is_opaque = bool(snap.get("opaque_minds"))
+    act = None
     if aid:
         act = next((a for a in (snap.get("actors") or []) if a.get("actor_id") == aid), None)
         if act:
-            snap["active_cognition"] = cognitive_summary(act)
+            snap["active_cognition"] = {} if (is_opaque and not act.get("is_player")) else cognitive_summary(act)
             host_char = str(act.get("host_character") or act.get("name") or "").strip()
             all_names = [
                 str(a.get("host_character") or a.get("name") or "").strip()
@@ -60,6 +74,7 @@ def _ok_with_snap(
                 if cname and cname not in all_names:
                     all_names.append(cname)
             realm_sid = engine.realm_space_id(eff_sid) if hasattr(engine, "realm_space_id") else eff_sid
+            isolated_persona = engine.is_isolated_persona_realm(realm_sid) if hasattr(engine, "is_isolated_persona_realm") else False
             snap["actor_relations"] = persona_bridge.read_actor_relations(
                 engine.project_root,
                 host_char,
@@ -67,6 +82,7 @@ def _ok_with_snap(
                 world_data_root=engine.data_root,
                 custom_persona_dir=custom_persona_dir,
                 known_actors=all_names,
+                isolated_persona=isolated_persona,
             )
             try:
                 vis_l0 = engine.visible_entities(aid)
@@ -141,7 +157,15 @@ def _ok_with_snap(
         snap["active_l0"] = {}
         snap["active_schedule"] = {}
 
-    terminal = projector.project_terminal_data(engine, aid, consume_diffs=False) if aid else {"text": "（尚未导入角色）", "anchors": []}
+    if is_opaque and act and not act.get("is_player"):
+        note = str(act.get("status_note") or "").strip()
+        status_txt = f"\n状态：{note}" if note else ""
+        terminal = {
+            "text": f"【{act['name']}】内心想法与私人议程未公开（当前处于暗箱视角）。{status_txt}",
+            "anchors": [],
+        }
+    else:
+        terminal = projector.project_terminal_data(engine, aid, consume_diffs=False) if aid else {"text": "（尚未导入角色）", "anchors": []}
     chat_history = world_chat.get_history(aid, space_id=eff_sid) if (world_chat is not None and aid) else []
     out: dict[str, Any] = {
         "ok": True,
@@ -163,6 +187,7 @@ def register_pages(
     heartbeat: Any,
     world_chat: Any = None,
     submit_user_input: Callable[[str], bool] | None = None,
+    bridge: Any = None,
 ) -> None:
     """向宿主注册像素文字世界页面、动作 RPC、设置页与聊天工具条按钮。"""
     from sdk.types import (
@@ -245,7 +270,8 @@ def register_pages(
         return {"ok": True, "pending": True, "done": False, "job_id": job_id, "label": label}
 
     def _ensure_default_host_actor() -> None:
-        if engine.list_actors():
+        if any(not actor.get("is_player") and not engine.is_isolated_persona_realm(actor["space_id"])
+               for actor in engine.list_actors()):
             return
         hosts = engine.list_host_characters()
         if not hosts:
@@ -259,14 +285,28 @@ def register_pages(
         try:
             desc = (str(chosen.get("brief") or "") + "。" + str(chosen.get("setting") or "")).strip("。")
             app = text_compiler.compile_actor_appearance(cname, desc, use_llm=False)["appearance"]
-            engine.import_actor(name=cname, host_character=cname, appearance=app)
+            snap = engine.snapshot_for_ui()
+            sid = snap["active_space_id"]
+            if snap["isolated_persona"]:
+                sid = next((sp["space_id"] for sp in snap["spaces"]
+                            if not engine.is_isolated_persona_realm(sp["space_id"])), "")
+            if sid:
+                engine.import_actor(name=cname, host_character=cname, appearance=app, space_id=sid)
         except Exception:  # noqa: BLE001
             logger.debug("nanami_world: 自动导入默认宿主角色失败", exc_info=True)
 
     # ── 画布页 RPC Actions ──────────────────────────────────────────────
     def _act_get_snapshot(v: dict[str, Any]) -> dict[str, Any]:
-        _ensure_default_host_actor()
+        if not v.get("strict_space"):
+            _ensure_default_host_actor()
         sid = str(v.get("space_id") or "")
+        if v.get("strict_space") and (not sid or not engine.is_isolated_persona_realm(sid)):
+            raise ValueError("该故事舞台已不可用，请返回故事局列表。")
+        if not sid and v.get("sandbox_only"):
+            initial = engine.snapshot_for_ui()
+            if initial["isolated_persona"]:
+                sid = next((sp["space_id"] for sp in initial["spaces"]
+                            if not engine.is_isolated_persona_realm(sp["space_id"])), "")
         out = _snap_ok(space_id=sid)
         if world_chat is not None and v.get("roaming"):
             out["player_greeting"] = world_chat.pending_player_greeting(sid)
@@ -451,12 +491,15 @@ def register_pages(
             map_style=str(v.get("map_style") or "").strip(),
         )
         imp_realm_sid = engine.realm_space_id(actor["space_id"]) if hasattr(engine, "realm_space_id") else actor["space_id"]
+        imp_isolated = engine.is_isolated_persona_realm(imp_realm_sid) if hasattr(engine, "is_isolated_persona_realm") else False
         synced = persona_bridge.read_persona_state(
             engine.project_root,
             lookup_name,
             space_id=imp_realm_sid,
             actor_id=actor["actor_id"],
             custom_persona_dir=str(getattr(cfg, "persona_data_dir", "") or ""),
+            world_data_root=engine.data_root,
+            isolated_persona=imp_isolated,
         )
         if synced is not None:
             engine.set_actor_world_mood(
@@ -769,7 +812,7 @@ def register_pages(
     def _act_enter_portal(v: dict[str, Any]) -> dict[str, Any]:
         eid = str(v.get("entity_id") or "").strip()
         aid = str(v.get("actor_id") or "").strip()
-        res = engine.enter_portal(eid, actor_id=aid)
+        res = engine.enter_portal(eid, actor_id=aid, observe_only=bool(v.get("observe_only")))
         heartbeat.deliver_persona_events()
         return _snap_ok(
             {"portal_result": res, "feedback": res.get("feedback", "")},
@@ -838,7 +881,10 @@ def register_pages(
         return _snap_ok({"space": sp}, space_id=sp["space_id"])
 
     def _act_delete_space(v: dict[str, Any]) -> dict[str, Any]:
-        res = engine.delete_space(str(v.get("space_id") or ""))
+        sid = str(v.get("space_id") or "")
+        if engine.is_isolated_persona_realm(sid):
+            raise ValueError("请在所属故事大厅删除该世界。")
+        res = engine.delete_space(sid)
         return _snap_ok({"deleted": res}, space_id=str(res.get("active_space_id") or ""))
 
     def _act_save_palette(v: dict[str, Any]) -> dict[str, Any]:
@@ -897,12 +943,13 @@ def register_pages(
         )
         extra = {}
         if v.get("roaming"):
-            extra["player_gifts"] = engine.gift_offers_for("player_avatar")
+            extra["player_gifts"] = engine.gift_offers_for(engine.player_actor_id(str(v.get("space_id") or "")))
             if world_chat is not None:
                 extra["player_greeting"] = world_chat.pending_player_greeting(str(v.get("space_id") or ""))
         if not live:
             return {"ok": True, "live": {}, **extra}
         sid = live["space_id"]
+        live = engine.redact_live_view_if_opaque(live, sid)
         cur_w = engine.get_weather(sid)
         cur_lt = engine.get_lighting(sid)
         version = "|".join([
@@ -960,15 +1007,23 @@ def register_pages(
         return _snap_ok({"placed_count": len(placed)})
 
     def _act_clear_space(v: dict[str, Any]) -> dict[str, Any]:
-        res = engine.clear_space(str(v.get("space_id") or ""))
+        sid = str(v.get("space_id") or engine.snapshot_for_ui()["active_space_id"])
+        if engine.is_isolated_persona_realm(sid):
+            raise ValueError("故事舞台由故事引擎管理。")
+        res = engine.clear_space(sid)
         return _snap_ok(res)
 
     def _act_chat_in_world(v: dict[str, Any]) -> dict[str, Any]:
-        _ensure_default_host_actor()
         req_sid = str(v.get("space_id") or "").strip()
+        if not engine.is_isolated_persona_realm(req_sid):
+            _ensure_default_host_actor()
         aid = str(v.get("actor_id") or "") or engine.resolve_actor_id(space_id=req_sid)
         if not aid:
             raise ValueError("当前房间内还没有角色，请先导入角色。")
+        actor = engine.live_actor_frame(aid)
+        overlay = engine.get_external_overlay(req_sid or (actor or {}).get("space_id", ""))
+        if overlay and overlay.get("view_only"):
+            raise ValueError("当前舞台仅供观剧或复盘。")
         if world_chat is None:
             raise ValueError("世界对话服务尚未就绪。")
         text = str(v.get("text") or "").strip()
@@ -1196,6 +1251,9 @@ def register_pages(
     def _act_player_spawn(v: dict[str, Any]) -> dict[str, Any]:
         sid = str(v.get("space_id") or "").strip()
         name = str(v.get("name") or "你").strip()
+        overlay = engine.get_external_overlay(sid)
+        if overlay and overlay.get("view_only"):
+            raise ValueError("当前舞台仅供观剧或复盘。")
         player = engine.ensure_player_avatar(space_id=sid, name=name)
         return _snap_ok({"player": player, "inventory": engine.inventory_state(player["actor_id"])},
                         space_id=str(player["space_id"]))
@@ -1238,7 +1296,7 @@ def register_pages(
         return out
 
     def _act_player_inventory(v: dict[str, Any]) -> dict[str, Any]:
-        pid = "player_avatar"
+        pid = str(v.get("player_id") or engine.player_actor_id(str(v.get("space_id") or "")))
         operation = str(v.get("operation") or "list")
         eid = str(v.get("entity_id") or "")
         chest_id = str(v.get("chest_id") or "")
@@ -1309,6 +1367,15 @@ def register_pages(
         resolved = engine.set_actor_home_space(aid, home_sid, realm_space_id=sid)
         return _snap_ok({"home_space_id": resolved}, space_id=sid)
 
+    def _act_external_overlay_action(v: dict[str, Any]) -> dict[str, Any]:
+        if bridge is None:
+            return {"ok": False, "handled": False, "error": "当前未注册外部桥接器。"}
+        sid = str(v.get("space_id") or "")
+        action_id = str(v.get("action_id") or "")
+        payload = v.get("payload") if isinstance(v.get("payload"), Mapping) else None
+        res = bridge.handle_overlay_action(action_id, space_id=sid, payload=payload)
+        return _snap_ok({"overlay_result": res, "handled": bool(res.get("handled", res.get("ok")))}, space_id=sid)
+
     action_specs: list[tuple[str, str, Callable[[dict[str, Any]], dict[str, Any]]]] = [
         ("get_world_snapshot", "刷新世界快照", _act_get_snapshot),
         ("place_from_blueprint", "放入物品", _act_place_from_bp),
@@ -1369,6 +1436,7 @@ def register_pages(
         ("open_player_greeting", "接收角色的当面招呼", _act_open_player_greeting),
         ("set_world_weather", "切换世界天气", _act_set_world_weather),
         ("set_actor_home", "指派角色住处", _act_set_actor_home),
+        ("external_overlay_action", "触发外部面板动作", _act_external_overlay_action),
     ]
 
     actions = [
@@ -1495,7 +1563,7 @@ def register_pages(
                     presentation="button",
                     variant="ghost",
                     order=65.0,
-                    action={"type": "open-plugin-page", "page_id": CANVAS_PAGE_ID, "mode": "navigate"},
+                    action={"type": "open-plugin-page", "page_id": CANVAS_PAGE_ID, "mode": "overlay"},
                 )
             )
         except Exception:  # noqa: BLE001

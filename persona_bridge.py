@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +19,87 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 _MIND_WRITE_LOCK = threading.Lock()
+_SANDBOX_LOCK = threading.RLock()
+_STATIC_SANDBOX_STATE_FILES: tuple[str, ...] = (
+    "traits.json",
+    "social_traits.json",
+    "world_perception.json",
+    "scenes.json",
+    "her-phrasings.json",
+    "psyche-model-cn.json",
+)
+
+
+def _safe_slug(raw: Any, default: str = "item") -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", text).strip("_-")
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    prefix = cleaned[:36] if cleaned else default
+    return f"{prefix}_{digest}"
+
+
+def ensure_isolated_persona_sandbox(
+    project_root: Path,
+    world_data_root: Path,
+    space_id: str,
+    host_character: str,
+    *,
+    custom_persona_dir: str = "",
+) -> Path | None:
+    """为平行世界创建完全隔离的人格沙盒目录（仅拷贝静态性格种子，绝不拷贝主档心境/关系/记忆）。"""
+    if world_data_root is None:
+        return None
+    target_char = str(host_character or "").strip()
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+    if base_dir is None:
+        return None
+    src_root, _ = _resolve_persona_pointer(base_dir, target_char, strict=True)
+    if src_root is None or not src_root.is_dir():
+        return None
+
+    realm_slug = _safe_slug(space_id or "room_default", "realm")
+    char_slug = _safe_slug(target_char or "actor", "char")
+    sandbox_root = Path(world_data_root) / "isolated_personas" / realm_slug / char_slug
+    meta_path = sandbox_root / ".sandbox_meta.json"
+    state_dir = sandbox_root / "state"
+
+    with _SANDBOX_LOCK:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        if not meta_path.is_file():
+            src_state = src_root / "state"
+            for fname in _STATIC_SANDBOX_STATE_FILES:
+                src_file = src_state / fname
+                dst_file = state_dir / fname
+                if src_file.is_file() and not dst_file.exists():
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                    except OSError:
+                        logger.debug("nanami_world: 拷贝沙盒静态文件失败: %s", src_file, exc_info=True)
+            try:
+                _atomic_write_json(
+                    meta_path,
+                    {
+                        "space_id": str(space_id or ""),
+                        "host_character": target_char,
+                        "initialized_at": round(time.time(), 3),
+                    },
+                )
+            except OSError:
+                logger.debug("nanami_world: 写入沙盒元数据失败: %s", meta_path, exc_info=True)
+    return sandbox_root
+
+
+def delete_isolated_persona_sandbox(world_data_root: Path | None, space_id: str) -> None:
+    """删除平行世界时级联清理该世界下全部隔离人格沙盒目录。"""
+    sid = str(space_id or "").strip()
+    if not sid or world_data_root is None:
+        return
+    target_dir = Path(world_data_root) / "isolated_personas" / _safe_slug(sid, "realm")
+    with _SANDBOX_LOCK:
+        if target_dir.exists():
+            shutil.rmtree(target_dir, ignore_errors=True)
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -149,18 +232,35 @@ def read_persona_state(
     space_id: str = "",
     actor_id: str = "",
     custom_persona_dir: str = "",
+    world_data_root: Path | None = None,
+    isolated_persona: bool = False,
 ) -> dict[str, Any] | None:
     """只读读取 nanami_persona 的心理与特质快照（按 space_id 隔离，防止不同世界串味）。"""
-    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-    if base_dir is None:
-        return None
+    eff_sid = str(space_id or "").strip()
+    clean_char = str(host_character or "").strip()
+    if isolated_persona:
+        if world_data_root is None:
+            return None
+        sandbox_root = ensure_isolated_persona_sandbox(
+            project_root,
+            world_data_root,
+            eff_sid or "room_default",
+            clean_char,
+            custom_persona_dir=custom_persona_dir,
+        )
+        if sandbox_root is None or not sandbox_root.is_dir():
+            return None
+        state_root, chat_prefix = sandbox_root, ""
+    else:
+        base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+        if base_dir is None:
+            return None
+        state_root, chat_prefix = _resolve_persona_pointer(base_dir, clean_char, strict=True)
+        if state_root is None or not state_root.is_dir():
+            return None
 
-    state_root, chat_prefix = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
-    if state_root is None or not state_root.is_dir():
-        return None
     mind_raw = _read_json(state_root / "state" / "mind.json") or {}
 
-    eff_sid = str(space_id or "").strip()
     matched_entries: list[dict[str, Any]] = []
     if eff_sid:
         needle_exact = f"world:{eff_sid}:{actor_id}" if actor_id else ""
@@ -174,6 +274,9 @@ def read_persona_state(
 
     if matched_entries:
         entries = matched_entries
+    elif isolated_persona:
+        # 平行世界严禁回退读取主档或其它历史记录
+        entries = []
     else:
         # 回退到该角色在人格模型中的主状态记录（排除其他世界的 world: 桶，并按 chat_key_prefix 过滤）
         entries = [
@@ -190,7 +293,7 @@ def read_persona_state(
     att = latest.get("attitude") if isinstance(latest.get("attitude"), dict) else {}
 
     traits_raw = _read_json(state_root / "state" / "traits.json") or {}
-    if not latest and not traits_raw:
+    if not latest and not traits_raw and not isolated_persona:
         return None
     traits_inner = traits_raw.get("traits") if isinstance(traits_raw.get("traits"), dict) else traits_raw
     dom_eff = traits_inner.get("domainEfficacy") if isinstance(traits_inner.get("domainEfficacy"), dict) else {}
@@ -508,6 +611,7 @@ def read_actor_relations(
     world_data_root: Path | None = None,
     custom_persona_dir: str = "",
     known_actors: Sequence[str] | None = None,
+    isolated_persona: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """按世界（space_id）读取角色的态度与情感指针；不同世界之间完全隔离。"""
     eff_sid = str(space_id or "room_default").strip() or "room_default"
@@ -515,13 +619,14 @@ def read_actor_relations(
     persona_targets: dict[str, dict[str, Any]] = {}
     user_live: dict[str, Any] = {}
 
-    # 所有世界均可继承人格模型中的基础关系指针作为初值，各世界内的后续互动仍写入各自 space_id 桶独立演化
-    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-    if base_dir is not None:
-        sr, chat_prefix = _resolve_persona_pointer(base_dir, subj, strict=True)
-        if sr is not None and sr.is_dir():
-            persona_targets = _read_persona_relations_targets(sr)
-            user_live = _read_user_fallback_from_mind(sr, chat_key_prefix=chat_prefix)
+    if not isolated_persona:
+        # 非平行世界可继承人格模型中的基础关系指针作为初值，各世界内的后续互动仍写入各自 space_id 桶独立演化
+        base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+        if base_dir is not None:
+            sr, chat_prefix = _resolve_persona_pointer(base_dir, subj, strict=True)
+            if sr is not None and sr.is_dir():
+                persona_targets = _read_persona_relations_targets(sr)
+                user_live = _read_user_fallback_from_mind(sr, chat_key_prefix=chat_prefix)
 
     world_targets: dict[str, dict[str, Any]] = {}
     if world_data_root is not None:
@@ -623,6 +728,7 @@ def record_world_social_interaction(
     call_a_to_b: str = "",
     call_b_to_a: str = "",
     custom_persona_dir: str = "",
+    isolated_persona: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """按世界（space_id）双向记录两名角色的社交互动，各世界社交指针独立持久化互不覆盖。"""
     eff_sid = str(space_id or "room_default").strip() or "room_default"
@@ -638,6 +744,7 @@ def record_world_social_interaction(
         world_data_root=world_data_root,
         custom_persona_dir=custom_persona_dir,
         known_actors=[b_name],
+        isolated_persona=isolated_persona,
     )
     rel_b = read_actor_relations(
         project_root,
@@ -646,6 +753,7 @@ def record_world_social_interaction(
         world_data_root=world_data_root,
         custom_persona_dir=custom_persona_dir,
         known_actors=[a_name],
+        isolated_persona=isolated_persona,
     )
 
     k_ab = f"char:{b_name}"
@@ -1072,14 +1180,30 @@ def emit_world_event_to_persona(
     event_payload: Mapping[str, Any],
     custom_persona_dir: str = "",
     thought: bool = False,
+    world_data_root: Path | None = None,
+    isolated_persona: bool = False,
 ) -> dict[str, Any] | None:
     """经 mind.mjs 记录行动反馈或阶段性反思。"""
-    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
-    if base_dir is None:
-        return {"status": "unbound"}
-    state_root, _ = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
-    if state_root is None:
-        return {"status": "unbound"}
+    sid = str(space_id or "room_default").strip() or "room_default"
+    if isolated_persona:
+        if world_data_root is None:
+            return {"status": "unbound"}
+        state_root = ensure_isolated_persona_sandbox(
+            project_root,
+            world_data_root,
+            sid,
+            str(host_character or "").strip(),
+            custom_persona_dir=custom_persona_dir,
+        )
+        if state_root is None:
+            return {"status": "unbound"}
+    else:
+        base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+        if base_dir is None:
+            return {"status": "unbound"}
+        state_root, _ = _resolve_persona_pointer(base_dir, str(host_character or "").strip(), strict=True)
+        if state_root is None:
+            return {"status": "unbound"}
     if not state_root.is_dir():
         return None
     mind_mjs = next(
@@ -1095,7 +1219,6 @@ def emit_world_event_to_persona(
     node = shutil.which("node")
     if mind_mjs is None or not node:
         return None
-    sid = str(space_id or "room_default").strip() or "room_default"
     aid = str(actor_id or "actor").strip() or "actor"
     command = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{sid}:{aid}"]
 

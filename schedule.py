@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -28,8 +29,9 @@ def default_home_space_id(
     *,
     explicit_home: str = "",
     valid_space_ids: set[str] | None = None,
+    actor_id: str = "",
 ) -> str:
-    """解析角色在当前城镇域内的默认住处（优先按显式指派，次之按名称与宿舍匹配）。"""
+    """解析角色在当前城镇域内的默认住处（优先显式指派与名称匹配，否则跨宿舍均匀分配）。"""
     buildings = [b for b in (realm_buildings or ()) if isinstance(b, Mapping)]
     building_spaces = {
         str(b.get("interior_space_id") or "").strip()
@@ -45,6 +47,9 @@ def default_home_space_id(
         if venue_semantics.is_lodging_building(b)
         and str(b.get("interior_space_id") or "").strip()
     ]
+    bedded_homes = [b for b in homes if int(b.get("bed_count") or 0) > 0]
+    if bedded_homes:
+        homes = bedded_homes
     if not homes:
         return ""
 
@@ -58,6 +63,18 @@ def default_home_space_id(
         bname = str(b.get("name") or "")
         if any(tok in bname for tok in tokens):
             return str(b["interior_space_id"]).strip()
+
+    # 多位角色在同一平行世界中有多间宿舍时，按稳定哈希均匀错峰分配，避免全员挤进同一间房
+    seed = str(actor_id or actor_name or host_character or "").strip()
+    if seed and len(homes) > 1:
+        weighted: list[str] = []
+        for b in homes:
+            sid = str(b["interior_space_id"]).strip()
+            beds = max(1, min(4, int(b.get("bed_count") or 1)))
+            weighted.extend([sid] * beds)
+        digest = hashlib.md5(seed.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:4], "little") % len(weighted)
+        return weighted[idx]
 
     for b in homes:
         bname = str(b.get("name") or "")
@@ -140,6 +157,7 @@ def build_actor_schedule(
         str(actor.get("host_character") or ""),
         realm_buildings,
         explicit_home=home_space_id,
+        actor_id=str(actor.get("actor_id") or ""),
     )
     home_name = next(
         (str(b.get("name") or "") for b in realm_buildings if str(b.get("interior_space_id") or "") == resolved_home),
@@ -264,6 +282,7 @@ def active_schedule_context(
     arbitration: str = "稳态/习惯",
     has_active_modulation: bool = False,
     in_crisis: bool = False,
+    nocturnal_active: bool = False,
 ) -> dict[str, Any]:
     """根据当前生理时钟与 Daw 仲裁状态，计算作息槽与温和软先验缩放系数。"""
     sched = schedule if isinstance(schedule, Mapping) else {}
@@ -281,8 +300,11 @@ def active_schedule_context(
     adherence = c_str * (0.55 + 0.45 * eff)
     slot_w = clamp_float(slot.get("weight"), 0.0, 1.0, 0.65)
     slot_id = str(slot.get("slot_id") or "")
+    home_sid = str(sched.get("home_space_id") or "").strip()
 
-    if in_crisis:
+    if slot_id == "night_rest" and not in_crisis and (nocturnal_active or not home_sid):
+        effective_scale = 0.0
+    elif in_crisis:
         effective_scale = adherence * 0.25 if slot_id == "night_rest" else 0.0
     elif arbitration == "社会脑/语言主导" or has_active_modulation:
         effective_scale = adherence * slot_w * 0.45
@@ -290,13 +312,16 @@ def active_schedule_context(
         effective_scale = adherence * slot_w
 
     place_hint = f"/{slot['preferred_place_name']}" if slot.get("preferred_place_name") else ""
-    prompt_line = f"生理时间 {_fmt_hour(b_hour)} · {slot.get('label', '')}（倾向{place_hint.lstrip('/') or '顺应节律'}）"
+    if slot_id == "night_rest" and nocturnal_active:
+        prompt_line = f"生理时间 {_fmt_hour(b_hour)} · 夜间暗中行动（暂缓归宿）"
+    else:
+        prompt_line = f"生理时间 {_fmt_hour(b_hour)} · {slot.get('label', '')}（倾向{place_hint.lstrip('/') or '顺应节律'}）"
     return {
         "slot": dict(slot),
         "effective_scale": round(effective_scale, 4),
         "adherence": round(adherence, 4),
         "bio_clock": _fmt_hour(b_hour),
-        "home_space_id": str(sched.get("home_space_id") or ""),
+        "home_space_id": home_sid,
         "home_name": str(sched.get("home_name") or ""),
         "prompt_line": prompt_line,
     }

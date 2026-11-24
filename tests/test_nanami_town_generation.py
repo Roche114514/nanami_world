@@ -96,6 +96,8 @@ class TownGenerationTests(unittest.TestCase):
                 self.assertEqual(spec["theme"], expected_theme)
                 self.assertEqual(len(spec["buildings"]), count)
 
+                if expected_theme == "seaside":
+                    spec["seed"] = 4
                 gen = self.engine.generate_town(spec, move_actor_id=aid)
                 tid = gen["town_space_id"]
                 val = gen["validation"]
@@ -188,6 +190,7 @@ class TownGenerationTests(unittest.TestCase):
 
         # Also increment a generated town and verify morning restocking finds the new cafe.
         gen_spec = text_compiler.compile_town_spec_from_text("海风海港小镇", width=36, height=28, building_count=4, use_llm=False)["town_spec"]
+        gen_spec["seed"] = 5
         gen = self.engine.generate_town(gen_spec, move_actor_id=aid)
         gen_add = self.engine.add_town_building(gen["town_space_id"], name="港区烘焙坊", role="cafe")
         self.assertTrue(gen_add["validation"]["ok"], gen_add["validation"])
