@@ -31,7 +31,9 @@ SUPPORTED_OPS: tuple[str, ...] = (
     "upsert_actor",
     "remove_actor",
     "set_actor_status",
+    "get_actor_relations",
     "set_actor_relation",
+    "seed_initial_relations",
     "place_entity",
     "synthesize_entity",
     "synthesize_actor_sprite",
@@ -39,13 +41,17 @@ SUPPORTED_OPS: tuple[str, ...] = (
     "clear_private_brief",
     "set_covert_directive",
     "clear_covert_directive",
+    "propose_actor_commitment",
     "dispatch_npc_to_player",
+    "emit_ambient_cue",
+    "set_world_environment",
     "resume_resting_group",
     "set_background_roster",
     "gather_actors",
     "set_overlay",
     "poll_events",
     "query_world_state",
+    "list_realms",
     "list_blueprints",
 )
 
@@ -160,7 +166,9 @@ class WorldBridge:
                     "native_npcs": True,
                     "actor_status": True,
                     "persona_brief": True,
+                    "get_actor_relations": True,
                     "set_actor_relation": True,
+                    "seed_initial_relations": True,
                     "private_brief": True,
                     "covert_directive": True,
                     "dispatch_npc_to_player": True,
@@ -174,6 +182,11 @@ class WorldBridge:
                     "realm_initial_hour": True,
                     "placement_strategy": True,
                     "night_active": True,
+                    "list_realms": True,
+                    "propose_actor_commitment": True,
+                    "emit_ambient_cue": True,
+                    "set_world_environment": True,
+                    "multi_floor_zones": True,
                 },
             }
 
@@ -368,6 +381,7 @@ class WorldBridge:
                 status_note=str(data.get("status_note") or ""),
                 persona_brief=str(data.get("persona_brief") or ""),
                 home_space_id=str(data.get("home_space_id") or "").strip(),
+                seed_familiar_realm=bool(data.get("seed_familiar_realm", False)),
             )
             if "autonomy_enabled" in data:
                 actor["autonomy"] = self._engine.update_actor_autonomy(
@@ -394,6 +408,144 @@ class WorldBridge:
                 status_note=str(data.get("status_note") or ""),
             )
             return {"ok": True, "actor_id": actor["actor_id"], "actor": actor}
+
+        if clean_op == "get_actor_relations":
+            sid = str(data.get("space_id") or "").strip()
+            if not sid:
+                snap = self._engine.snapshot_for_ui()
+                sid = str(snap.get("active_space_id") or "room_default")
+            if sid == persona_bridge.DEFAULT_RELATIONS_REALM:
+                realm_sid = persona_bridge.DEFAULT_RELATIONS_REALM
+                iso = False
+            else:
+                realm_sid = self._engine.realm_space_id(sid)
+                iso = self._engine.is_isolated_persona_realm(realm_sid)
+
+            subj = str(data.get("subject_character") or data.get("subject") or "").strip()
+            actors_all = self._engine.list_actors()
+            if not subj:
+                aid = str(data.get("actor_id") or "").strip()
+                act = next((a for a in actors_all if a.get("actor_id") == aid), None)
+                if act:
+                    subj = str(act.get("host_character") or act.get("name") or "").strip()
+            if not subj:
+                raise ValueError("get_actor_relations 需要提供 subject_character。")
+
+            known_names: list[str] = []
+            seen_names: set[str] = {subj}
+            raw_known = data.get("known_actors")
+            if isinstance(raw_known, (list, tuple)):
+                for item in raw_known:
+                    cname = str(item or "").strip()
+                    if cname and cname not in seen_names:
+                        seen_names.add(cname)
+                        known_names.append(cname)
+            for a in actors_all:
+                if a.get("is_player") or a.get("actor_status", "active") == "missing":
+                    continue
+                cname = str(a.get("host_character") or a.get("name") or "").strip()
+                if not cname or cname in seen_names:
+                    continue
+                a_sid = str(a.get("space_id") or "")
+                a_realm = self._engine.realm_space_id(a_sid) if a_sid else ""
+                if realm_sid == persona_bridge.DEFAULT_RELATIONS_REALM:
+                    if a_realm and not self._engine.is_isolated_persona_realm(a_realm):
+                        seen_names.add(cname)
+                        known_names.append(cname)
+                elif a_realm == realm_sid:
+                    seen_names.add(cname)
+                    known_names.append(cname)
+
+            settings = self._settings_provider() if self._settings_provider else None
+            rels = persona_bridge.read_actor_relations(
+                self._engine.project_root,
+                subj,
+                space_id=realm_sid,
+                world_data_root=self._engine.data_root,
+                custom_persona_dir=str(getattr(settings, "persona_data_dir", "") or ""),
+                known_actors=known_names,
+                isolated_persona=iso,
+            )
+            return {"ok": True, "space_id": realm_sid, "subject_character": subj, "relations": rels}
+
+        if clean_op == "seed_initial_relations":
+            sid = str(data.get("space_id") or "").strip()
+            if not sid:
+                raise ValueError("seed_initial_relations 需要提供 target space_id。")
+            realm_sid = self._engine.realm_space_id(sid)
+            raw_subjects = data.get("subjects")
+            if not isinstance(raw_subjects, (list, tuple)):
+                raise ValueError("seed_initial_relations 需要提供 subjects 列表。")
+            subjects = [str(s or "").strip() for s in raw_subjects if str(s or "").strip()]
+            source_sid = str(data.get("source_space_id") or "auto").strip() or "auto"
+            include_user = bool(data.get("include_user", True))
+
+            with self._engine._lock:
+                spaces = self._engine._world.get("spaces") or {}
+                sandbox_realms = [
+                    sp_id
+                    for sp_id in spaces
+                    if self._engine._realm_space_id_locked(sp_id) == sp_id
+                    and not self._engine._is_isolated_persona_realm_locked(sp_id)
+                ]
+                actor_homes: dict[str, str] = {}
+                for a in (self._engine._world.get("actors") or {}).values():
+                    if a.get("is_player") or a.get("is_native_npc") or a.get("ephemeral_realm_id"):
+                        continue
+                    char_key = str(a.get("host_character") or a.get("name") or "").strip()
+                    a_sid = str(a.get("space_id") or "")
+                    if not char_key or not a_sid:
+                        continue
+                    a_realm = self._engine._realm_space_id_locked(a_sid)
+                    if not self._engine._is_isolated_persona_realm_locked(a_realm):
+                        actor_homes.setdefault(char_key, a_realm)
+
+            settings = self._settings_provider() if self._settings_provider else None
+            resolved = persona_bridge.resolve_initial_world_relations(
+                self._engine.project_root,
+                self._engine.data_root,
+                subjects,
+                source_space_id=source_sid,
+                actor_home_realms=actor_homes,
+                sandbox_realm_ids=sandbox_realms,
+                custom_persona_dir=str(getattr(settings, "persona_data_dir", "") or ""),
+                include_user=include_user,
+            )
+            seeded_out: dict[str, dict[str, dict[str, Any]]] = {}
+            for subj, tmap in resolved.items():
+                for tkey, rel_row in tmap.items():
+                    patch = {
+                        "target_name": rel_row.get("target_name", ""),
+                        "known": bool(rel_row.get("known", False)),
+                        "rel_stage": str(rel_row.get("rel_stage") or "stranger"),
+                        "attitude_stance": str(rel_row.get("attitude_stance") or "neutral"),
+                        "call_name": str(rel_row.get("call_name") or ""),
+                        "relation_tag": str(rel_row.get("relation_tag") or ""),
+                        "shared_memories": str(rel_row.get("shared_memories") or ""),
+                        "affective_valence": float(rel_row.get("affective_valence") or 0.0),
+                        "trust": float(rel_row.get("trust") if rel_row.get("trust") is not None else 0.55),
+                        "warmth": float(rel_row.get("warmth") if rel_row.get("warmth") is not None else 0.45),
+                        "social_willingness": float(
+                            rel_row.get("social_willingness")
+                            if rel_row.get("social_willingness") is not None
+                            else 0.50
+                        ),
+                        "repulsion": float(rel_row.get("repulsion") or 0.0),
+                    }
+                    saved = persona_bridge.save_world_actor_relation(
+                        self._engine.data_root,
+                        realm_sid,
+                        subj,
+                        tkey,
+                        patch,
+                    )
+                    seeded_out.setdefault(subj, {})[tkey] = saved
+            return {
+                "ok": True,
+                "space_id": realm_sid,
+                "source_space_id": source_sid,
+                "seeded": seeded_out,
+            }
 
         if clean_op == "set_actor_relation":
             sid = str(data.get("space_id") or "").strip()
@@ -437,7 +589,10 @@ class WorldBridge:
                     raise ValueError(f"素材蓝图不存在：{bp_id}")
                 with self._engine._lock:
                     x, y = self._engine._find_placement_cell_locked(
-                        sid, bp, strategy=str(data.get("placement_strategy") or "spread"),
+                        sid,
+                        bp,
+                        strategy=str(data.get("placement_strategy") or "spread"),
+                        zone_id=str(data.get("zone_id") or ""),
                     )
             else:
                 x = int(data["x"])
@@ -566,6 +721,88 @@ class WorldBridge:
                 preempt=bool(data.get("preempt", True)),
             )
 
+        if clean_op == "propose_actor_commitment":
+            aid = str(data.get("actor_id") or "").strip()
+            if not aid:
+                raise ValueError("propose_actor_commitment 需要提供 actor_id。")
+            commitment = data.get("commitment") if isinstance(data.get("commitment"), Mapping) else data
+            return self._engine.propose_actor_commitment(
+                aid,
+                commitment,
+                space_id=str(data.get("space_id") or "").strip(),
+                preempt=bool(data.get("preempt", False)),
+            )
+
+        if clean_op == "emit_ambient_cue":
+            sid = str(data.get("space_id") or "").strip()
+            if not sid:
+                raise ValueError("emit_ambient_cue 需要提供 space_id。")
+            return self._engine.emit_ambient_cue(
+                sid,
+                str(data.get("text") or ""),
+                zone_id=str(data.get("zone_id") or "").strip(),
+                audible_adjacent_zones=bool(data.get("audible_adjacent_zones", True)),
+                cue_kind=str(data.get("cue_kind") or "sound").strip(),
+            )
+
+        if clean_op == "set_world_environment":
+            sid = str(data.get("space_id") or "").strip()
+            if not sid:
+                raise ValueError("set_world_environment 需要提供 space_id。")
+            weather_res = None
+            wmode = str(data.get("weather_mode") or "").strip().lower()
+            if wmode:
+                raw_int = data.get("intensity")
+                weather_res = self._engine.set_weather(
+                    sid,
+                    wmode,
+                    intensity=(float(raw_int) if raw_int is not None else None),
+                )
+            updated_entities: list[str] = []
+            raw_updates = data.get("entity_updates")
+            if isinstance(raw_updates, list) and raw_updates:
+                realm_sid = self._engine.realm_space_id(sid)
+                with self._engine._lock:
+                    for row in raw_updates:
+                        if not isinstance(row, Mapping):
+                            continue
+                        eid = str(row.get("entity_id") or "").strip()
+                        ent = self._engine._world["entities"].get(eid)
+                        if not ent or self._engine._realm_space_id_locked(str(ent.get("space_id") or "")) != realm_sid:
+                            continue
+                        cfg_kwargs: dict[str, Any] = {}
+                        for k in ("brief", "detail", "key_tag"):
+                            if row.get(k) is not None:
+                                cfg_kwargs[k] = str(row[k])
+                        if "locked" in row and row["locked"] is not None:
+                            cfg_kwargs["locked"] = bool(row["locked"])
+                        if cfg_kwargs:
+                            self._engine.configure_placed_entity(eid, **cfg_kwargs)
+                        if "is_open" in row and row["is_open"] is not None:
+                            want_open = bool(row["is_open"])
+                            traits = ent.get("traits") or {}
+                            if "portal" in traits and "container" not in traits:
+                                if not want_open and self._engine._door_occupant_refusal_locked(ent, ""):
+                                    continue
+                                traits["portal"]["is_open"] = want_open
+                                ent["solid"] = not want_open
+                                self._engine._append_event_locked(
+                                    "entity_state_changed",
+                                    space_id=str(ent["space_id"]),
+                                    payload={"entity_id": eid, "is_open": want_open, "solid": ent["solid"]},
+                                )
+                            elif "container" in traits and isinstance(traits["container"], dict):
+                                traits["container"]["is_open"] = want_open
+                                self._engine._append_event_locked(
+                                    "entity_state_changed",
+                                    space_id=str(ent["space_id"]),
+                                    payload={"entity_id": eid, "is_open": want_open},
+                                )
+                        updated_entities.append(eid)
+                    if updated_entities:
+                        self._engine._save_world_locked()
+            return {"ok": True, "space_id": sid, "weather": weather_res, "updated_entities": updated_entities}
+
         if clean_op == "set_overlay":
             sid = str(data.get("space_id") or "").strip()
             if not sid:
@@ -597,21 +834,55 @@ class WorldBridge:
                     if eff_sid not in world["spaces"]:
                         eff_sid = next(iter(world["spaces"]))
                     realm_sid = self._engine._realm_space_id_locked(eff_sid)
-                    realm_space_ids = {sid for sid in world["spaces"] if self._engine._realm_space_id_locked(sid) == realm_sid}
+                    realm_space_ids = {sp_id for sp_id in world["spaces"] if self._engine._realm_space_id_locked(sp_id) == realm_sid}
                     snap = {
                         "active_actor_id": self._engine.resolve_actor_id(space_id=eff_sid),
                         "spaces": [
-                            {**{key: copy.deepcopy(sp[key]) for key in ("space_id", "name", "parent_space_id", "hub_location_id", "space_kind", "buildings") if key in sp},
-                             "realm_space_id": realm_sid}
-                            for sid, sp in world["spaces"].items() if sid in realm_space_ids
+                            {
+                                **{
+                                    key: copy.deepcopy(sp[key])
+                                    for key in (
+                                        "space_id", "name", "parent_space_id", "hub_location_id",
+                                        "space_kind", "buildings", "floor_index", "floor_label", "building_group_id",
+                                    )
+                                    if key in sp
+                                },
+                                "zones": [
+                                    {
+                                        "zone_id": str(z.get("zone_id") or ""),
+                                        "name": str(z.get("name") or ""),
+                                        "role": str(z.get("role") or ""),
+                                        "x": int(z.get("x") or 0),
+                                        "y": int(z.get("y") or 0),
+                                        "w": int(z.get("w") or 0),
+                                        "h": int(z.get("h") or 0),
+                                        "enclosed": bool(z.get("enclosed", False)),
+                                    }
+                                    for z in (sp.get("zones") or ())
+                                    if isinstance(z, Mapping)
+                                ],
+                                "realm_space_id": realm_sid,
+                            }
+                            for sp_id, sp in world["spaces"].items() if sp_id in realm_space_ids
                         ],
                     }
                     snap["space"] = next((sp for sp in snap["spaces"] if sp["space_id"] == eff_sid), {})
-                    raw_actors = [
-                        {key: actor.get(key) for key in ("actor_id", "name", "space_id", "actor_status", "posture",
-                                                         "holding_id", "is_player", "is_native_npc")}
-                        for actor in world["actors"].values() if actor["space_id"] in realm_space_ids
-                    ]
+                    raw_actors = []
+                    for actor in world["actors"].values():
+                        if actor["space_id"] not in realm_space_ids:
+                            continue
+                        a_row = {
+                            key: actor.get(key)
+                            for key in (
+                                "actor_id", "name", "host_character", "space_id", "x", "y",
+                                "actor_status", "posture", "holding_id", "is_player", "is_native_npc",
+                            )
+                        }
+                        sp_obj = world["spaces"].get(actor["space_id"]) or {}
+                        z_hit = self._engine.get_zone_at(sp_obj, actor.get("x", 0), actor.get("y", 0)) if sp_obj else None
+                        a_row["zone_id"] = str((z_hit or {}).get("zone_id") or "")
+                        a_row["zone_name"] = str((z_hit or {}).get("name") or "")
+                        raw_actors.append(a_row)
                 else:
                     snap = self._engine.snapshot_for_ui(sid or None)
                     eff_sid = str(snap.get("active_space_id") or "")
@@ -631,6 +902,8 @@ class WorldBridge:
                         "tags": list(e.get("tags") or ()),
                         "z": int(e.get("z") or 0),
                         "traits": copy.deepcopy(e.get("traits") or {}),
+                        "brief": str(e.get("brief") or "")[:160],
+                        "detail": str(e.get("detail") or "")[:240],
                         "state_tags": self._engine.entity_state_tags(e),
                         **({"sprite": copy.deepcopy(e["sprite"])} if not compact and e.get("ephemeral_realm_id") else {}),
                     }
@@ -638,6 +911,12 @@ class WorldBridge:
                     if e.get("space_id") in realm_space_ids
                 ]
                 realm_buildings = self._engine._realm_buildings_locked(realm_sid) if realm_sid else []
+                weather_view = self._engine._weather_view_locked(eff_sid) if eff_sid else {}
+                lighting_full = self._engine.get_lighting(eff_sid) if eff_sid else {}
+                lighting_summary = {
+                    "period": str(lighting_full.get("period") or ""),
+                    "is_dark": bool(lighting_full.get("is_dark", False)),
+                }
             return {
                 "ok": True,
                 "active_space_id": eff_sid,
@@ -653,8 +932,13 @@ class WorldBridge:
                 "actors": raw_actors,
                 "host_characters": snap.get("host_characters") or [],
                 "overlay": self._engine.get_external_overlay(eff_sid) if eff_sid else None,
+                "weather": weather_view,
+                "lighting": lighting_summary,
                 "minutes": sim_min,
             }
+
+        if clean_op == "list_realms":
+            return {"ok": True, "realms": self._engine.list_realms_summary()}
 
         if clean_op == "list_blueprints":
             bps = self._engine.all_blueprints(str(data.get("space_id") or "") or None)
@@ -735,6 +1019,7 @@ class WorldBridge:
             y=int(data["y"]) if data.get("y") is not None else None,
             container_entity_id=str(data.get("container_entity_id") or ""),
             placement_strategy=str(data.get("placement_strategy") or "spread"),
+            zone_id=str(data.get("zone_id") or ""),
         )
         return {"ok": True, "entity_id": placed["entity_id"], "entity": placed, "used_llm": result["used_llm"]}
 

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import episodic_memory, persona_bridge, schedule, venue_semantics, weather
+from . import episodic_memory, persona_bridge, schedule, sprite_pack, venue_semantics, weather
 from .schema import (
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
@@ -44,7 +44,9 @@ from .schema import (
     clamp_float,
     clamp_int,
     clip_text,
+    default_appearance,
     infer_consumable_names,
+    infer_rest_mode,
     inscription_is_new,
     normalize_actor,
     normalize_appearance,
@@ -481,6 +483,7 @@ class WorldEngine:
             "external_actor_state": {},
             "external_overlays": {},
             "ephemeral_blueprints": {},
+            "character_appearances": {},
         }
 
     def _normalize_world_dict(self, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -593,6 +596,21 @@ class WorldEngine:
             if isinstance(item, Mapping) and item.get("ephemeral_realm_id") in spaces:
                 ephemeral_blueprints[bid] = normalize_blueprint(item)
 
+        character_appearances: dict[str, dict[str, Any]] = {}
+        raw_char_apps = raw.get("character_appearances")
+        if isinstance(raw_char_apps, Mapping):
+            for c_key, rec in raw_char_apps.items():
+                clean_ck = str(c_key or "").strip()
+                if not clean_ck or not isinstance(rec, Mapping):
+                    continue
+                ms = str(rec.get("map_style") or "doll").strip().lower()
+                if ms not in MAP_STYLES:
+                    ms = "doll"
+                character_appearances[clean_ck] = {
+                    "appearance": normalize_appearance(rec.get("appearance"), seed=clean_ck),
+                    "map_style": ms,
+                }
+
         return {
             "version": 1,
             "active_space_id": active_sid,
@@ -617,6 +635,7 @@ class WorldEngine:
             "external_actor_state": external_actor_state,
             "external_overlays": external_overlays,
             "ephemeral_blueprints": ephemeral_blueprints,
+            "character_appearances": character_appearances,
         }
 
     def _normalize_entity_dict(self, raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -632,14 +651,19 @@ class WorldEngine:
             for t in traces_raw[-20:]
             if isinstance(t, Mapping) and clip_text(t.get("text"), 80, "")
         ]
-        traits = normalize_traits(raw.get("traits") if isinstance(raw.get("traits"), Mapping) else {})
+        realm = str(raw.get("ephemeral_realm_id") or "").strip()
+        tags = [clip_text(t, 32 if realm else 16).lower() for t in (raw.get("tags") or []) if clip_text(t, 16)][:6]
+        traits = normalize_traits(
+            raw.get("traits") if isinstance(raw.get("traits"), Mapping) else {},
+            name=name,
+            tags=tags,
+        )
         solid = bool(raw.get("solid", False))
         if "restable" in traits:
             solid = False
         if "portal" in traits:
             placement = "any"
             solid = not bool(traits["portal"].get("is_open", False))
-        realm = str(raw.get("ephemeral_realm_id") or "").strip()
         return {
             "entity_id": eid,
             "blueprint_id": str(raw.get("blueprint_id") or "").strip(),
@@ -648,7 +672,7 @@ class WorldEngine:
             "name": name,
             "brief": clip_text(raw.get("brief"), 60 if realm else MAX_BRIEF_CHARS, name),
             "detail": clip_text(raw.get("detail"), 180 if realm else MAX_DETAIL_CHARS, f"一件{name}。"),
-            "tags": [clip_text(t, 32 if realm else 16).lower() for t in (raw.get("tags") or []) if clip_text(t, 16)][:6],
+            "tags": tags,
             "parent_id": str(raw.get("parent_id") or f"space:{raw.get('space_id') or 'room_default'}"),
             "space_id": str(raw.get("space_id") or "room_default"),
             "x": int(raw.get("x") or 0),
@@ -1205,6 +1229,47 @@ class WorldEngine:
         with self._lock:
             realm = self._realm_space_id_locked(space_id)
             return self._realm_buildings_locked(realm)
+
+    def list_realms_summary(self) -> list[dict[str, Any]]:
+        """列出全部顶层平行域摘要，供外部插件发现并挂载现有常驻小镇。"""
+        with self._lock:
+            spaces = self._world.get("spaces") or {}
+            active_sid = str(self._world.get("active_space_id") or "")
+            active_realm = self._realm_space_id_locked(active_sid) if active_sid in spaces else ""
+            sim_min = float(self._world.get("simulation_minutes") or 0.0)
+            out: list[dict[str, Any]] = []
+            for sp_id, sp in spaces.items():
+                if self._realm_space_id_locked(sp_id) != sp_id:
+                    continue
+                realm_sids = {sid for sid in spaces if self._realm_space_id_locked(sid) == sp_id}
+                actors = [
+                    {
+                        "actor_id": str(a.get("actor_id") or aid),
+                        "name": str(a.get("name") or aid),
+                        "host_character": str(a.get("host_character") or ""),
+                        "is_player": bool(a.get("is_player", False)),
+                        "is_native_npc": bool(a.get("is_native_npc", False)),
+                        "space_id": str(a.get("space_id") or ""),
+                        "actor_status": str(a.get("actor_status") or "active"),
+                    }
+                    for aid, a in (self._world.get("actors") or {}).items()
+                    if a.get("space_id") in realm_sids
+                ]
+                buildings = self._realm_buildings_locked(sp_id)
+                out.append({
+                    "realm_space_id": sp_id,
+                    "name": str(sp.get("name") or sp_id),
+                    "space_kind": str(sp.get("space_kind") or "room"),
+                    "is_active": sp_id == active_realm,
+                    "isolated_persona": self._is_isolated_persona_realm_locked(sp_id),
+                    "opaque_minds": self._is_opaque_realm_locked(sp_id),
+                    "minutes": round(sim_min, 2),
+                    "space_count": len(realm_sids),
+                    "building_count": len(buildings),
+                    "actors": actors,
+                })
+            out.sort(key=lambda row: (0 if row["is_active"] else 1, row["name"]))
+            return out
 
     def _weather_state_locked(self, realm_id: str) -> dict[str, Any]:
         sim_min = float(self._world.get("simulation_minutes") or 0.0)
@@ -2871,6 +2936,54 @@ class WorldEngine:
             idx += 1
         return aid
 
+    def _seed_familiar_realm_locked(self, actor: dict[str, Any], realm_sid: str) -> None:
+        """为本镇常驻居民预填对小镇各建筑与通路的熟悉认知，避免表现为刚入镇的访客。"""
+        if not realm_sid:
+            return
+        cog = actor.setdefault("autonomy", {}).setdefault("cognition", {})
+        if not isinstance(cog, dict):
+            return
+        places = cog.setdefault("places", {})
+        portals = cog.setdefault("portals", {})
+        realm_sids = {
+            sid for sid in self._world["spaces"]
+            if self._realm_space_id_locked(sid) == realm_sid
+        }
+        for sid in realm_sids:
+            sp = self._world["spaces"][sid]
+            cur = places.get(sid) if isinstance(places.get(sid), dict) else {}
+            visits = max(3, int(cur.get("visits") or 0))
+            places[sid] = {
+                **cur,
+                "name": str(sp.get("name") or sid),
+                "kind": str(sp.get("space_kind") or "building"),
+                "source": "direct",
+                "visits": visits,
+                "samples": list(cur.get("samples") or [0.0]),
+            }
+        for ent in self._world["entities"].values():
+            sp_id = str(ent.get("space_id") or "")
+            if sp_id not in realm_sids:
+                continue
+            pt = (ent.get("traits") or {}).get("portal")
+            if not isinstance(pt, Mapping):
+                continue
+            tgt = str(pt.get("target_space_id") or "").strip()
+            if not tgt or tgt not in realm_sids:
+                continue
+            tgt_sp = self._world["spaces"].get(tgt) or {}
+            portals[f"{sp_id}:{tgt}"] = {
+                "space": sp_id,
+                "target": tgt,
+                "name": str(tgt_sp.get("name") or tgt),
+                "x": int(ent.get("x") or 0),
+                "y": int(ent.get("y") or 0),
+                "source": "direct",
+                "confidence": 1.0,
+                "samples": [0.0],
+            }
+        cog["last_space"] = str(actor.get("space_id") or realm_sid)
+
     def import_actor(
         self,
         *,
@@ -2890,6 +3003,7 @@ class WorldEngine:
         status_note: str = "",
         persona_brief: str = "",
         home_space_id: str = "",
+        seed_familiar_realm: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             clean_name = clip_text(name or host_character, 20, "七海千秋")
@@ -2956,6 +3070,20 @@ class WorldEngine:
                     existing["map_style"] = map_style
                 actor = existing
             else:
+                init_appearance = dict(appearance) if appearance is not None else None
+                init_map_style = map_style
+                if not is_native_npc:
+                    char_key = str(host_character or clean_name).strip()
+                    if init_appearance is None:
+                        saved_app, saved_style = self._resolve_saved_character_appearance_locked(char_key)
+                        if saved_app is not None:
+                            init_appearance = saved_app
+                        if not init_map_style and saved_style in MAP_STYLES:
+                            init_map_style = saved_style
+                    elif not init_map_style:
+                        _saved_app, saved_style = self._resolve_saved_character_appearance_locked(char_key)
+                        if saved_style in MAP_STYLES:
+                            init_map_style = saved_style
                 actor = normalize_actor({
                     "actor_id": aid,
                     "host_character": host_character or clean_name,
@@ -2969,8 +3097,8 @@ class WorldEngine:
                     "space_id": space_id,
                     "x": tx,
                     "y": ty,
-                    "appearance": dict(appearance) if appearance else None,
-                    "map_style": map_style or "doll",
+                    "appearance": init_appearance,
+                    "map_style": init_map_style or "doll",
                     "sprite": resolved_sprite if resolved_sprite else {
                         "mode": "pixel_grid",
                         "w": 16,
@@ -2982,6 +3110,8 @@ class WorldEngine:
                 self._world["actors"][aid] = actor
 
             self._refresh_actor_expression_locked(actor, force_auto=True)
+            if seed_familiar_realm:
+                self._seed_familiar_realm_locked(actor, self._realm_space_id_locked(space_id))
             self._sync_actor_world_state_locked(actor)
             clean_home = str(home_space_id or "").strip()
             if clean_home and clean_home in self._world["spaces"]:
@@ -3073,8 +3203,9 @@ class WorldEngine:
         blueprint: Mapping[str, Any],
         *,
         strategy: str = "spread",
+        zone_id: str = "",
     ) -> tuple[int, int]:
-        """为无显式坐标的蓝图放置寻找按策略分散且避开门洞的可落位格子。"""
+        """为无显式坐标的蓝图放置寻找按策略分散、可选限定隔间且避开门洞的可落位格子。"""
         space = self._world["spaces"].get(space_id)
         if space is None:
             raise ValueError(f"空间不存在：{space_id}")
@@ -3196,6 +3327,22 @@ class WorldEngine:
             if placement == "any":
                 raw_candidates.extend(wall_cells)
 
+        clean_zid = str(zone_id or "").strip()
+        if clean_zid:
+            target_zone = next(
+                (
+                    z for z in (space.get("zones") or ())
+                    if isinstance(z, Mapping) and (str(z.get("zone_id") or "") == clean_zid or str(z.get("name") or "") == clean_zid)
+                ),
+                None,
+            )
+            if target_zone is not None:
+                zx, zy = int(target_zone.get("x") or 0), int(target_zone.get("y") or 0)
+                zw, zh = int(target_zone.get("w") or 0), int(target_zone.get("h") or 0)
+                zone_candidates = [pt for pt in raw_candidates if zx <= pt[0] < zx + zw and zy <= pt[1] < zy + zh]
+                if zone_candidates:
+                    raw_candidates = [*zone_candidates, *raw_candidates]
+
         seen: set[tuple[int, int]] = set()
         for cx, cy in raw_candidates:
             if (cx, cy) in seen:
@@ -3228,6 +3375,78 @@ class WorldEngine:
             self._save_world_locked()
             return copy.deepcopy(actor)
 
+    def _resolve_saved_character_appearance_locked(
+        self,
+        char_key: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """解析角色已保存的皮肤外观与地图呈现风格（显式预设 -> 同名现有角色 -> 本地像素图包）。"""
+        key = str(char_key or "").strip()
+        if not key:
+            return None, ""
+        resolved_app: dict[str, Any] | None = None
+        resolved_style = ""
+
+        presets = self._world.get("character_appearances") or {}
+        rec = presets.get(key)
+        if isinstance(rec, Mapping) and isinstance(rec.get("appearance"), Mapping):
+            resolved_app = copy.deepcopy(dict(rec["appearance"]))
+            ms = str(rec.get("map_style") or "").strip().lower()
+            resolved_style = ms if ms in MAP_STYLES else "doll"
+
+        if resolved_app is None:
+            candidates = [
+                a for a in (self._world.get("actors") or {}).values()
+                if not a.get("is_player")
+                and not a.get("is_native_npc")
+                and str(a.get("host_character") or a.get("name") or "").strip() == key
+            ]
+            if candidates:
+                best = max(
+                    candidates,
+                    key=lambda a: (
+                        0 if a.get("ephemeral_realm_id") else 1,
+                        1 if ((a.get("appearance") or {}).get("custom_frames") or {}).get("down") else 0,
+                    ),
+                )
+                if isinstance(best.get("appearance"), Mapping):
+                    resolved_app = copy.deepcopy(dict(best["appearance"]))
+                ms = str(best.get("map_style") or "").strip().lower()
+                if ms in MAP_STYLES:
+                    resolved_style = ms
+
+        has_custom = bool(
+            isinstance(resolved_app, Mapping)
+            and isinstance(resolved_app.get("custom_frames"), Mapping)
+            and resolved_app["custom_frames"].get("down")
+        )
+        if not has_custom:
+            cached_frames = sprite_pack.extract_cached_sprite_frames(self._data_root, key)
+            if cached_frames:
+                base = copy.deepcopy(resolved_app) if isinstance(resolved_app, Mapping) else default_appearance(key)
+                base["custom_frames"] = cached_frames
+                resolved_app = base
+
+        return resolved_app, resolved_style
+
+    def has_saved_character_appearance(self, char_key: str) -> bool:
+        """检查角色是否已有保存的自定义皮肤、同角色外观或本地像素缓存。"""
+        key = str(char_key or "").strip()
+        if not key:
+            return False
+        with self._lock:
+            if key in (self._world.get("character_appearances") or {}):
+                return True
+            for a in (self._world.get("actors") or {}).values():
+                if (
+                    not a.get("is_player")
+                    and not a.get("is_native_npc")
+                    and not a.get("ephemeral_realm_id")
+                    and str(a.get("host_character") or a.get("name") or "").strip() == key
+                    and ((a.get("appearance") or {}).get("custom_frames") or {}).get("down")
+                ):
+                    return True
+        return sprite_pack.get_cached_sprite(self._data_root, key) is not None
+
     def set_actor_appearance(
         self,
         actor_id: str,
@@ -3249,6 +3468,24 @@ class WorldEngine:
                 if map_style not in MAP_STYLES:
                     raise ValueError("map_style 只能是 doll 或 portrait。")
                 actor["map_style"] = map_style
+            if not actor.get("is_player") and not actor.get("is_native_npc"):
+                char_key = str(actor.get("host_character") or actor.get("name") or "").strip()
+                if char_key:
+                    self._world.setdefault("character_appearances", {})[char_key] = {
+                        "appearance": copy.deepcopy(actor["appearance"]),
+                        "map_style": actor["map_style"],
+                    }
+                    for sib_id, sib in self._world["actors"].items():
+                        if (
+                            sib_id == actor_id
+                            or sib.get("is_player")
+                            or sib.get("is_native_npc")
+                        ):
+                            continue
+                        sib_key = str(sib.get("host_character") or sib.get("name") or "").strip()
+                        if sib_key == char_key:
+                            sib["appearance"] = copy.deepcopy(actor["appearance"])
+                            sib["map_style"] = actor["map_style"]
             self._append_event_locked(
                 "actor_appearance_changed",
                 actor_id=actor_id,
@@ -4447,7 +4684,7 @@ class WorldEngine:
     def place_ephemeral_entity(
         self, space_id: str, raw_blueprint: Mapping[str, Any], *,
         x: int | None = None, y: int | None = None, container_entity_id: str = "",
-        placement_strategy: str = "spread",
+        placement_strategy: str = "spread", zone_id: str = "",
     ) -> dict[str, Any]:
         """放置只在目标平行域持久化的生成物。"""
         with self._lock:
@@ -4466,13 +4703,13 @@ class WorldEngine:
             if not container_entity_id:
                 if x is None or y is None:
                     try:
-                        x, y = self._find_placement_cell_locked(space_id, bp, strategy=placement_strategy)
+                        x, y = self._find_placement_cell_locked(space_id, bp, strategy=placement_strategy, zone_id=zone_id)
                     except ValueError:
                         if bp["placement"] not in ("wall", "surface_only"):
                             raise
                         # 生成物缺少墙面或承载面时，改放在同一空间的可通行地面上。
                         bp.update(placement="floor", solid=False)
-                        x, y = self._find_placement_cell_locked(space_id, bp, strategy=placement_strategy)
+                        x, y = self._find_placement_cell_locked(space_id, bp, strategy=placement_strategy, zone_id=zone_id)
                 parent, px, py, pz = self._resolve_placement_locked(
                     space_id, x, y, bp["footprint"], bp["placement"], bp["solid"],
                 )
@@ -4729,6 +4966,164 @@ class WorldEngine:
                 "player_space_id": str(target_player["space_id"]),
                 "preempt_seq": int(cognition.get("preempt_seq", 0)),
             }
+
+    def propose_actor_commitment(
+        self,
+        actor_id: str,
+        commitment: Mapping[str, Any],
+        *,
+        space_id: str = "",
+        preempt: bool = False,
+    ) -> dict[str, Any]:
+        """以非强制方式为角色注入自主选择生成的世界意图（source='persona_choice'）。"""
+        with self._lock:
+            aid = str(actor_id or "").strip()
+            actor = self._world["actors"].get(aid)
+            if actor is None:
+                raise ValueError(f"角色不存在：{aid}")
+            if actor.get("is_player"):
+                return {"ok": True, "proposed": False, "reason": "is_player"}
+            if actor.get("actor_status", "active") != "active":
+                return {"ok": True, "proposed": False, "reason": "actor_not_active"}
+
+            eff_sid = str(space_id or actor.get("space_id") or "").strip()
+            if eff_sid not in self._world["spaces"]:
+                eff_sid = str(actor["space_id"])
+            realm = self._realm_space_id_locked(eff_sid)
+
+            kind = str(commitment.get("kind") or "").strip()
+            target = str(commitment.get("target") or "").strip()
+            if kind not in ("visit", "entity", "social", "seek_player") or not target:
+                raise ValueError("propose_actor_commitment 需要有效的 kind 与 target。")
+            mod_id = time.monotonic_ns()
+            cid = str(commitment.get("commitment_id") or f"pc:{mod_id}")
+            drive = str(commitment.get("drive") or "").strip()
+            if drive not in _MODULATION_DOMAINS:
+                drive = "social" if kind in ("social", "seek_player") else "curiosity"
+            reason = clip_text(commitment.get("reason"), 48, "") or "按照自己的想法去看看"
+            priority = "high" if str(commitment.get("priority") or "").lower() == "high" else "normal"
+            norm_comm: dict[str, Any] = {
+                "id": cid,
+                "kind": kind,
+                "target": target,
+                "drive": drive,
+                "reason": reason,
+                "priority": priority,
+                "source": "persona_choice",
+            }
+            if commitment.get("action"):
+                norm_comm["action"] = str(commitment["action"]).strip().lower()
+            if commitment.get("note_text"):
+                norm_comm["note_text"] = clip_text(commitment["note_text"], 120, "")
+
+            packet: dict[str, Any] = {
+                "id": mod_id,
+                "realm": realm,
+                "at": self._world["simulation_minutes"],
+                "source": "persona_choice",
+                "strength": 0.9,
+                "agenda": reason,
+                "half_life": 20.0,
+                "domains": {drive: 0.35},
+                "places": {},
+                "preferred_zone": "",
+                "semantic": {},
+                "experience": "",
+                "thought": "",
+                "diary": "",
+                "relax": 0.0,
+                "persistence": 0.1,
+                "persist_think": False,
+                "beliefs": [],
+                "peer_beliefs": [],
+                "commitment": norm_comm,
+            }
+            cognition = actor["autonomy"].setdefault("cognition", {})
+            cognition["pending_modulation"] = packet
+            if preempt:
+                cognition["preempt_seq"] = int(cognition.get("preempt_seq", 0)) + 1
+            self._sync_actor_world_state_locked(actor)
+            self._append_event_locked(
+                "actor_commitment_proposed",
+                actor_id=aid,
+                space_id=str(actor["space_id"]),
+                payload={
+                    "commitment_id": cid,
+                    "kind": kind,
+                    "target": target,
+                    "action": norm_comm.get("action", ""),
+                    "reason": reason,
+                },
+            )
+            self._save_world_locked()
+            return {"ok": True, "proposed": True, "commitment_id": cid, "actor_id": aid}
+
+    def emit_ambient_cue(
+        self,
+        space_id: str,
+        text: str,
+        *,
+        zone_id: str = "",
+        audible_adjacent_zones: bool = True,
+        cue_kind: str = "sound",
+    ) -> dict[str, Any]:
+        """向指定空间或隔间发出客观环境异常/声光线索，进入见证者与同层耳闻者的事件流。"""
+        with self._lock:
+            sid = str(space_id or "").strip()
+            space = self._world["spaces"].get(sid)
+            if space is None:
+                raise ValueError(f"空间不存在：{sid}")
+            clean_text = clip_text(text, 100, "")
+            if not clean_text:
+                raise ValueError("emit_ambient_cue 需要非空的 text。")
+            clean_kind = clip_text(cue_kind, 24, "sound") or "sound"
+            clean_zid = str(zone_id or "").strip()
+            matched_zid = ""
+            matched_zname = ""
+            if clean_zid:
+                zone = next(
+                    (
+                        z for z in (space.get("zones") or ())
+                        if isinstance(z, Mapping) and (str(z.get("zone_id") or "") == clean_zid or str(z.get("name") or "") == clean_zid)
+                    ),
+                    None,
+                )
+                if zone is not None:
+                    matched_zid = str(zone.get("zone_id") or "")
+                    matched_zname = str(zone.get("name") or "")
+
+            witness_ids: list[str] = []
+            audible_ids: list[str] = []
+            for aid, actor in self._world["actors"].items():
+                if actor.get("space_id") != sid or actor.get("actor_status", "active") != "active":
+                    continue
+                if not matched_zid:
+                    witness_ids.append(aid)
+                    continue
+                az = self.get_zone_at(space, actor["x"], actor["y"])
+                if az and str(az.get("zone_id") or "") == matched_zid:
+                    witness_ids.append(aid)
+                elif audible_adjacent_zones:
+                    audible_ids.append(aid)
+
+            self._push_diff_locked(sid, clean_text)
+            ev = self._append_event_locked(
+                "ambient_cue",
+                space_id=sid,
+                payload={
+                    "space_id": sid,
+                    "space_name": str(space.get("name") or sid),
+                    "floor_label": str(space.get("floor_label") or ""),
+                    "zone_id": matched_zid,
+                    "zone_name": matched_zname,
+                    "text": clean_text,
+                    "cue_kind": clean_kind,
+                    "witness_actor_ids": witness_ids,
+                    "audible_actor_ids": audible_ids,
+                },
+            )
+            self._save_world_locked()
+            return {"ok": True, "event": ev, "witness_actor_ids": witness_ids, "audible_actor_ids": audible_ids}
 
     def pending_persona_events(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -6118,7 +6513,11 @@ class WorldEngine:
             if detail is not None:
                 ent["detail"] = clip_text(detail, MAX_DETAIL_CHARS, ent["detail"])
             if traits is not None:
-                ent["traits"] = normalize_traits(traits)
+                ent["traits"] = normalize_traits(
+                    traits,
+                    name=str(ent.get("name") or ""),
+                    tags=ent.get("tags") or (),
+                )
             if portal_target_space_id is not None and "portal" in ent["traits"]:
                 ent["traits"]["portal"]["target_space_id"] = str(portal_target_space_id).strip()
             if "restable" in ent["traits"]:
@@ -6369,7 +6768,12 @@ class WorldEngine:
             if occ:
                 occ_act = (self._world.get("actors") or {}).get(str(occ))
                 occ_name = str(occ_act.get("name") or "").strip() if isinstance(occ_act, Mapping) else ""
-                parts.append(f"{occ_name}在上面睡觉" if occ_name else "有人在上面睡觉")
+                rmode = self._entity_rest_mode(entity)
+                is_sit = rmode == "sit" or (isinstance(occ_act, Mapping) and occ_act.get("posture") == "sitting")
+                if is_sit:
+                    parts.append(f"{occ_name}正坐在上面" if occ_name else "有人正坐在上面")
+                else:
+                    parts.append(f"{occ_name}在上面睡觉" if occ_name else "有人在上面睡觉")
             else:
                 parts.append("空着")
         if "activity" in traits:
@@ -6437,7 +6841,8 @@ class WorldEngine:
             if occ == aid:
                 verbs.append(("leave_rest", "起身"))
             elif occ is None:
-                verbs.append(("rest", "坐下休息"))
+                rmode = self._entity_rest_mode(entity)
+                verbs.append(("rest", "坐下" if rmode == "sit" else "坐下休息"))
 
         if "activity" in traits:
             ac = traits["activity"]
@@ -6532,6 +6937,16 @@ class WorldEngine:
             self._sync_actor_world_state_locked(actor)
             self._save_world_locked()
             return {"resumed": True, "actor_id": actor["actor_id"], "name": actor["name"]}
+
+    @staticmethod
+    def _entity_rest_mode(entity: Mapping[str, Any] | None) -> str:
+        if not isinstance(entity, Mapping):
+            return "sleep"
+        return infer_rest_mode(
+            (entity.get("traits") or {}).get("restable"),
+            name=str(entity.get("name") or ""),
+            tags=entity.get("tags") or (),
+        )
 
     def _clear_actor_rest_locked(self, actor: dict[str, Any]) -> None:
         rest_id = actor.get("resting_on_id")
@@ -7050,11 +7465,18 @@ class WorldEngine:
                 return report(f"{prefix}{label}「{ent['name']}」。", ok=True)
 
             if canon == "rest":
+                rmode = self._entity_rest_mode(ent)
                 occ = traits["restable"].get("occupied_by")
                 if occ and occ != actor_id:
                     occ_act = (self._world.get("actors") or {}).get(str(occ))
-                    if isinstance(occ_act, Mapping) and occ_act.get("posture") == "resting" and occ_act.get("resting_on_id") == eid:
+                    if (
+                        isinstance(occ_act, Mapping)
+                        and occ_act.get("posture") in ("resting", "sitting")
+                        and occ_act.get("resting_on_id") == eid
+                    ):
                         occ_name = str(occ_act.get("name") or "别人").strip()
+                        if rmode == "sit" or occ_act.get("posture") == "sitting":
+                            return report(f"「{ent['name']}」上已经有{occ_name}坐着了，换个位置吧。")
                         return report(f"「{ent['name']}」上已经有{occ_name}在睡觉了，挤不下啦。")
                 ok, prefix = self._walk_to_entity_locked(actor, ent, allow_inside_entity=True)
                 if not ok:
@@ -7062,15 +7484,27 @@ class WorldEngine:
                 self._clear_actor_rest_locked(actor)
                 traits["restable"]["occupied_by"] = actor_id
                 actor["resting_on_id"] = eid
-                actor["posture"] = "resting"
+                actor["posture"] = "sitting" if rmode == "sit" else "resting"
                 actor["x"] = int(ent["x"])
                 actor["y"] = int(ent["y"])
-                if not actor.get("is_player"):
+                if not actor.get("is_player") and rmode != "sit":
                     cognition = actor["autonomy"].setdefault("cognition", {})
                     cognition["rest_started_at"] = self._world["simulation_minutes"]
                     cognition["rest_started_ts"] = time.time()
-                self._refresh_actor_expression_locked(actor, action_kind="rest")
-                self._append_event_locked("entity_state_changed", actor_id=actor_id, space_id=sid, payload={"entity_id": eid, "resting": True})
+                self._refresh_actor_expression_locked(actor, action_kind="sit" if rmode == "sit" else "rest")
+                self._append_event_locked(
+                    "entity_state_changed",
+                    actor_id=actor_id,
+                    space_id=sid,
+                    payload={
+                        "entity_id": eid,
+                        "resting": rmode != "sit",
+                        "sitting": rmode == "sit",
+                        "posture": actor["posture"],
+                    },
+                )
+                if rmode == "sit":
+                    return report(f"{prefix}在「{ent['name']}」上坐了下来。", ok=True)
                 return report(f"{prefix}在「{ent['name']}」上歇了下来。", ok=True)
 
             if canon == "leave_rest":
@@ -7222,19 +7656,41 @@ class WorldEngine:
 
             src_sid = str(ent.get("space_id") or "")
             isolated = self._is_isolated_persona_realm_locked(src_sid)
+            src_realm = self._realm_space_id_locked(src_sid) if isolated else src_sid
             if (isolated or self._is_isolated_persona_realm_locked(target_sid)) and (
                 self._realm_space_id_locked(src_sid) != self._realm_space_id_locked(target_sid)
             ):
                 raise ValueError("这扇门无法通往其他平行世界。")
-            if observe_only:
-                return {"entered": True, "mode": "observer", "target_space_id": target_sid}
-            chosen_actor: dict[str, Any] | None = None
+            overlay = (self._world.get("external_overlays") or {}).get(src_realm) if isolated else None
+            is_view_only = bool(isinstance(overlay, Mapping) and overlay.get("view_only"))
             req_aid = str(actor_id or "").strip()
+            if observe_only or (isolated and is_view_only):
+                return {
+                    "entered": True,
+                    "mode": "observer",
+                    "actor_id": "",
+                    "from_space_id": src_sid,
+                    "target_space_id": target_sid,
+                    "target_space_name": str(target_space["name"]),
+                    "feedback": f"切换视角进入「{target_space['name']}」。",
+                }
+            chosen_actor: dict[str, Any] | None = None
             if req_aid:
                 cand = self._world["actors"].get(req_aid)
                 if cand and cand.get("space_id") == src_sid:
                     chosen_actor = cand
-            if chosen_actor is None:
+                elif isolated:
+                    # 平行故事域内若显式传入的演员（如尚未进入房间的玩家）不在门前，绝不强行瞬移无关 NPC
+                    return {
+                        "entered": True,
+                        "mode": "observer",
+                        "actor_id": "",
+                        "from_space_id": src_sid,
+                        "target_space_id": target_sid,
+                        "target_space_name": str(target_space["name"]),
+                        "feedback": f"切换视角进入「{target_space['name']}」。",
+                    }
+            if chosen_actor is None and not isolated:
                 active_aid = str(self._world.get("active_actor_id") or "")
                 active_cand = self._world["actors"].get(active_aid) if active_aid else None
                 if active_cand and active_cand.get("space_id") == src_sid:
@@ -7596,7 +8052,10 @@ class WorldEngine:
                         continue
                     vit = act["vitals"]
                     rest_id = act.get("resting_on_id")
-                    is_resting = bool(act.get("posture") == "resting" and rest_id and rest_id in self._world["entities"])
+                    posture = str(act.get("posture") or "standing")
+                    has_rest_ent = bool(rest_id and rest_id in self._world["entities"])
+                    is_resting = bool(posture == "resting" and has_rest_ent)
+                    is_sitting = bool(posture == "sitting" and has_rest_ent)
                     if is_resting:
                         regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.012)
                         vit["energy"] = round(clamp_float(vit["energy"] + regen * delta_min, 0.0, 1.0, 0.7), precision)
@@ -7615,6 +8074,9 @@ class WorldEngine:
                                     act, "memory_consolidated", None, "consolidate", summary,
                                     epa={"e": 0.0, "p": 0.0, "a": 0.0},
                                 )
+                    elif is_sitting:
+                        regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.008)
+                        vit["energy"] = round(clamp_float(vit["energy"] + regen * 0.45 * delta_min, 0.0, 1.0, 0.7), precision)
                     else:
                         vit["energy"] = round(clamp_float(vit["energy"] - 0.0012 * delta_min, 0.05, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] + 0.0015 * delta_min, 0.0, 1.0, 0.3), precision)
@@ -7630,6 +8092,123 @@ class WorldEngine:
                     self._append_event_locked("world_tick", payload={"delta_min": round(delta_min, 2), "cooled": cooled, "restocked": restocked})
             self._save_world_locked()
             return {"delta_min": round(delta_min, 2), "cooled": cooled, "restocked": restocked}
+
+    def has_space(self, space_id: str) -> bool:
+        with self._lock:
+            return str(space_id or "").strip() in self._world["spaces"]
+
+    def latest_night_skip(self, space_id: str = "") -> dict[str, Any] | None:
+        with self._lock:
+            sid = str(space_id or self._world.get("active_space_id") or "").strip()
+            if sid not in self._world["spaces"]:
+                return None
+            realm_sid = self._realm_space_id_locked(sid)
+            realm_space = self._world["spaces"].get(realm_sid) or {}
+            notice = realm_space.get("night_skip_notice")
+            return copy.deepcopy(notice) if isinstance(notice, Mapping) else None
+
+    def try_skip_night(
+        self,
+        space_id: str = "",
+        *,
+        chatting_ids: set[str] | None = None,
+        consolidate_memory: bool = True,
+    ) -> dict[str, Any] | None:
+        """深夜全员默认上床且无重要夜间事务仍在活动时，自动将所属平行域时间跳至次日清晨 07:00。"""
+        with self._lock:
+            sid = str(space_id or self._world.get("active_space_id") or "").strip()
+            if not sid or sid not in self._world["spaces"]:
+                return None
+            realm_sid = self._realm_space_id_locked(sid)
+            realm_space = self._world["spaces"].get(realm_sid)
+            if not isinstance(realm_space, dict):
+                return None
+            now_ts = time.time()
+            realm_off = self._realm_clock_offset_locked(realm_sid)
+            lt = compute_lighting(realm_space, self._world["entities"], now_ts, realm_off)
+            hour = float(lt.get("hour_float") or 12.0)
+            if not (hour >= 23.5 or hour < 6.5):
+                return None
+
+            local_ts = now_ts + realm_off * 60.0
+            night_key = int((local_ts - 6.5 * 3600.0) // 86400)
+            if realm_space.get("_last_night_skip_day") == night_key:
+                return None
+
+            realm_actors = [
+                act for act in self._world["actors"].values()
+                if act.get("actor_status", "active") == "active"
+                and self._realm_space_id_locked(str(act.get("space_id") or "")) == realm_sid
+            ]
+            npcs = [act for act in realm_actors if not act.get("is_player")]
+            players = [act for act in realm_actors if act.get("is_player")]
+            if not npcs:
+                return None
+            chatting = chatting_ids or set()
+            if any(str(act.get("actor_id") or "") in chatting for act in realm_actors):
+                return None
+            for act in npcs:
+                rest_id = act.get("resting_on_id")
+                if act.get("posture") != "resting" or not (rest_id and rest_id in self._world["entities"]):
+                    return None
+            overlay = (self._world.get("external_overlays") or {}).get(realm_sid)
+            is_view_only = bool(isinstance(overlay, Mapping) and overlay.get("view_only"))
+            if players and not is_view_only:
+                if any(p.get("posture") != "resting" for p in players):
+                    return None
+
+            skip_hours = (24.0 - hour + 7.0) if hour >= 23.5 else (7.0 - hour)
+            skip_min = round(skip_hours * 60.0, 2)
+            from_clock = str(lt.get("clock_text") or f"{int(hour):02d}:{int((hour % 1) * 60):02d}")
+            realm_space["clock_offset_minutes"] = round(float(realm_space.get("clock_offset_minutes") or 0.0) + skip_min, 2)
+            realm_space["_last_night_skip_day"] = night_key
+            sim_now = float(self._world.get("simulation_minutes") or 0.0)
+
+            for act in (*npcs, *players):
+                vit = act["vitals"]
+                vit["energy"] = round(max(float(vit.get("energy", 0.7)), 0.94), 3)
+                vit["sleep_pressure"] = round(min(float(vit.get("sleep_pressure", 0.2)), 0.08), 3)
+                if not act.get("is_player"):
+                    aut = normalize_autonomy(act.get("autonomy"))
+                    aut["hunger"] = round(min(0.65, float(aut.get("hunger", 0.25)) + 0.18), 3)
+                    cog = aut.setdefault("cognition", {})
+                    if consolidate_memory and not cog.get("rest_consolidated"):
+                        cog["rest_consolidated"] = True
+                        summary = episodic_memory.consolidate(cog.get("episodic_memory") or {}, sim_now)
+                        if summary:
+                            self._queue_persona_event_locked(
+                                act, "memory_consolidated", None, "consolidate", summary,
+                                epa={"e": 0.0, "p": 0.0, "a": 0.0},
+                            )
+                    cog.pop("agreed_rest_until", None)
+                    for k_int in ("active_intention", "suspended_intention"):
+                        if isinstance(cog.get(k_int), Mapping) and cog[k_int].get("drive") == "rest":
+                            cog.pop(k_int, None)
+                    cog["rest_resume_until"] = sim_now + 1.0
+                    act["autonomy"] = aut
+                seat = self._world["entities"].get(act.get("resting_on_id"))
+                self._clear_actor_rest_locked(act)
+                self._record_act_locked(act, "leave_rest", seat)
+                self._refresh_actor_expression_locked(act, action_kind="leave_rest")
+                self._sync_actor_world_state_locked(act)
+
+            self._restock_shops_locked(realm_sid, now_ts)
+            prev_notice = realm_space.get("night_skip_notice") if isinstance(realm_space.get("night_skip_notice"), Mapping) else {}
+            seq = int(prev_notice.get("seq") or 0) + 1
+            notice = {
+                "seq": seq,
+                "realm_space_id": realm_sid,
+                "from_clock": from_clock,
+                "to_clock": "07:00",
+                "skip_minutes": skip_min,
+                "woken_actors": [str(act["actor_id"]) for act in npcs],
+                "message": "🌙 夜深人静，全员已入睡，时间流逝至次日清晨 07:00",
+            }
+            realm_space["night_skip_notice"] = notice
+            self._push_diff_locked(realm_sid, notice["message"])
+            self._append_event_locked("night_skipped", space_id=realm_sid, payload=notice)
+            self._save_world_locked()
+            return copy.deepcopy(notice)
 
     def _actor_active_sprite_payload(self, actor: Mapping[str, Any]) -> dict[str, Any]:
         sp = actor.get("sprite") or {}
@@ -7896,6 +8475,9 @@ class WorldEngine:
                 "building_floors": building_floors,
                 "current_zone": current_zone,
                 "lighting": lighting,
+                "night_skip": copy.deepcopy((self._world["spaces"].get(realm_sid) or {}).get("night_skip_notice"))
+                if isinstance((self._world["spaces"].get(realm_sid) or {}).get("night_skip_notice"), Mapping)
+                else None,
                 "weather": self._weather_view_locked(sid),
                 "palette": active_palette,
                 "palettes": list(palettes.values()),

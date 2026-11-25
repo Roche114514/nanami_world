@@ -195,7 +195,8 @@ def project_terminal_data(
         p_dist = max(abs(int(actor["x"]) - int(pa["x"])), abs(int(actor["y"]) - int(pa["y"])))
         p_dir = _direction_text(int(actor["x"]), int(actor["y"]), int(pa["x"]), int(pa["y"]))
         p_pos = "就在身边" if p_dist <= 1 else f"{p_dir} {p_dist} 格"
-        p_posture = "休息中" if pa.get("posture") == "resting" else "站着"
+        pa_posture = str(pa.get("posture") or "standing")
+        p_posture = "休息中" if pa_posture == "resting" else ("坐着" if pa_posture == "sitting" else "站着")
         rel = relations_map.get(f"char:{phost}") or relations_map.get(f"char:{pname}") or {}
         if not rel.get("known"):
             rel_txt = "关系：尚不认识（初次见面可先打招呼认识）"
@@ -228,7 +229,8 @@ def project_terminal_data(
     w_view = snap.get("weather") or engine.get_weather(sid)
     w_desc = str(w_view.get("description") or "").strip()
     w_part = f"，{w_desc}" if w_desc else ""
-    posture_cn = "正躺着休息" if actor.get("posture") == "resting" else "站着"
+    act_posture = str(actor.get("posture") or "standing")
+    posture_cn = "正躺着休息" if act_posture == "resting" else ("正坐着" if act_posture == "sitting" else "站着")
     lines: list[str] = [
         "【世界现实】（以下是你此刻所在文字世界的客观事实，严禁编造或使用清单之外的物品；这不是任务清单，不必每句都刻意报幕）",
         f"- 空间：{space['name']}（{space['width']}×{space['height']}，{lighting['clock']} {period_cn}，{light_cn}{w_part}）｜你在 ({actor['x']}, {actor['y']}) {posture_cn}［脚下：{underfoot['name']}］",

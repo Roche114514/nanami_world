@@ -413,7 +413,45 @@ def normalize_footprint(raw: Any) -> list[int]:
     return [1, 1]
 
 
-def normalize_traits(raw: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+_SLEEP_REST_TAGS = frozenset({"bedroom", "bed", "futon", "hammock"})
+_SLEEP_REST_NAME_TOKENS = ("床", "卧榻", "睡袋", "被褥", "吊床")
+_SIT_REST_TAGS = frozenset({"bench", "chair", "stool", "seat", "sofa"})
+_SIT_REST_NAME_TOKENS = (
+    "长椅", "长凳", "椅子", "木椅", "座椅", "靠背椅", "餐椅",
+    "扶手椅", "高脚凳", "木凳", "板凳", "吧凳", "圆凳", "方凳",
+    "卡座", "软座", "长沙发", "沙发",
+)
+
+
+def infer_rest_mode(
+    restable: Mapping[str, Any] | None = None,
+    *,
+    name: str = "",
+    tags: Sequence[str] = (),
+) -> str:
+    """区分「坐具（bench/chair/stool）」与「睡床（bed）」，避免长椅被当作床。"""
+    src = restable if isinstance(restable, Mapping) else {}
+    explicit = str(src.get("rest_mode") or src.get("mode") or src.get("posture") or "").strip().lower()
+    if explicit in ("sit", "sitting"):
+        return "sit"
+    if explicit in ("sleep", "sleeping", "lying", "bed"):
+        return "sleep"
+
+    tag_set = {str(t or "").strip().lower() for t in (tags or ()) if str(t or "").strip()}
+    clean_name = str(name or "").strip()
+    if tag_set & _SLEEP_REST_TAGS or any(tok in clean_name for tok in _SLEEP_REST_NAME_TOKENS):
+        return "sleep"
+    if tag_set & _SIT_REST_TAGS or any(tok in clean_name for tok in _SIT_REST_NAME_TOKENS):
+        return "sit"
+    return "sleep"
+
+
+def normalize_traits(
+    raw: Mapping[str, Any] | None,
+    *,
+    name: str = "",
+    tags: Sequence[str] = (),
+) -> dict[str, dict[str, Any]]:
     src = raw if isinstance(raw, Mapping) else {}
     out: dict[str, dict[str, Any]] = {}
 
@@ -473,8 +511,12 @@ def normalize_traits(raw: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]
     if isinstance(src.get("restable"), Mapping):
         rs = src["restable"]
         occ = rs.get("occupied_by")
+        regen_raw = rs.get("energy_regen_per_min")
+        if regen_raw is None and rs.get("energy_per_min") is not None:
+            regen_raw = rs.get("energy_per_min")
         out["restable"] = {
-            "energy_regen_per_min": clamp_float(rs.get("energy_regen_per_min"), 0.001, 0.2, 0.012),
+            "rest_mode": infer_rest_mode(rs, name=name, tags=tags),
+            "energy_regen_per_min": clamp_float(regen_raw, 0.001, 0.2, 0.012),
             "comfort": clamp_float(rs.get("comfort"), 0.0, 1.0, 0.7),
             "occupied_by": str(occ).strip() if occ else None,
         }
@@ -604,7 +646,7 @@ def normalize_blueprint(raw: Mapping[str, Any], *, builtin: bool = False) -> dic
     if def_h > 32:
         def_h = 32
     tags = [clip_text(t, 32 if realm else 16).lower() for t in (raw.get("tags") or []) if clip_text(t, 16)]
-    traits = normalize_traits(raw.get("traits") if isinstance(raw.get("traits"), Mapping) else {})
+    traits = normalize_traits(raw.get("traits") if isinstance(raw.get("traits"), Mapping) else {}, name=name, tags=tags)
     solid = bool(raw.get("solid", footprint[0] * footprint[1] > 1 or placement == "floor"))
     if "restable" in traits:
         solid = False
@@ -1128,7 +1170,7 @@ def normalize_actor(raw: Mapping[str, Any]) -> dict[str, Any]:
     name = clip_text(raw.get("name"), 20, "七海千秋")
     aid = str(raw.get("actor_id") or "").strip() or slugify(name, prefix="actor")
     posture = str(raw.get("posture") or "standing").strip().lower()
-    if posture not in ("standing", "resting"):
+    if posture not in ("standing", "sitting", "resting"):
         posture = "standing"
     actor_status = str(raw.get("actor_status") or "active").strip().lower()
     if actor_status not in VALID_ACTOR_STATUSES:

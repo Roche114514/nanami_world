@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import danganronpa_catalog
+from .schema import normalize_custom_frames
 
 _MAX_IMAGE_BYTES = 1_048_576  # 单张图片上限 1MB
 _MAX_ZIP_BYTES = 50 * 1024 * 1024  # 导出/导入 zip 上限 50MB
@@ -663,3 +664,221 @@ def import_pack_zip_b64(data_root: Path, zip_b64_or_data_url: str) -> dict[str, 
         "skipped_invalid": skipped_invalid,
         "status": list_cache_status(data_root),
     }
+
+
+_PALETTE_KEYS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def extract_cached_sprite_frames(
+    data_root: Path,
+    name: str,
+    english_name: str = "",
+) -> dict[str, Any] | None:
+    """从本地缓存/图包提取像素小人网格帧（供任意世界新导入同名角色直接继承皮肤）。"""
+    cached = get_cached_sprite(data_root, name, english_name)
+    if not cached:
+        return None
+    data_url = str(cached.get("image_data_url") or "").strip()
+    if "," not in data_url:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    try:
+        raw_bytes = base64.b64decode(data_url.split(",", 1)[1], validate=False)
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGBA")
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            return None
+        pixels = list(img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata())
+    except Exception:
+        return None
+
+    mask = [px[3] < 128 for px in pixels]
+    corners = [pixels[0], pixels[w - 1], pixels[(h - 1) * w], pixels[h * w - 1]]
+    if w >= 4 and h >= 4 and all(c[3] >= 200 for c in corners):
+        ref = corners[0]
+        if all(
+            abs(c[0] - ref[0]) + abs(c[1] - ref[1]) + abs(c[2] - ref[2]) <= 18
+            for c in corners
+        ):
+            bg_r, bg_g, bg_b = ref[0], ref[1], ref[2]
+            seen = bytearray(w * h)
+            queue: list[int] = []
+            for x in range(w):
+                queue.append(x)
+                queue.append((h - 1) * w + x)
+            for y in range(1, h - 1):
+                queue.append(y * w)
+                queue.append(y * w + (w - 1))
+            head = 0
+            while head < len(queue):
+                idx = queue[head]
+                head += 1
+                if seen[idx]:
+                    continue
+                seen[idx] = 1
+                r, g, b, a = pixels[idx]
+                if a >= 128 and (abs(r - bg_r) + abs(g - bg_g) + abs(b - bg_b)) > 36:
+                    continue
+                mask[idx] = True
+                ix = idx % w
+                iy = idx // w
+                if ix > 0 and not seen[idx - 1]:
+                    queue.append(idx - 1)
+                if ix + 1 < w and not seen[idx + 1]:
+                    queue.append(idx + 1)
+                if iy > 0 and not seen[idx - w]:
+                    queue.append(idx - w)
+                if iy + 1 < h and not seen[idx + w]:
+                    queue.append(idx + w)
+
+    min_x, max_x = w, -1
+    min_y, max_y = h, -1
+    for y in range(h):
+        row_off = y * w
+        for x in range(w):
+            if not mask[row_off + x]:
+                if x < min_x:
+                    min_x = x
+                if x > max_x:
+                    max_x = x
+                if y < min_y:
+                    min_y = y
+                if y > max_y:
+                    max_y = y
+    if max_x < min_x or max_y < min_y:
+        return None
+
+    bw = max_x - min_x + 1
+    bh = max_y - min_y + 1
+
+    # 检测整倍缩放因子，对齐 JS pdDetectIntScale
+    scale = 1
+    if bw <= 140 and bh <= 140:
+        for s in (4, 3, 2):
+            if bw < s * 10 or bh < s * 12:
+                continue
+            total = 0
+            same = 0
+            for gy in range(0, bh - s + 1, s):
+                for gx in range(0, bw - s + 1, s):
+                    total += 1
+                    base_idx = (min_y + gy) * w + (min_x + gx)
+                    b_m = mask[base_idx]
+                    b_px = pixels[base_idx]
+                    ok = True
+                    for dy in range(s):
+                        for dx in range(s):
+                            cur_idx = (min_y + gy + dy) * w + (min_x + gx + dx)
+                            if mask[cur_idx] != b_m:
+                                ok = False
+                                break
+                            if not b_m:
+                                c_px = pixels[cur_idx]
+                                if (
+                                    abs(c_px[0] - b_px[0])
+                                    + abs(c_px[1] - b_px[1])
+                                    + abs(c_px[2] - b_px[2])
+                                ) > 18:
+                                    ok = False
+                                    break
+                        if not ok:
+                            break
+                    if ok:
+                        same += 1
+            if total > 0 and (same / total) >= 0.9:
+                scale = s
+                break
+
+    nat_w = max(1, round(bw / scale))
+    nat_h = max(1, round(bh / scale))
+
+    grid_rgb: list[list[tuple[int, int, int] | None]] = []
+    if nat_w <= 60 and nat_h <= 60:
+        for gy in range(nat_h):
+            sy = min(max_y, min_y + gy * scale + scale // 2)
+            row_cells: list[tuple[int, int, int] | None] = []
+            for gx in range(nat_w):
+                sx = min(max_x, min_x + gx * scale + scale // 2)
+                idx = sy * w + sx
+                if mask[idx]:
+                    row_cells.append(None)
+                else:
+                    r, g, b, _ = pixels[idx]
+                    row_cells.append((r, g, b))
+            grid_rgb.append(row_cells)
+    else:
+        fit = min(23.0 / bw, 32.0 / bh)
+        nat_w = max(12, min(23, round(bw * fit)))
+        nat_h = max(16, min(32, round(bh * fit)))
+        # 用掩码擦除背景边缘后再 NEAREST 缩放
+        cleaned = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+        cleaned_px: list[tuple[int, int, int, int]] = []
+        for ry in range(bh):
+            row_off = (min_y + ry) * w
+            for rx in range(bw):
+                idx = row_off + min_x + rx
+                if mask[idx]:
+                    cleaned_px.append((0, 0, 0, 0))
+                else:
+                    r, g, b, _ = pixels[idx]
+                    cleaned_px.append((r, g, b, 255))
+        cleaned.putdata(cleaned_px)
+        resized = cleaned.resize((nat_w, nat_h), Image.Resampling.NEAREST)
+        r_px = list(resized.get_flattened_data() if hasattr(resized, "get_flattened_data") else resized.getdata())
+        for gy in range(nat_h):
+            row_cells = []
+            for gx in range(nat_w):
+                r, g, b, a = r_px[gy * nat_w + gx]
+                row_cells.append(None if a < 128 else (r, g, b))
+            grid_rgb.append(row_cells)
+
+    # 统计颜色并映射到最多 62 个 ASCII 键
+    counts: dict[tuple[int, int, int], int] = {}
+    for row_cells in grid_rgb:
+        for cell in row_cells:
+            if cell is not None:
+                counts[cell] = counts.get(cell, 0) + 1
+    if not counts:
+        return None
+
+    ordered_colors = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    top_colors = [c for c, _ in ordered_colors[: len(_PALETTE_KEYS)]]
+    color_to_key: dict[tuple[int, int, int], str] = {
+        rgb: _PALETTE_KEYS[i] for i, rgb in enumerate(top_colors)
+    }
+    palette: dict[str, str] = {
+        _PALETTE_KEYS[i]: f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+        for i, rgb in enumerate(top_colors)
+    }
+
+    def _key_for(rgb: tuple[int, int, int]) -> str:
+        hit = color_to_key.get(rgb)
+        if hit is not None:
+            return hit
+        best = min(
+            top_colors,
+            key=lambda c: abs(c[0] - rgb[0]) + abs(c[1] - rgb[1]) + abs(c[2] - rgb[2]),
+        )
+        mapped = color_to_key[best]
+        color_to_key[rgb] = mapped
+        return mapped
+
+    rows = [
+        "".join("." if cell is None else _key_for(cell) for cell in row_cells)
+        for row_cells in grid_rgb
+    ]
+    tw = max(12, nat_w)
+    th = max(16, nat_h)
+    if tw > nat_w or th > nat_h:
+        left_pad = (tw - nat_w) // 2
+        right_pad = tw - nat_w - left_pad
+        top_pad = th - nat_h
+        rows = [("." * tw)] * top_pad + [
+            ("." * left_pad) + line + ("." * right_pad) for line in rows
+        ]
+    norm = normalize_custom_frames({"w": tw, "h": th, "palette": palette, "down": rows})
+    return norm or None

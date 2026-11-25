@@ -506,6 +506,69 @@
   .menu-item-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .menu-item-btn b { font-size: 12px; }
   .menu-item-btn span { font-size: 11px; color: var(--muted); }
+
+  /* ── 角色管理中心（无需进入世界即可编辑外观与各世界关系） ── */
+  .char-mgr { display: flex; flex-direction: column; height: 100vh; width: 100vw; background: var(--bg); }
+  .cm-body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+  .cm-sidebar {
+    width: 270px; flex: 0 0 270px; border-right: 2px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  }
+  .cm-side-sec {
+    padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .cm-list { flex: 1 1 auto; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .cm-actor-row {
+    border: 2px solid var(--border); background: var(--panel-2); padding: 6px 8px;
+    display: flex; align-items: center; gap: 8px; cursor: pointer; transition: border-color .12s;
+  }
+  .cm-actor-row:hover { border-color: var(--border-hi); }
+  .cm-actor-row.active { border-color: var(--accent); background: #2d2136; }
+  .cm-actor-thumb {
+    width: 34px; height: 44px; flex: 0 0 34px; image-rendering: pixelated;
+    background: var(--panel); border: 1px solid var(--border);
+  }
+  .cm-host-box {
+    max-height: 190px; overflow: auto; padding: 8px; border-top: 2px solid var(--border);
+    background: #191522; display: flex; flex-direction: column; gap: 5px;
+  }
+  .cm-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .cm-hero {
+    padding: 10px 16px; border-bottom: 2px solid var(--border); background: var(--panel);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .cm-tabs { display: flex; gap: 6px; padding: 8px 16px 0; border-bottom: 2px solid var(--border); background: #1a1624; }
+  .cm-tab {
+    border: 2px solid var(--border); border-bottom: none; background: var(--panel-2); color: var(--muted);
+    padding: 6px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+  }
+  .cm-tab.active {
+    border-color: var(--accent); background: var(--bg); color: var(--text);
+    position: relative; top: 2px; padding-bottom: 8px;
+  }
+  .cm-pane { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .cm-world-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cm-world-pill {
+    border: 2px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 5px 10px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .cm-world-pill:hover { border-color: var(--border-hi); }
+  .cm-world-pill.active { border-color: var(--accent); background: #362231; color: #fff; }
+  .cm-rel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 8px; }
+  .cm-rel-card {
+    border: 1px solid var(--border); background: var(--panel); padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .cm-rel-card.known { border-left: 3px solid var(--ok); }
+  .cm-preview-strip {
+    display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; justify-content: center;
+    background: var(--panel-2); border: 2px solid var(--border); padding: 10px;
+  }
+  .cm-preview-item {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    font-size: 10px; color: var(--muted); font-family: var(--px-font);
+  }
 </style>
 </head>
 <body>
@@ -517,6 +580,7 @@
     <span class="pill" id="hub-light-pill"><span class="dot" id="hub-light-dot"></span><span id="hub-light-text">12:00 白天</span></span>
     <span class="pill" id="hub-weather-pill">☀️ 晴朗</span>
     <div class="spacer"></div>
+    <button class="px-btn" id="btn-hub-char-mgr" style="border-color:var(--accent-2);color:var(--accent-2);" title="不进入世界即可管理角色皮肤外观、像素图包与各世界关系">🎭 角色管理</button>
     <button class="px-btn" id="btn-hub-import-actor">👤 导入角色</button>
     <button class="px-btn primary" id="btn-hub-default-town">🏘️ 创建默认示范小镇</button>
     <button class="px-btn" id="btn-hub-gen-town">🏙️ 生成主题小镇</button>
@@ -528,10 +592,143 @@
   </header>
   <div class="hub-body">
     <div class="hub-intro">
-      <span>选择任一世界进入陪伴；也可点「↗ 独立窗口」为多个世界分别打开独立窗口，随时创建或清理世界。</span>
+      <span>选择任一世界进入陪伴；也可点「🎭 角色管理」预设各角色皮肤与各世界关系，或点「↗ 独立窗口」为多个世界分别打开独立窗口。</span>
       <span id="hub-actor-summary" style="font-family:var(--px-font);color:var(--accent-2);"></span>
     </div>
     <div id="world-card-grid" class="world-grid"></div>
+  </div>
+</div>
+
+<!-- 1.5 角色管理中心 -->
+<div id="char-manager" class="char-mgr hidden">
+  <header class="topbar">
+    <button class="px-btn" id="btn-cm-back" title="返回世界大厅">← 世界大厅</button>
+    <span class="brand">◈ 角色管理中心</span>
+    <span class="pill" id="cm-actor-count">0 位角色</span>
+    <div class="spacer"></div>
+    <button class="px-btn" id="btn-cm-import-actor">👤 导入/管理角色</button>
+    <button class="px-btn" id="btn-cm-pixel-pack">📦 像素图包</button>
+    <button class="px-btn" id="btn-cm-refresh">🔄 刷新</button>
+  </header>
+  <div class="cm-body">
+    <aside class="cm-sidebar">
+      <div class="cm-side-sec">
+        <span>已导入角色</span>
+        <span id="cm-side-count" style="font-family:var(--px-font);">0</span>
+      </div>
+      <div id="cm-actor-list" class="cm-list"></div>
+      <div id="cm-host-wrap" class="cm-host-box hidden">
+        <div style="font-size:11px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;">
+          <span>未导入宿主角色</span>
+          <span id="cm-host-count" style="font-family:var(--px-font);">0</span>
+        </div>
+        <div id="cm-host-list" style="display:flex;flex-direction:column;gap:5px;"></div>
+      </div>
+    </aside>
+    <section class="cm-main">
+      <div id="cm-empty" class="cm-pane hidden" style="align-items:center;justify-content:center;color:var(--muted);">
+        <div style="text-align:center;line-height:1.8;">
+          <div style="font-size:15px;color:var(--text);margin-bottom:6px;">尚未导入任何角色</div>
+          <div style="font-size:12px;">点击上方「👤 导入/管理角色」或左侧宿主角色「➕ 导入」，即可在此管理皮肤外观与各世界关系。</div>
+        </div>
+      </div>
+      <div id="cm-detail" style="display:flex;flex-direction:column;flex:1 1 auto;min-height:0;">
+        <div class="cm-hero">
+          <canvas id="cm-hero-canvas" class="cm-actor-thumb" width="46" height="60" style="width:46px;height:60px;"></canvas>
+          <div style="flex:1 1 auto;min-width:160px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <b id="cm-hero-name" style="font-size:16px;">—</b>
+              <span id="cm-hero-host" class="pill"></span>
+              <span id="cm-hero-world" class="pill" style="color:var(--accent-2);"></span>
+            </div>
+            <div id="cm-hero-sub" style="font-size:11px;color:var(--muted);margin-top:4px;">不进入世界即可调整角色外观皮肤与各世界的独立社交关系</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="px-btn" id="btn-cm-expr" title="查看或切换该角色的表情立绘">🖼 心情立绘</button>
+            <button class="px-btn danger" id="btn-cm-remove" title="从文字世界移除该角色">🗑 移除角色</button>
+          </div>
+        </div>
+        <div class="cm-tabs">
+          <button type="button" class="cm-tab active" data-cmtab="appearance">🎨 外观与皮肤</button>
+          <button type="button" class="cm-tab" data-cmtab="relations">💞 各世界情感态度指针 <span id="cm-rel-tab-badge" style="font-family:var(--px-font);color:var(--accent-2);"></span></button>
+        </div>
+
+        <!-- Tab 1: 外观与皮肤 -->
+        <div id="cm-pane-appearance" class="cm-pane">
+          <div class="cm-preview-strip">
+            <div class="cm-preview-item"><canvas id="cm-pv-down" width="69" height="96" style="width:69px;height:96px;image-rendering:pixelated;"></canvas><span>正面</span></div>
+            <div class="cm-preview-item"><canvas id="cm-pv-right" width="69" height="96" style="width:69px;height:96px;image-rendering:pixelated;"></canvas><span>右侧</span></div>
+            <div class="cm-preview-item"><canvas id="cm-pv-up" width="69" height="96" style="width:69px;height:96px;image-rendering:pixelated;"></canvas><span>背面</span></div>
+            <div class="cm-preview-item"><canvas id="cm-pv-left" width="69" height="96" style="width:69px;height:96px;image-rendering:pixelated;"></canvas><span>左侧</span></div>
+            <div class="cm-preview-item"><canvas id="cm-pv-lie" width="88" height="56" style="width:88px;height:56px;image-rendering:pixelated;"></canvas><span>躺卧</span></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:11px;padding:8px 10px;border:1px solid var(--border);background:var(--panel);">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);">
+              <input type="checkbox" id="cm-ap-use-web" checked> 🌐 联网检索参考
+              <span id="cm-ap-pixellab-tag" class="hidden" style="color:var(--ok);">[PixelLab 已配置]</span>
+            </label>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span id="cm-ap-mode-badge" style="color:var(--accent-2);font-family:var(--px-font);"></span>
+              <button type="button" class="px-btn" id="btn-cm-ap-regen">🪄 按角色设定重新生成</button>
+              <label class="px-btn" style="cursor:pointer;">🖼 导入像素图<input type="file" id="cm-ap-img-file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;"></label>
+              <button type="button" class="px-btn" id="btn-cm-ap-pack">📦 像素图包</button>
+              <button type="button" class="px-btn hidden" id="btn-cm-ap-clear">改用基础模板</button>
+            </div>
+          </div>
+          <div class="form-grid" id="cm-ap-form" style="border:1px solid var(--border);background:var(--panel);padding:12px;">
+            <div class="field full">
+              <label>自动生成方式（弹丸系列角色优先用原版像素小人；其他角色可用 PixelLab 备用）</label>
+              <select class="px-sel" id="cm-ap-gen-mode">
+                <option value="auto">自动（优先弹丸原版像素 → PixelLab → 文本）</option>
+                <option value="official">仅搜弹丸论破原版像素小人（Wiki 原画）</option>
+                <option value="pixellab">PixelLab 云端原生 4 向小人（需先在设置填 API Key）</option>
+                <option value="llm">文本大模型 / 关键词基础模板</option>
+              </select>
+            </div>
+            <div class="field"><label>发型</label><select class="px-sel" id="cm-ap-hair_style"></select></div>
+            <div class="field"><label>服装</label><select class="px-sel" id="cm-ap-outfit_style"></select></div>
+            <div class="field"><label>配饰</label><select class="px-sel" id="cm-ap-accessory"></select></div>
+            <div class="field">
+              <label>地图上显示为</label>
+              <select class="px-sel" id="cm-ap-map-style">
+                <option value="doll">像素小人（走路/交互/睡觉动画）</option>
+                <option value="portrait">角色包立牌（静态）</option>
+              </select>
+            </div>
+            <div id="cm-ap-colors" style="grid-column:1 / -1;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;"></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;">
+            <span id="cm-ap-dirty" class="hidden" style="font-size:11px;color:var(--warn);margin-right:auto;">● 有尚未保存的外观修改</span>
+            <button type="button" class="px-btn hidden" id="btn-cm-ap-reset">↺ 放弃修改</button>
+            <button type="button" class="px-btn primary" id="btn-cm-ap-save">💾 保存外观</button>
+          </div>
+        </div>
+
+        <!-- Tab 2: 各世界情感态度指针 -->
+        <div id="cm-pane-relations" class="cm-pane hidden">
+          <div style="border:1px solid var(--border);background:var(--panel);padding:10px 12px;display:flex;flex-direction:column;gap:8px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+              <span style="font-size:12px;font-weight:700;color:var(--text);">🌍 选择世界（各世界关系完全独立，互不串味）</span>
+              <span id="cm-rel-realm-hint" style="font-size:11px;color:var(--muted);"></span>
+            </div>
+            <div id="cm-world-pills" class="cm-world-pills"></div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div style="display:flex;gap:5px;flex-wrap:wrap;" id="cm-rel-filter-bar">
+              <button type="button" class="px-btn primary" data-cmrelfilter="all" style="padding:3px 9px;font-size:11px;">全部对象</button>
+              <button type="button" class="px-btn" data-cmrelfilter="known" style="padding:3px 9px;font-size:11px;">仅已相识</button>
+              <button type="button" class="px-btn" data-cmrelfilter="in_realm" style="padding:3px 9px;font-size:11px;">仅本世界角色</button>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+              <input class="px-inp" id="cm-rel-add-name" placeholder="输入新对象角色名..." maxlength="24" style="width:160px;padding:3px 8px;font-size:11px;">
+              <button type="button" class="px-btn" id="btn-cm-rel-add" style="padding:3px 9px;font-size:11px;">➕ 设定与TA的关系</button>
+            </div>
+          </div>
+          <div id="cm-rel-status" style="font-size:11px;color:var(--muted);"></div>
+          <div id="cm-rel-grid" class="cm-rel-grid"></div>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -553,6 +750,12 @@
     </div>
 
     <div class="spacer"></div>
+    <div class="mode-switch hidden" id="camera-mode-switch" title="切换观剧/观测镜头模式">
+      <button class="mode-pill active" data-cam="free" title="自由切换房间与拖动画布，镜头不会被自动拉走">🧭 自由视角</button>
+      <button class="mode-pill" data-cam="follow" title="锁定并跨房间跟随右侧下拉框选中的角色">👁 观战视角</button>
+      <button class="mode-pill" data-cam="cinema" title="自动将镜头切到正在对话或行动的关键角色">🎬 电影视角</button>
+    </div>
+    <span class="pill hidden" id="camera-target-pill" style="color:var(--accent-2);max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
     <select id="actor-select" class="px-sel" title="当前观测/对话角色"></select>
     <button class="px-btn" id="btn-auto-step" title="立即推进一次心跳，让她按自己想法去行动">💓 自主行动</button>
     <button class="px-btn" id="btn-auto-life" title="角色在后端连续自主行动">🤖 自动生活: 关</button>
@@ -806,10 +1009,22 @@ const TILE = 48; // 16px * 3x 清晰整数像素倍率
 const state = {
   token: "",
   snap: null,
-  view: "hub",        // "hub" | "world"
+  view: "hub",        // "hub" | "characters" | "world"
   uiMode: "play",     // "play" | "build" | "status"
   builderSub: "furniture", // "furniture" | "tiles" | "forge"
   windowSpaceId: "",
+  cmTab: "appearance", // "appearance" | "relations"
+  cmActorId: "",
+  cmRealmId: "",
+  cmRelFilter: "all",  // "all" | "known" | "in_realm"
+  cmRelations: null,
+  cmRelReqSeq: 0,
+  cmDraft: null,
+  cmDraftActorId: "",
+  cmDraftMapStyle: "doll",
+  cmDraftUploadedUrl: "",
+  cmAppearanceDirty: false,
+  cmRegenGen: 0,
   isPopout: false,
   terminal: { text: "", anchors: [] },
   chatHistory: [],
@@ -843,6 +1058,15 @@ const state = {
   liveTimer: 0,
   liveGeneration: 0,
   liveUiPaused: false,
+  cameraMode: "free",      // "free" | "follow" | "cinema"
+  cameraModeUserSet: false,
+  cameraRealmId: "",
+  followActorId: "",
+  cinemaTargetActorId: "",
+  cinemaPriority: -1,
+  cinemaHoldUntil: 0,
+  cinemaSwitching: false,
+  lastNightSkipSeq: 0,
   zoom: 1.0,
   tileMap: new Map(),
   selectedBlueprintId: "",
@@ -999,7 +1223,7 @@ function toast(msg, isErr) {
 async function runAction(actionId, values, apply = true) {
   const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/actions/" + encodeURIComponent(actionId));
   if (actionId === "get_world_snapshot") {
-    values = { ...values, strict_space: Boolean(isStoryWorld()), sandbox_only: state.view === "hub" };
+    values = { ...values, strict_space: Boolean(isStoryWorld()), sandbox_only: state.view !== "world" };
   }
   const resp = await fetch(url, {
     method: "POST",
@@ -1037,10 +1261,15 @@ function storyLobbyUrl() {
 
 function renderViewShell() {
   const inWorld = state.view === "world";
-  el("world-hub").classList.toggle("hidden", inWorld);
+  const inChars = state.view === "characters";
+  el("world-hub").classList.toggle("hidden", state.view !== "hub");
+  if (el("char-manager")) el("char-manager").classList.toggle("hidden", !inChars);
   el("world-window").classList.toggle("hidden", !inWorld);
   if (state.snap && state.snap.space && inWorld) {
     document.title = state.snap.space.name + " · 七海千秋";
+  } else if (inChars) {
+    document.title = "角色管理 · 七海千秋";
+    SoundFX.syncWeather("clear", false);
   } else {
     document.title = "世界大厅 · 七海千秋";
     SoundFX.syncWeather("clear", false);
@@ -1059,6 +1288,7 @@ function renderViewShell() {
   const isRoam = state.uiMode === "roam";
   const isBuild = state.uiMode === "build";
   const isStatus = state.uiMode === "status";
+  if (typeof renderCameraControls === "function") renderCameraControls();
   el("build-bar").classList.toggle("hidden", !isBuild);
   el("status-view-bar").classList.toggle("hidden", !isStatus);
   el("side-col").classList.toggle("hidden", !(isBuild || isStatus));
@@ -1071,10 +1301,12 @@ function renderViewShell() {
   if (el("roam-hud")) el("roam-hud").classList.toggle("hidden", !isRoam);
   renderInventoryHud();
   el("btn-chat-gift").classList.toggle("hidden", !isRoam);
-  const showDock = state.dockOpen && !isBuild && !viewOnly;
+  const showDock = state.dockOpen && !isBuild;
   if (el("dialogue-dock")) el("dialogue-dock").classList.toggle("hidden", !showDock);
   if (el("split-dock-h")) el("split-dock-h").classList.toggle("hidden", !showDock);
-  if (el("btn-dock-reopen")) el("btn-dock-reopen").classList.toggle("hidden", showDock || isBuild || isRoam || Boolean(viewOnly));
+  if (el("btn-dock-reopen")) el("btn-dock-reopen").classList.toggle("hidden", showDock || isBuild || isRoam);
+  const chatInputRow = document.querySelector(".chat-input-row");
+  if (chatInputRow) chatInputRow.classList.toggle("hidden", Boolean(viewOnly));
   updateRoamPromptUi();
 
   document.querySelectorAll("#ui-mode-switch .mode-pill").forEach((btn) => {
@@ -1327,19 +1559,28 @@ function scrollToCell(cx, cy, smooth = true) {
   });
 }
 
-function runDoorTransition(portalEntityId) {
+function runDoorTransition(portalEntityId, options = {}) {
   if (!portalEntityId) return;
+  const viewOnly = Boolean(isStoryWorld() && state.snap?.external_overlay?.view_only);
+  const hasLocalPlayer = state.uiMode === "roam" && Boolean(
+    (state.snap?.actors || []).some((a) => a.actor_id === state.playerId && a.space_id === state.windowSpaceId)
+  );
+  const observeOnly = viewOnly || (isStoryWorld() && !hasLocalPlayer);
+  const actorId = observeOnly ? "" : (hasLocalPlayer ? state.playerId : (state.snap?.active_actor_id || ""));
+  if (options.userInitiated !== false && state.cameraMode && state.cameraMode !== "free" && state.uiMode !== "roam") {
+    if (typeof setCameraMode === "function") setCameraMode("free", { userInitiated: true, silent: false });
+  }
   const wrap = el("stage-wrap");
   if (wrap) wrap.classList.add("fading");
   runAction("enter_portal", {
     entity_id: portalEntityId,
-    actor_id: isStoryWorld() && state.uiMode === "roam" ? state.playerId : state.snap?.active_actor_id || "",
-    observe_only: Boolean(isStoryWorld() && state.snap?.external_overlay?.view_only),
+    actor_id: actorId,
+    observe_only: observeOnly,
   }).then((res) => {
     state.selectedEntityId = "";
     state.selectedBlueprintId = "";
     if (res.feedback) toast(res.feedback);
-    setTimeout(() => focusActiveActor(), 80);
+    if (!observeOnly || state.cameraMode === "follow") setTimeout(() => focusActiveActor(), 80);
   }).catch((e) => toast(e.message, true))
     .finally(() => {
       if (wrap) setTimeout(() => wrap.classList.remove("fading"), 90);
@@ -1362,20 +1603,159 @@ function openDefaultTown(replace) {
     .catch((e) => toast(e.message, true));
 }
 
+function renderCameraControls(cinemaFocus = null) {
+  const sw = el("camera-mode-switch");
+  const pill = el("camera-target-pill");
+  const showCam = state.view === "world" && state.uiMode !== "roam" && state.uiMode !== "build";
+  if (sw) {
+    sw.classList.toggle("hidden", !showCam);
+    sw.querySelectorAll("[data-cam]").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.cam === state.cameraMode);
+    });
+  }
+  if (!pill) return;
+  if (!showCam || !state.snap) {
+    pill.classList.add("hidden");
+    return;
+  }
+  const actors = state.snap.actors || [];
+  let label = "";
+  if (state.cameraMode === "follow") {
+    const tid = state.followActorId || state.snap.active_actor_id || "";
+    const tAct = actors.find((a) => a.actor_id === tid);
+    label = tAct ? ("👁 跟随：" + tAct.name) : "👁 请选择角色";
+  } else if (state.cameraMode === "cinema") {
+    const cid = state.cinemaTargetActorId || cinemaFocus?.actor_id || "";
+    const cAct = actors.find((a) => a.actor_id === cid);
+    const reasonMap = { speaking: "对话中", conversing: "交谈中", recent_dialogue: "余音", activity: "行动中" };
+    const rTxt = cinemaFocus && (cinemaFocus.actor_id === cid || cinemaFocus.partner_id === cid)
+      ? (reasonMap[cinemaFocus.reason] || "聚焦")
+      : "巡览中";
+    label = cAct ? ("🎬 " + cAct.name + " · " + rTxt) : "🎬 等待事件…";
+  } else {
+    label = "🧭 自由探索 · " + (state.snap.space?.name || "");
+  }
+  pill.textContent = label;
+  pill.classList.remove("hidden");
+}
+
+function smoothCenterOnCell(cx, cy, { deadzoneRatio = 0.22, smooth = true } = {}) {
+  const wrap = el("stage-wrap");
+  if (!wrap) return;
+  const canvas = el("world-canvas");
+  const baseX = canvas ? canvas.offsetLeft : 0;
+  const baseY = canvas ? canvas.offsetTop : 0;
+  const px = baseX + (Number(cx || 0) + 0.5) * TILE * state.zoom;
+  const py = baseY + (Number(cy || 0) + 0.5) * TILE * state.zoom;
+  const curCx = wrap.scrollLeft + wrap.clientWidth / 2;
+  const curCy = wrap.scrollTop + wrap.clientHeight / 2;
+  if (deadzoneRatio > 0
+      && Math.abs(px - curCx) <= wrap.clientWidth * deadzoneRatio
+      && Math.abs(py - curCy) <= wrap.clientHeight * deadzoneRatio) {
+    return;
+  }
+  const targetL = Math.max(0, px - wrap.clientWidth / 2);
+  const targetT = Math.max(0, py - wrap.clientHeight / 2);
+  if (!smooth) {
+    wrap.scrollLeft = targetL;
+    wrap.scrollTop = targetT;
+    return;
+  }
+  wrap.scrollTo({ left: targetL, top: targetT, behavior: "smooth" });
+}
+
+function switchCameraToActor(actorId, { syncActive = true, forceCenter = false, midpoint = null } = {}) {
+  if (!actorId || !state.snap) return;
+  const act = (state.snap.actors || []).find((a) => a.actor_id === actorId && a.actor_status !== "missing");
+  if (!act) return;
+  const needSwitch = (act.space_id && act.space_id !== state.windowSpaceId)
+    || (syncActive && actorId !== state.snap.active_actor_id);
+  if (!needSwitch) {
+    const tx = midpoint ? midpoint.x : act.x;
+    const ty = midpoint ? midpoint.y : act.y;
+    smoothCenterOnCell(tx, ty, { deadzoneRatio: forceCenter ? 0.05 : 0.22 });
+    return;
+  }
+  if (state.cinemaSwitching) return;
+  state.cinemaSwitching = true;
+  runAction("set_active_actor", { actor_id: actorId })
+    .then(() => {
+      const updated = (state.snap?.actors || []).find((a) => a.actor_id === actorId);
+      if (updated && updated.space_id === state.windowSpaceId) {
+        smoothCenterOnCell(updated.x, updated.y, { deadzoneRatio: 0.05 });
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      state.cinemaSwitching = false;
+    });
+}
+
+function setCameraMode(mode, { userInitiated = true, targetActorId = "", silent = false } = {}) {
+  const next = (mode === "follow" || mode === "cinema") ? mode : "free";
+  const prev = state.cameraMode;
+  state.cameraMode = next;
+  if (userInitiated) state.cameraModeUserSet = true;
+  if (next === "follow") {
+    const npcFirst = (state.snap?.actors || []).find((a) => !a.is_player && a.actor_status !== "missing")?.actor_id || "";
+    const targetId = targetActorId || state.followActorId || state.snap?.active_actor_id || npcFirst;
+    state.followActorId = targetId;
+    renderCameraControls();
+    if (targetId && userInitiated) {
+      switchCameraToActor(targetId, { syncActive: true, forceCenter: true });
+    }
+    if (userInitiated && !silent && prev !== next) {
+      const tAct = (state.snap?.actors || []).find((a) => a.actor_id === targetId);
+      toast("👁 已切换观战视角" + (tAct ? ("：跟随「" + tAct.name + "」") : ""));
+    }
+    return;
+  }
+  if (next === "cinema") {
+    state.cinemaTargetActorId = "";
+    state.cinemaPriority = -1;
+    state.cinemaHoldUntil = 0;
+    renderCameraControls();
+    if (userInitiated && !silent && prev !== next) {
+      toast("🎬 已切换电影视角：自动切镜至对话与关键事件");
+    }
+    return;
+  }
+  renderCameraControls();
+  if (userInitiated && !silent && prev !== next) {
+    toast("🧭 已切换自由视角：可自由进出房间浏览");
+  }
+}
+
 function enterWorld(spaceId) {
+  if (state.cameraMode !== "free" && state.uiMode !== "roam") {
+    setCameraMode("free", { userInitiated: true, silent: true });
+  }
   state.selectedEntityId = "";
   state.selectedBlueprintId = "";
   state.windowSpaceId = spaceId;
   state.view = "world";
   renderViewShell();
   runAction(isStoryWorld() ? "get_world_snapshot" : "switch_space", { space_id: spaceId }).then(() => {
-    focusActiveActor();
+    if (state.cameraMode !== "free" || !isStoryWorld()) focusActiveActor();
   }).catch((e) => toast(e.message, true));
 }
 
 function applySnapshot(snap, terminal, chatHistory) {
   const enteringStory = state.view === "world" && snap.isolated_persona && !state.snap?.isolated_persona;
   const wasObserving = state.snap?.external_overlay?.live_autonomy;
+  const nextRealmId = snap.realm_space_id || snap.space?.space_id || "";
+  if (nextRealmId && nextRealmId !== state.cameraRealmId) {
+    state.cameraRealmId = nextRealmId;
+    state.cameraModeUserSet = false;
+    state.followActorId = "";
+    state.cinemaTargetActorId = "";
+    state.cinemaPriority = -1;
+    state.cinemaHoldUntil = 0;
+    state.lastNightSkipSeq = Number(snap.night_skip?.seq || 0);
+    state.cameraMode = (snap.isolated_persona && snap.external_overlay?.view_only) ? "cinema" : "free";
+  } else if (snap.night_skip && Number(snap.night_skip.seq || 0) > (state.lastNightSkipSeq | 0)) {
+    state.lastNightSkipSeq = Number(snap.night_skip.seq);
+  }
   state.snap = snap;
   if (state.view === "world") {
     if (snap.isolated_persona) {
@@ -1407,6 +1787,9 @@ function applySnapshot(snap, terminal, chatHistory) {
   if (sizePill && snap.space) sizePill.textContent = snap.space.width + "×" + snap.space.height;
   renderViewShell();
   renderWorldHub();
+  if (state.view === "characters" && typeof renderCharManager === "function") {
+    renderCharManager({ preserveDraft: true });
+  }
   renderTopbar();
   renderTownNavBar();
   renderTilePalette();
@@ -2723,12 +3106,14 @@ function pdStep(act, now) {
   if (now > st.poseUntil) { st.pose = ""; st.poseVerb = ""; }
 
   const resting = act.posture === "resting";
+  const sitting = act.posture === "sitting";
   if (resting && !st.wasResting) { st.restT0 = now; st.wakeT0 = 0; }
   if (!resting && st.wasResting) st.wakeT0 = now;
   st.wasResting = resting;
   if (resting && st.moving) st.restT0 = now;
   st.sleep = "";
-  if (resting) st.sleep = (now - st.restT0 < 700) ? "sit" : "lying";
+  if (sitting && !st.moving) st.sleep = "sit";
+  else if (resting) st.sleep = (now - st.restT0 < 700) ? "sit" : "lying";
   else if (st.wakeT0 && now - st.wakeT0 < 700) st.sleep = "sit";
   return st;
 }
@@ -3490,7 +3875,9 @@ function renderViewport() {
     if (st.moving || st.pose || st.pendingPose) loopMoving = true;
     if (useDoll) {
       if (act.posture === "resting" || st.sleep) loopResting = true;
-      const bed = (act.posture === "resting" && act.resting_on_id) ? entById.get(act.resting_on_id) : null;
+      const bed = ((act.posture === "resting" || act.posture === "sitting") && act.resting_on_id)
+        ? entById.get(act.resting_on_id)
+        : null;
       if (bed && !st.moving) {
         const bfh = (bed.footprint && bed.footprint[1]) || 1;
         yBottom = bed.y + bfh + 0.06;
@@ -3583,14 +3970,21 @@ function renderViewport() {
         } else {
           const live = act.runtime_activity;
           const liveVerb = !isIncap && live && live.phase === "engaging" && !st.moving ? live.verb : "";
+          const seat = (act.posture === "sitting" && act.resting_on_id && !st.moving) ? entById.get(act.resting_on_id) : null;
           const cv = pdSprite(app, st.dir, st.frame, pdPoseForVerb(liveVerb) || st.pose, st.sleep === "sit" ? "sit" : "");
           dw = Math.round(cv.width * S);
           dh = Math.round(cv.height * S);
-          dx = Math.round(gx * TILE + (TILE - dw) / 2);
-          const bob = isIncap ? 0 : ((st.moving && (st.frame === 1 || st.frame === 2))
+          const sfw = seat ? ((seat.footprint && seat.footprint[0]) || 1) : 1;
+          const sfh = seat ? ((seat.footprint && seat.footprint[1]) || 1) : 1;
+          dx = seat
+            ? Math.round((seat.x + sfw / 2) * TILE - dw / 2)
+            : Math.round(gx * TILE + (TILE - dw) / 2);
+          const bob = (isIncap || st.sleep === "sit") ? 0 : ((st.moving && (st.frame === 1 || st.frame === 2))
             ? -Math.round(S)
             : (!st.moving ? Math.round(Math.sin(nowMs * 0.0045 + gx + gy)) : 0));
-          dy = Math.round((gy + 1) * TILE - dh + bob - actLift);
+          dy = seat
+            ? Math.round((seat.y + sfh) * TILE - dh - 2 - actLift)
+            : Math.round((gy + 1) * TILE - dh + bob - actLift);
           if (act.is_player) {
             if (state.uiMode === "roam" && !state.drag) {
               const wrap = el("stage-wrap");
@@ -4689,7 +5083,7 @@ function renderDialogueDock() {
   tagEl.title = tagEl.textContent;
 
   const mv = Number(vit.mood_v || 0);
-  const moodWord = vit.disengaged ? "沉默疏离" : (act.posture === "resting" ? "休息中" : (mv >= 0.3 ? "心情不错" : (mv <= -0.3 ? "有些低落" : "平静")));
+  const moodWord = vit.disengaged ? "沉默疏离" : (act.posture === "resting" ? "休息中" : (act.posture === "sitting" ? "坐着" : (mv >= 0.3 ? "心情不错" : (mv <= -0.3 ? "有些低落" : "平静"))));
   moodEl.textContent = moodWord + " · 精力 " + Math.round(Number(vit.energy || 0) * 100) + "%";
   const goalBadge = el("chat-goal-badge");
   if (goalBadge) {
@@ -4898,7 +5292,7 @@ function renderStatusPanel() {
     const spName = (snap.spaces.find((s) => s.space_id === act.space_id) || {}).name || act.space_id;
     el("vital-source").textContent = vit.source || "builtin";
     el("actor-status-name").textContent = act.name + (vit.disengaged ? "（沉默离开中）" : "");
-    el("actor-status-pos").textContent = spName + " (" + act.x + ", " + act.y + ") · " + (act.posture === "resting" ? "休息中" : "站立");
+    el("actor-status-pos").textContent = spName + " (" + act.x + ", " + act.y + ") · " + (act.posture === "resting" ? "休息中" : (act.posture === "sitting" ? "坐着" : "站立"));
     if (el("actor-status-l0")) {
       const l0 = snap.active_l0 || {};
       if (!l0.enabled) {
@@ -5099,7 +5493,8 @@ function renderInspector() {
     addAct(tr.consumable.consume_verb || "使用", () => interactAndToast(ent.entity_id, "consume"));
   }
   if (tr.restable) {
-    addAct(tr.restable.occupied_by ? "起身" : "休息", () => interactAndToast(ent.entity_id, tr.restable.occupied_by ? "leave_rest" : "rest"));
+    const restLabel = tr.restable.rest_mode === "sit" ? "坐下" : "休息";
+    addAct(tr.restable.occupied_by ? "起身" : restLabel, () => interactAndToast(ent.entity_id, tr.restable.occupied_by ? "leave_rest" : "rest"));
   }
   if (tr.inscribable) {
     addAct("读/留字", () => openNoteModal(ent));
@@ -5886,7 +6281,7 @@ function openBlueprintModal(rawBp, isNewCompile) {
         if (checked.has("consumable")) nextTraits.consumable = traits.consumable || { max_uses: 2, uses_left: 2, consume_verb: "用", on_empty: "keep_empty", empty_brief: "已经空了" };
         if (checked.has("thermal")) nextTraits.thermal = traits.thermal || { cool_minutes: 45, temp: "hot" };
         if (checked.has("switchable")) nextTraits.switchable = traits.switchable || { provides_light: true, is_on: false, on_brief: "", off_brief: "" };
-        if (checked.has("restable")) nextTraits.restable = traits.restable || { energy_regen_per_min: 0.015, comfort: 0.8, occupied_by: null };
+        if (checked.has("restable")) nextTraits.restable = traits.restable || { rest_mode: "sleep", energy_regen_per_min: 0.015, comfort: 0.8, occupied_by: null };
         if (checked.has("activity")) nextTraits.activity = traits.activity || { domain: "hobby", progress_unit: "次", progress: 0, battery: null, battery_cost: 10 };
         if (checked.has("inscribable")) nextTraits.inscribable = traits.inscribable || { writable_by_ai: true, max_entries: 12, entries: [] };
         bp.traits = nextTraits;
@@ -6204,18 +6599,83 @@ function openImportActorModal() {
   });
 }
 
+const PD_COLOR_FIELDS = [
+  ["hair_color", "主发色"], ["hair_shade", "发梢/副发色"], ["skin", "肤色"], ["eye_color", "瞳色"],
+  ["outfit_color", "衣服主色"], ["outfit_accent", "衣服点缀"], ["outfit_inner", "内衬色"],
+  ["legs_color", "裤/裙下装"], ["shoes_color", "鞋色"], ["accessory_color", "配饰色"],
+];
+
+function paintDollPreviewCanvas(c, app, dir, isLie, frame = 0) {
+  if (!c) return;
+  const cv = pdSprite(app || {}, dir || "down", frame, "", isLie ? "lying" : "");
+  const x = c.getContext("2d");
+  const maxS = isLie
+    ? Math.min((c.width - 4) / cv.width, (c.height - 4) / cv.height)
+    : Math.min((c.width - 4) / cv.width, (c.height - 4) / cv.height);
+  const scale = cv.width >= 40 || cv.height >= 48
+    ? Math.min(1.5, maxS)
+    : (cv.height >= 28 || cv.width >= 26 ? Math.min(3, maxS) : Math.min(4, maxS));
+  x.imageSmoothingEnabled = false;
+  x.clearRect(0, 0, c.width, c.height);
+  const dw = cv.width * scale;
+  const dh = cv.height * scale;
+  x.drawImage(cv, Math.floor((c.width - dw) / 2), Math.max(0, c.height - dh), dw, dh);
+}
+
+function paintDollAppearancePreviews(prefix, cur) {
+  const cf = cur && cur.custom_frames;
+  const singleFace = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16 && !(Array.isArray(cf.up) && cf.up.length === cf.down.length));
+  if (singleFace) {
+    paintDollPreviewCanvas(el(prefix + "down"), cur, "down", false, 0);
+    paintDollPreviewCanvas(el(prefix + "right"), cur, "down", false, 1);
+    paintDollPreviewCanvas(el(prefix + "up"), cur, "down", false, 2);
+    paintDollPreviewCanvas(el(prefix + "left"), cur, "left", false, 1);
+  } else {
+    ["down", "right", "up", "left"].forEach((d) => paintDollPreviewCanvas(el(prefix + d), cur, d, false, 0));
+  }
+  paintDollPreviewCanvas(el(prefix + "lie"), cur, "down", true, 0);
+}
+
+async function runRegenAppearanceJob({ actorId, useWeb, genMode, isStillActive, onTick, applyResult }) {
+  const t0 = Date.now();
+  let res = await runAction("regen_actor_appearance", {
+    actor_id: actorId,
+    use_web: Boolean(useWeb),
+    gen_mode: genMode || "auto",
+  });
+  const jobId = res && res.job_id;
+  while (res && (res.pending || res.done === false) && (res.job_id || jobId)) {
+    const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
+    if (onTick) onTick((res.label || "生图中") + "… " + sec + "s");
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isStillActive && !isStillActive()) return;
+    res = await runAction("get_regen_job", { job_id: res.job_id || jobId });
+  }
+  if (isStillActive && !isStillActive()) return;
+  const r = res || {};
+  let frames = null;
+  let toastMsg = "";
+  if (r.used_official_pixel && r.official_image_data_url) {
+    frames = await pdExtractNativePixelSprite(r.official_image_data_url);
+    toastMsg = (r.from_cache ? "已从本地缓存秒加载原版像素小人（" : "已联网提取并缓存原版像素小人（") + frames.w + "×" + frames.h + "）";
+  } else if (r.used_pixellab && r.pixellab_images) {
+    frames = await pdExtract4DirPixelLabFrames(r.pixellab_images);
+    toastMsg = "已生成 PixelLab 原生 4 向小人（" + frames.w + "×" + frames.h + "）";
+  } else {
+    const refs = [r.used_web ? ("联网(" + (r.web_sources || []).join("/") + ")") : "", r.used_vision ? "原作立绘" : "", r.has_custom_frames ? "AI精绘像素" : ""].filter(Boolean);
+    toastMsg = r.used_llm ? ("已生成" + (refs.length ? "（参考：" + refs.join(" + ") + "）" : "")) : "未连接大模型，已按设定关键词生成（可继续微调）";
+  }
+  if (isStillActive && !isStillActive()) return;
+  applyResult(r, frames, toastMsg);
+}
+
 function openAppearanceModal(act) {
   if (!act) return toast("当前没有活动角色", true);
   const cur = JSON.parse(JSON.stringify(act.appearance || {}));
-  let mapStyle = act.map_style === "portrait" ? "portrait" : "doll";
+  const mapStyle = act.map_style === "portrait" ? "portrait" : "doll";
   let lastUploadedPixelUrl = "";
-  const colorFields = [
-    ["hair_color", "主发色"], ["hair_shade", "发梢/副发色"], ["skin", "肤色"], ["eye_color", "瞳色"],
-    ["outfit_color", "衣服主色"], ["outfit_accent", "衣服点缀"], ["outfit_inner", "内衬色"],
-    ["legs_color", "裤/裙下装"], ["shoes_color", "鞋色"], ["accessory_color", "配饰色"],
-  ];
   const optHtml = (list, val) => list.map(([k, lb]) => '<option value="' + k + '"' + (k === val ? " selected" : "") + ">" + lb + "</option>").join("");
-  const colorHtml = colorFields.map(([k, lb]) =>
+  const colorHtml = PD_COLOR_FIELDS.map(([k, lb]) =>
     '<div class="field"><label>' + lb + '</label><input type="color" class="px-inp" id="ap-' + k + '" value="' + esc(cur[k] || "#888888") + '" style="padding:1px;height:26px;"></div>').join("");
 
   showModal("🎨 编辑「" + act.name + "」的像素小人外观",
@@ -6249,45 +6709,26 @@ function openAppearanceModal(act) {
         onClick: (btn) => {
           btn.disabled = true;
           const prevLabel = btn.textContent;
-          const t0 = Date.now();
           btn.textContent = "检索与生成中…";
-          const handleResult = async (res) => {
-            if (res.used_official_pixel && res.official_image_data_url) {
-              cur.custom_frames = await pdExtractNativePixelSprite(res.official_image_data_url);
+          runRegenAppearanceJob({
+            actorId: act.actor_id,
+            useWeb: Boolean(el("ap-use-web") && el("ap-use-web").checked),
+            genMode: (el("ap-gen-mode") && el("ap-gen-mode").value) || "auto",
+            isStillActive: () => !el("modal-mask").classList.contains("hidden") && Boolean(el("ap-hair_style")),
+            onTick: (lbl) => { btn.textContent = lbl; },
+            applyResult: (r, frames, msg) => {
               lastUploadedPixelUrl = "";
-              redraw();
-              toast((res.from_cache ? "已从本地缓存秒加载原版像素小人（" : "已联网提取并缓存原版像素小人（") + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
-            } else if (res.used_pixellab && res.pixellab_images) {
-              cur.custom_frames = await pdExtract4DirPixelLabFrames(res.pixellab_images);
-              lastUploadedPixelUrl = "";
-              redraw();
-              toast("已生成 PixelLab 原生 4 向小人（" + cur.custom_frames.w + "×" + cur.custom_frames.h + "）");
-            } else {
-              Object.assign(cur, res.appearance || {});
-              lastUploadedPixelUrl = "";
-              ["hair_style", "outfit_style", "accessory"].forEach((k) => { el("ap-" + k).value = cur[k]; });
-              colorFields.forEach(([k]) => { el("ap-" + k).value = cur[k]; });
-              redraw();
-              const refs = [res.used_web ? ("联网(" + (res.web_sources || []).join("/") + ")") : "", res.used_vision ? "原作立绘" : "", res.has_custom_frames ? "AI精绘像素" : ""].filter(Boolean);
-              toast(res.used_llm ? ("已生成" + (refs.length ? "（参考：" + refs.join(" + ") + "）" : "")) : "未连接大模型，已按设定关键词生成（可继续微调）");
-            }
-          };
-          runAction("regen_actor_appearance", {
-            actor_id: act.actor_id,
-            use_web: Boolean(el("ap-use-web") && el("ap-use-web").checked),
-            gen_mode: (el("ap-gen-mode") && el("ap-gen-mode").value) || "auto",
-          })
-            .then(async (res) => {
-              const jobId = res && res.job_id;
-              while (res && (res.pending || res.done === false) && (res.job_id || jobId)) {
-                const sec = Math.max(1, Math.round((Date.now() - t0) / 1000));
-                btn.textContent = (res.label || "生图中") + "… " + sec + "s";
-                await new Promise((r) => setTimeout(r, 1500));
-                if (el("modal-mask").classList.contains("hidden")) return;
-                res = await runAction("get_regen_job", { job_id: res.job_id || jobId });
+              if (frames) {
+                cur.custom_frames = frames;
+              } else {
+                Object.assign(cur, r.appearance || {});
+                ["hair_style", "outfit_style", "accessory"].forEach((k) => { el("ap-" + k).value = cur[k]; });
+                PD_COLOR_FIELDS.forEach(([k]) => { el("ap-" + k).value = cur[k]; });
               }
-              await handleResult(res || {});
-            })
+              redraw();
+              toast(msg);
+            },
+          })
             .catch((e) => toast(e.message, true))
             .finally(() => { btn.disabled = false; btn.textContent = prevLabel; });
         },
@@ -6313,7 +6754,7 @@ function openAppearanceModal(act) {
 
   const collect = () => {
     ["hair_style", "outfit_style", "accessory"].forEach((k) => { cur[k] = el("ap-" + k).value; });
-    colorFields.forEach(([k]) => { cur[k] = el("ap-" + k).value; });
+    PD_COLOR_FIELDS.forEach(([k]) => { cur[k] = el("ap-" + k).value; });
   };
   const syncBadge = () => {
     const cf = cur.custom_frames;
@@ -6322,30 +6763,10 @@ function openAppearanceModal(act) {
     el("ap-mode-badge").textContent = hasCustom ? ("✨ 精绘 " + dimTxt) : "🧩 基础模板";
     el("ap-clear-custom").classList.toggle("hidden", !hasCustom);
   };
-  const paint = (id, cv, isLie) => {
-    const c = el(id);
-    const x = c.getContext("2d");
-    const scale = isLie
-      ? (cv.width >= 40 ? 1.5 : (cv.width >= 26 ? 3 : 4))
-      : (cv.height >= 48 ? 1.5 : (cv.height >= 28 ? 3 : 4));
-    x.imageSmoothingEnabled = false;
-    x.clearRect(0, 0, c.width, c.height);
-    x.drawImage(cv, Math.floor((c.width - cv.width * scale) / 2), c.height - cv.height * scale, cv.width * scale, cv.height * scale);
-  };
   const redraw = () => {
     collect();
     syncBadge();
-    const cf = cur.custom_frames;
-    const singleFace = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16 && !(Array.isArray(cf.up) && cf.up.length === cf.down.length));
-    if (singleFace) {
-      paint("ap-pv-down", pdSprite(cur, "down", 0, "", ""), false);
-      paint("ap-pv-right", pdSprite(cur, "down", 1, "", ""), false);
-      paint("ap-pv-up", pdSprite(cur, "down", 2, "", ""), false);
-      paint("ap-pv-left", pdSprite(cur, "left", 1, "", ""), false);
-    } else {
-      ["down", "right", "up", "left"].forEach((d) => paint("ap-pv-" + d, pdSprite(cur, d, 0, "", ""), false));
-    }
-    paint("ap-pv-lie", pdSprite(cur, "down", 0, "", "lying"), true);
+    paintDollAppearancePreviews("ap-pv-", cur);
   };
   el("ap-img-file").addEventListener("change", (ev) => {
     const f = ev.target.files && ev.target.files[0];
@@ -6367,11 +6788,11 @@ function openAppearanceModal(act) {
   el("ap-open-pack").onclick = () => openPixelPackModal(act);
   el("ap-clear-custom").onclick = () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); toast("已切换回基础模板，可用下方下拉与色板微调"); };
   ["hair_style", "outfit_style", "accessory"].forEach((k) => el("ap-" + k).addEventListener("change", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
-  colorFields.forEach(([k]) => el("ap-" + k).addEventListener("input", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
+  PD_COLOR_FIELDS.forEach(([k]) => el("ap-" + k).addEventListener("input", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
   redraw();
 }
 
-function openPixelPackModal(returnActor) {
+function openPixelPackModal(returnActor, opts = {}) {
   let activeSeries = "all";
   let statusData = null;
 
@@ -6388,9 +6809,12 @@ function openPixelPackModal(returnActor) {
     + '<div id="pp-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:6px;max-height:310px;overflow:auto;padding:2px;"></div>',
     [
       {
-        label: returnActor ? "返回外观编辑" : "关闭",
+        label: opts.onBack ? "返回角色管理" : (returnActor ? "返回外观编辑" : "关闭"),
         onClick: () => {
-          if (returnActor) {
+          if (opts.onBack) {
+            closeModal();
+            opts.onBack();
+          } else if (returnActor) {
             const actors = (state.snap && state.snap.actors) || [];
             const latest = actors.find((a) => a.actor_id === returnActor.actor_id) || returnActor;
             openAppearanceModal(latest);
@@ -6463,7 +6887,12 @@ function openPixelPackModal(returnActor) {
                 map_style: returnActor.map_style || "doll",
               });
               const latest = (saved && saved.actor) || returnActor;
-              openAppearanceModal(latest);
+              if (opts.onApplied) {
+                closeModal();
+                opts.onApplied(latest);
+              } else {
+                openAppearanceModal(latest);
+              }
               toast("已应用「" + it.zh + "」像素小人");
             })
             .catch((e) => toast(e.message, true));
@@ -6600,12 +7029,14 @@ function openWorldMoodModal(act) {
     ], true);
 }
 
-function openWorldRelationModal(rel, act) {
+function openWorldRelationModal(rel, act, opts = {}) {
   const snap = state.snap || {};
-  const curSid = (act && act.space_id) || snap.active_space_id || "room_default";
-  const spName = ((snap.spaces || []).find((s) => s.space_id === curSid) || {}).name || curSid;
+  const curSid = opts.spaceId || (act && act.space_id) || snap.active_space_id || "room_default";
+  const spName = opts.spaceName || (curSid === "__default__" ? "默认初始关系（新世界/故事继承）" : (((snap.spaces || []).find((s) => s.space_id === curSid) || {}).name || curSid));
+  const isDefaultRealm = curSid === "__default__";
   const subj = (act && (act.host_character || act.name)) || rel.subject || "";
   const tgtName = rel.target_name || rel.target_key;
+  const isCharTarget = String(rel.target_key || "").startsWith("char:");
   const stageOpts = [
     ["stranger", "不认识"],
     ["acquainted", "刚认识"],
@@ -6625,7 +7056,11 @@ function openWorldRelationModal(rel, act) {
   ].map(([k, lb]) => '<option value="' + k + '"' + ((rel.attitude_stance || "neutral") === k ? " selected" : "") + ">" + lb + "</option>").join("");
 
   showModal("💞 编辑本世界社交指针：" + subj + " → " + tgtName,
-    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">仅保存在世界「' + esc(spName) + '」中，与其他世界完全隔离。</div>'
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">'
+    + (isDefaultRealm
+      ? "保存在「默认初始关系（__default__）」中；新建世界及故事引擎开局时会作为默认初始指针继承。"
+      : ('仅保存在世界「' + esc(spName) + '」中，与其他世界完全隔离。'))
+    + '</div>'
     + '<div class="form-grid">'
     + '<div class="field"><label>是否认识</label><select class="px-sel" id="wr-known"><option value="1"' + (rel.known ? " selected" : "") + '>已相识</option><option value="0"' + (!rel.known ? " selected" : "") + '>尚不认识</option></select></div>'
     + '<div class="field"><label>关系阶段</label><select class="px-sel" id="wr-stage">' + stageOpts + "</select></div>"
@@ -6636,6 +7071,10 @@ function openWorldRelationModal(rel, act) {
     + '<div class="field"><label>信任度 (0–1)</label><input class="px-inp" type="number" id="wr-trust" min="0" max="1" step="0.05" value="' + esc(Number(rel.trust ?? 0.55).toFixed(2)) + '"></div>'
     + '<div class="field"><label>社交意愿 (0–1)</label><input class="px-inp" type="number" id="wr-will" min="0" max="1" step="0.05" value="' + esc(Number(rel.social_willingness ?? 0.5).toFixed(2)) + '"></div>'
     + '<div class="field full"><label>共同经历 / 印象记忆</label><textarea class="px-txt" id="wr-mem" rows="2" maxlength="120">' + esc(rel.shared_memories || "") + "</textarea></div>"
+    + (isCharTarget
+      ? ('<div class="field full"><label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);">'
+        + '<input type="checkbox" id="wr-sync-rev"> 同步写入对方（' + esc(tgtName) + ' → ' + esc(subj) + '）的对称关系（保留各自称呼）</label></div>')
+      : "")
     + "</div>",
     [
       { label: "取消", onClick: closeModal },
@@ -6658,12 +7097,752 @@ function openWorldRelationModal(rel, act) {
             trust: Number(el("wr-trust").value || 0.55),
             social_willingness: Number(el("wr-will").value || 0.5),
             shared_memories: el("wr-mem").value.trim(),
+            sync_reverse: Boolean(el("wr-sync-rev") && el("wr-sync-rev").checked),
           })
-            .then(() => { closeModal(); toast("已保存「" + spName + "」对「" + tgtName + "」的社交指针"); })
+            .then(() => {
+              closeModal();
+              if (typeof opts.onSaved === "function") opts.onSaved();
+              toast("已保存「" + spName + "」对「" + tgtName + "」的社交指针");
+            })
             .catch((e) => { btn.disabled = false; toast(e.message, true); });
         },
       },
     ], true);
+
+  const knownSel = el("wr-known");
+  const stageSel = el("wr-stage");
+  if (knownSel && stageSel) {
+    knownSel.onchange = () => {
+      if (knownSel.value === "0") stageSel.value = "stranger";
+      else if (stageSel.value === "stranger") stageSel.value = "acquainted";
+    };
+    stageSel.onchange = () => {
+      knownSel.value = stageSel.value === "stranger" ? "0" : "1";
+    };
+  }
+}
+
+/* ── 角色管理中心（不进入世界管理皮肤外观与各世界情感态度指针） ── */
+function getTopRealms(snap) {
+  const spaces = (snap && snap.spaces) || [];
+  const ids = new Set(spaces.map((s) => s.space_id));
+  return spaces.filter((sp) => {
+    const pid = String(sp.parent_space_id || "").trim();
+    return !pid || !ids.has(pid);
+  });
+}
+
+function resolveActorRealmId(act, snap) {
+  if (!act || !snap) return "";
+  const byId = new Map((snap.spaces || []).map((s) => [s.space_id, s]));
+  let cur = String(act.space_id || "").trim();
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const sp = byId.get(cur);
+    const pid = sp && String(sp.parent_space_id || "").trim();
+    if (pid && byId.has(pid)) cur = pid;
+    else break;
+  }
+  return cur;
+}
+
+function getCmSelectedActor() {
+  const actors = ((state.snap && state.snap.actors) || []).filter((a) => !a.is_player);
+  return actors.find((a) => a.actor_id === state.cmActorId) || actors[0] || null;
+}
+
+function confirmDiscardCmDraft(nextFn) {
+  if (!state.cmAppearanceDirty) {
+    nextFn();
+    return;
+  }
+  openConfirm("当前角色的外观有尚未保存的修改，确定放弃修改并继续吗？", () => {
+    state.cmAppearanceDirty = false;
+    nextFn();
+  });
+}
+
+function cmLoadAppearanceDraft(act) {
+  state.cmDraftActorId = act ? act.actor_id : "";
+  state.cmDraft = act ? JSON.parse(JSON.stringify(act.appearance || {})) : {};
+  state.cmDraftMapStyle = (act && act.map_style === "portrait") ? "portrait" : "doll";
+  state.cmDraftUploadedUrl = "";
+  state.cmAppearanceDirty = false;
+  if (!act) return;
+  const hair = el("cm-ap-hair_style");
+  const outfit = el("cm-ap-outfit_style");
+  const acc = el("cm-ap-accessory");
+  const ms = el("cm-ap-map-style");
+  if (hair) hair.value = state.cmDraft.hair_style || PD_HAIR_STYLES[0][0];
+  if (outfit) outfit.value = state.cmDraft.outfit_style || PD_OUTFITS[0][0];
+  if (acc) acc.value = state.cmDraft.accessory || PD_ACCESSORIES[0][0];
+  if (ms) ms.value = state.cmDraftMapStyle;
+  PD_COLOR_FIELDS.forEach(([k]) => {
+    const inp = el("cm-ap-" + k);
+    if (inp) inp.value = state.cmDraft[k] || "#888888";
+  });
+}
+
+function cmCollectAppearanceDraft() {
+  if (!state.cmDraft) state.cmDraft = {};
+  ["hair_style", "outfit_style", "accessory"].forEach((k) => {
+    const node = el("cm-ap-" + k);
+    if (node && node.value) state.cmDraft[k] = node.value;
+  });
+  PD_COLOR_FIELDS.forEach(([k]) => {
+    const node = el("cm-ap-" + k);
+    if (node && node.value) state.cmDraft[k] = node.value;
+  });
+  const ms = el("cm-ap-map-style");
+  if (ms && ms.value) state.cmDraftMapStyle = ms.value;
+}
+
+function cmRedrawAppearance() {
+  if (!state.cmDraft) return;
+  cmCollectAppearanceDraft();
+  const cf = state.cmDraft.custom_frames;
+  const hasCustom = Boolean(cf && Array.isArray(cf.down) && cf.down.length >= 16);
+  const dimTxt = hasCustom ? ((cf.down[0] ? cf.down[0].length : (cf.w || 16)) + "×" + cf.down.length) : "";
+  if (el("cm-ap-mode-badge")) {
+    el("cm-ap-mode-badge").textContent = hasCustom ? ("✨ 精绘 " + dimTxt) : "🧩 基础模板";
+  }
+  if (el("btn-cm-ap-clear")) el("btn-cm-ap-clear").classList.toggle("hidden", !hasCustom);
+  if (el("cm-ap-dirty")) el("cm-ap-dirty").classList.toggle("hidden", !state.cmAppearanceDirty);
+  if (el("btn-cm-ap-reset")) el("btn-cm-ap-reset").classList.toggle("hidden", !state.cmAppearanceDirty);
+  paintDollAppearancePreviews("cm-pv-", state.cmDraft);
+  paintDollPreviewCanvas(el("cm-hero-canvas"), state.cmDraft, "down", false, 0);
+}
+
+function openCharManager(preferredActorId = "", preferredRealmId = "") {
+  state.view = "characters";
+  state.cmAppearanceDirty = false;
+  if (preferredActorId) state.cmActorId = preferredActorId;
+  state.cmRealmId = preferredRealmId || "__default__";
+  renderViewShell();
+  if (state.snap) {
+    renderCharManager({ preserveDraft: false });
+    if (state.cmTab === "relations") void loadCharManagerRelations(true);
+  }
+  runAction("get_world_snapshot", {})
+    .then(() => {
+      if (state.view === "characters" && state.cmTab === "relations") {
+        void loadCharManagerRelations(false);
+      }
+    })
+    .catch((e) => toast(e.message, true));
+}
+
+function renderCharManager({ preserveDraft = true } = {}) {
+  const snap = state.snap;
+  if (!snap || state.view !== "characters") return;
+  const actors = (snap.actors || []).filter((a) => !a.is_player);
+  const topRealms = getTopRealms(snap);
+  const realmById = new Map(topRealms.map((s) => [s.space_id, s]));
+
+  if (el("cm-actor-count")) el("cm-actor-count").textContent = actors.length + " 位角色";
+  if (el("cm-side-count")) el("cm-side-count").textContent = String(actors.length);
+
+  let curAct = actors.find((a) => a.actor_id === state.cmActorId) || actors[0] || null;
+  state.cmActorId = curAct ? curAct.actor_id : "";
+
+  const listEl = el("cm-actor-list");
+  if (listEl) {
+    listEl.innerHTML = "";
+    if (!actors.length) {
+      listEl.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:8px;">暂无已导入角色</div>';
+    } else {
+      for (const act of actors) {
+        const row = document.createElement("div");
+        const isSel = curAct && act.actor_id === curAct.actor_id;
+        row.className = "cm-actor-row" + (isSel ? " active" : "");
+        const thumb = document.createElement("canvas");
+        thumb.className = "cm-actor-thumb";
+        thumb.width = 34;
+        thumb.height = 44;
+        paintDollPreviewCanvas(thumb, isSel && state.cmAppearanceDirty && state.cmDraft ? state.cmDraft : act.appearance, "down", false, 0);
+
+        const meta = document.createElement("div");
+        meta.style.cssText = "flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;";
+        const actRealm = resolveActorRealmId(act, snap);
+        const realmTitle = (realmById.get(actRealm) || {}).name || act.space_id;
+        const styleLbl = act.map_style === "portrait" ? "立牌" : "像素小人";
+        meta.innerHTML = '<div style="display:flex;align-items:center;gap:5px;"><b style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+          + esc(act.name) + '</b></div>'
+          + '<div style="font-size:10px;color:var(--muted);font-family:var(--px-font);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🌍 '
+          + esc(realmTitle) + ' · ' + esc(styleLbl) + '</div>';
+        row.append(thumb, meta);
+        row.onclick = () => {
+          if (act.actor_id === state.cmActorId) return;
+          confirmDiscardCmDraft(() => {
+            state.cmRegenGen++;
+            state.cmActorId = act.actor_id;
+            state.cmRealmId = resolveActorRealmId(act, state.snap) || (topRealms[0] && topRealms[0].space_id) || "room_default";
+            state.cmRelations = null;
+            renderCharManager({ preserveDraft: false });
+            if (state.cmTab === "relations") void loadCharManagerRelations(true);
+          });
+        };
+        listEl.appendChild(row);
+      }
+    }
+  }
+
+  // 未导入的宿主角色快捷入口
+  const hosts = snap.host_characters || [];
+  const importedHostSet = new Set(actors.map((a) => a.host_character || a.name));
+  const unimportedHosts = hosts.filter((h) => h.name && !importedHostSet.has(h.name));
+  const hostWrap = el("cm-host-wrap");
+  const hostList = el("cm-host-list");
+  if (hostWrap && hostList) {
+    hostWrap.classList.toggle("hidden", unimportedHosts.length === 0);
+    if (el("cm-host-count")) el("cm-host-count").textContent = String(unimportedHosts.length);
+    hostList.innerHTML = "";
+    for (const h of unimportedHosts) {
+      const hRow = document.createElement("div");
+      hRow.style.cssText = "display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--border);background:var(--panel);font-size:11px;";
+      const hName = document.createElement("span");
+      hName.style.cssText = "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+      const cnt = (h.pack_sprites || []).length;
+      hName.textContent = h.name + (cnt > 0 ? (" (" + cnt + "立绘)") : "");
+      const bAdd = document.createElement("button");
+      bAdd.type = "button";
+      bAdd.className = "px-btn primary";
+      bAdd.style.cssText = "padding:1px 6px;font-size:10px;flex:0 0 auto;";
+      bAdd.textContent = "➕ 导入";
+      bAdd.onclick = () => {
+        bAdd.disabled = true;
+        const targetSid = (state.cmRealmId && realmById.has(state.cmRealmId) ? state.cmRealmId : "")
+          || (topRealms[0] && topRealms[0].space_id)
+          || snap.active_space_id
+          || "room_default";
+        runAction("import_actor", {
+          host_character: h.name,
+          name: h.name,
+          sprite_mode: cnt > 0 ? "host_pack" : "pixel_grid",
+          map_style: "doll",
+          space_id: targetSid,
+        }).then(async (res) => {
+          const newAct = res && res.actor;
+          if (newAct) {
+            state.cmActorId = newAct.actor_id;
+            state.cmAppearanceDirty = false;
+            if (res.cached_pixel_data_url) {
+              try {
+                const cf = await pdExtractNativePixelSprite(res.cached_pixel_data_url);
+                await runAction("set_actor_appearance", {
+                  actor_id: newAct.actor_id,
+                  appearance: Object.assign({}, newAct.appearance || {}, { custom_frames: cf }),
+                  map_style: newAct.map_style || "doll",
+                });
+              } catch (_err) { /* ignore fallback */ }
+            }
+          }
+          renderCharManager({ preserveDraft: false });
+          if (state.cmTab === "relations") void loadCharManagerRelations(true);
+          toast("已导入角色「" + h.name + "」");
+        }).catch((e) => {
+          bAdd.disabled = false;
+          toast(e.message, true);
+        });
+      };
+      hRow.append(hName, bAdd);
+      hostList.appendChild(hRow);
+    }
+  }
+
+  const hasDetail = Boolean(curAct);
+  if (el("cm-empty")) el("cm-empty").classList.toggle("hidden", hasDetail);
+  if (el("cm-detail")) el("cm-detail").classList.toggle("hidden", !hasDetail);
+  if (!curAct) return;
+
+  const curActRealm = resolveActorRealmId(curAct, snap);
+  const actRealmName = (realmById.get(curActRealm) || {}).name || curAct.space_id;
+  if (el("cm-hero-name")) el("cm-hero-name").textContent = curAct.name;
+  if (el("cm-hero-host")) {
+    const hc = curAct.host_character || "";
+    el("cm-hero-host").textContent = hc ? ("宿主: " + hc) : "独立角色";
+  }
+  if (el("cm-hero-world")) el("cm-hero-world").textContent = "📍 所在世界: " + actRealmName;
+  if (el("btn-cm-remove")) {
+    el("btn-cm-remove").disabled = actors.length <= 1;
+    el("btn-cm-remove").title = actors.length <= 1 ? "至少需要保留一名角色" : ("将「" + curAct.name + "」从文字世界移除");
+  }
+
+  document.querySelectorAll(".cm-tab[data-cmtab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.cmtab === state.cmTab);
+  });
+  if (el("cm-pane-appearance")) el("cm-pane-appearance").classList.toggle("hidden", state.cmTab !== "appearance");
+  if (el("cm-pane-relations")) el("cm-pane-relations").classList.toggle("hidden", state.cmTab !== "relations");
+  if (el("cm-ap-pixellab-tag")) el("cm-ap-pixellab-tag").classList.toggle("hidden", !snap.pixellab_ready);
+
+  if (!preserveDraft || state.cmDraftActorId !== curAct.actor_id || !state.cmAppearanceDirty) {
+    cmLoadAppearanceDraft(curAct);
+  }
+  cmRedrawAppearance();
+
+  // 世界选择器（含全局「默认初始关系」及各世界独立关系指针）
+  if (!state.cmRealmId || (state.cmRealmId !== "__default__" && !realmById.has(state.cmRealmId))) {
+    state.cmRealmId = "__default__";
+  }
+  const pillsEl = el("cm-world-pills");
+  if (pillsEl) {
+    pillsEl.innerHTML = "";
+    const defBtn = document.createElement("button");
+    defBtn.type = "button";
+    defBtn.className = "cm-world-pill" + (state.cmRealmId === "__default__" ? " active" : "");
+    defBtn.innerHTML = '✨ 默认初始关系 <span style="font-size:10px;color:var(--accent-2);">(新世界/故事继承)</span>';
+    defBtn.onclick = () => {
+      if (state.cmRealmId === "__default__") return;
+      state.cmRealmId = "__default__";
+      renderCharManager({ preserveDraft: true });
+      void loadCharManagerRelations(true);
+    };
+    pillsEl.appendChild(defBtn);
+    for (const sp of topRealms) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const isSelected = sp.space_id === state.cmRealmId;
+      const isHomeRealm = sp.space_id === curActRealm;
+      const realmCnt = actors.filter((a) => resolveActorRealmId(a, snap) === sp.space_id).length;
+      btn.className = "cm-world-pill" + (isSelected ? " active" : "");
+      btn.innerHTML = (sp.space_kind === "town" ? "🏘️ " : "🌐 ") + esc(sp.name || sp.space_id)
+        + (isHomeRealm ? ' <span style="font-size:10px;color:var(--ok);">[TA所在]</span>' : "")
+        + ' <span style="font-size:10px;color:var(--muted);font-family:var(--px-font);">(' + realmCnt + '人)</span>';
+      btn.onclick = () => {
+        if (state.cmRealmId === sp.space_id) return;
+        state.cmRealmId = sp.space_id;
+        renderCharManager({ preserveDraft: true });
+        void loadCharManagerRelations(true);
+      };
+      pillsEl.appendChild(btn);
+    }
+  }
+  const selRealm = realmById.get(state.cmRealmId);
+  if (el("cm-rel-realm-hint")) {
+    el("cm-rel-realm-hint").textContent = state.cmRealmId === "__default__"
+      ? "此处设置的关系会在新建世界与故事引擎开局时自动继承；也可切换右侧各世界单独覆写。"
+      : (selRealm ? ("当前编辑：「" + selRealm.name + "」(" + selRealm.space_id + ")") : "");
+  }
+
+  const cachedSubj = curAct.host_character || curAct.name;
+  const loadedOk = state.cmRelations
+    && state.cmRelations.realm_space_id === state.cmRealmId
+    && state.cmRelations.subject_character === cachedSubj;
+  if (state.cmTab === "relations") {
+    if (loadedOk) renderCharManagerRelations();
+    else void loadCharManagerRelations(false);
+  }
+}
+
+async function loadCharManagerRelations(force = false) {
+  const act = getCmSelectedActor();
+  if (!act || !state.cmRealmId) return;
+  const subj = act.host_character || act.name;
+  if (!force && state.cmRelations
+      && state.cmRelations.realm_space_id === state.cmRealmId
+      && state.cmRelations.subject_character === subj) {
+    renderCharManagerRelations();
+    return;
+  }
+  const seq = ++state.cmRelReqSeq;
+  if (el("cm-rel-status")) el("cm-rel-status").textContent = "正在读取该世界下的情感态度指针…";
+  try {
+    const res = await runAction("get_actor_relations", {
+      space_id: state.cmRealmId,
+      actor_id: act.actor_id,
+      subject_character: subj,
+    }, false);
+    if (seq !== state.cmRelReqSeq) return;
+    state.cmRelations = res;
+    renderCharManagerRelations();
+  } catch (e) {
+    if (seq !== state.cmRelReqSeq) return;
+    if (el("cm-rel-status")) el("cm-rel-status").textContent = "读取关系失败：" + e.message;
+    toast(e.message, true);
+  }
+}
+
+function renderCharManagerRelations() {
+  const act = getCmSelectedActor();
+  const data = state.cmRelations;
+  const grid = el("cm-rel-grid");
+  const statusEl = el("cm-rel-status");
+  if (!grid || !act) return;
+
+  document.querySelectorAll("#cm-rel-filter-bar [data-cmrelfilter]").forEach((b) => {
+    b.classList.toggle("primary", b.dataset.cmrelfilter === state.cmRelFilter);
+  });
+
+  if (!data || !data.relations) {
+    grid.innerHTML = "";
+    if (statusEl) statusEl.textContent = "尚未加载关系数据。";
+    return;
+  }
+
+  const inRealmSet = new Set(data.in_realm_names || []);
+  const allEntries = Object.values(data.relations);
+  const knownCount = allEntries.filter((r) => Boolean(r.known)).length;
+  const inRealmCount = allEntries.filter((r) => r.target_type === "character" && inRealmSet.has(r.target_name)).length;
+  if (el("cm-rel-tab-badge")) el("cm-rel-tab-badge").textContent = "(" + knownCount + "/" + allEntries.length + ")";
+
+  const filtered = allEntries.filter((r) => {
+    if (state.cmRelFilter === "known") return Boolean(r.known);
+    if (state.cmRelFilter === "in_realm") return r.target_type === "user" || inRealmSet.has(r.target_name);
+    return true;
+  });
+
+  const selSp = ((state.snap && state.snap.spaces) || []).find((s) => s.space_id === data.realm_space_id);
+  const spName = data.realm_space_id === "__default__"
+    ? "默认初始关系（新世界/故事继承）"
+    : ((selSp && selSp.name) || data.realm_space_id);
+  if (statusEl) {
+    statusEl.textContent = (data.realm_space_id === "__default__" ? "「默认初始关系」" : ("世界「" + spName + "」"))
+      + "中共有 " + allEntries.length + " 个关系对象（已相识 "
+      + knownCount + " · 本世界同场 " + inRealmCount + "），当前显示 " + filtered.length + " 条。";
+  }
+
+  grid.innerHTML = "";
+  if (!filtered.length) {
+    grid.innerHTML = '<div style="font-size:12px;color:var(--muted);padding:10px;border:1px dashed var(--border);">当前筛选下暂无对象，可切换筛选或在右上角输入角色名添加关系。</div>';
+    return;
+  }
+
+  const stageLabels = { stranger: "不认识", acquainted: "刚认识", friend: "同伴", close: "挚友", rival: "对手", guarded: "戒备", hostile: "敌对" };
+  const stanceLabels = { neutral: "平常", open: "温和开放", warm: "亲近热情", shy: "害羞拘谨", guarded: "疏离戒备", cold: "冷淡" };
+  for (const r of filtered) {
+    const card = document.createElement("div");
+    card.className = "cm-rel-card" + (r.known ? " known" : "");
+    const isUser = r.target_type === "user";
+    const icon = isUser ? "👤 " : "🎭 ";
+    const stText = r.known ? (stageLabels[r.rel_stage] || r.rel_stage || "相识") : "不认识";
+    const stColor = r.known ? "var(--ok)" : "var(--warn)";
+    const inRealmBadge = (!isUser && inRealmSet.has(r.target_name))
+      ? '<span class="pill" style="font-size:9px;padding:0 4px;color:var(--accent-2);border-color:var(--accent-2);">同在此世界</span>'
+      : "";
+    const manualBadge = r.manual_override
+      ? '<span class="pill" style="font-size:9px;padding:0 4px;color:#ffd166;">已设定</span>'
+      : "";
+
+    const top = document.createElement("div");
+    top.style.cssText = "display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;";
+    top.innerHTML = '<b style="color:var(--text);">' + icon + esc(r.target_name || r.target_key) + "</b>"
+      + '<span style="color:' + stColor + ';font-family:var(--px-font);font-size:11px;">[' + esc(stText) + "]</span>"
+      + (r.call_name ? '<span style="color:var(--accent-2);font-size:11px;">称:' + esc(r.call_name) + "</span>" : "")
+      + inRealmBadge
+      + manualBadge;
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "px-btn";
+    editBtn.textContent = "✎ 编辑";
+    editBtn.style.cssText = "margin-left:auto;padding:2px 8px;font-size:11px;";
+    editBtn.onclick = () => openWorldRelationModal(r, act, {
+      spaceId: data.realm_space_id,
+      spaceName: spName,
+      onSaved: () => void loadCharManagerRelations(true),
+    });
+    top.appendChild(editBtn);
+    card.appendChild(top);
+
+    const sub = document.createElement("div");
+    sub.style.cssText = "font-size:11px;color:var(--muted);font-family:var(--px-font);";
+    const val = Number(r.affective_valence || 0);
+    const stanceTxt = stanceLabels[r.attitude_stance] || r.attitude_stance || "平常";
+    sub.textContent = "姿态:" + stanceTxt
+      + " · 好感 " + (val >= 0 ? "+" : "") + val.toFixed(2)
+      + " · 信任 " + Number(r.trust ?? 0.55).toFixed(2)
+      + " · 意愿 " + Number(r.social_willingness ?? 0.5).toFixed(2)
+      + (r.relation_tag ? (" · " + r.relation_tag) : "");
+    card.appendChild(sub);
+
+    const note = r.shared_memories || r.last_interaction || "";
+    if (note) {
+      const nEl = document.createElement("div");
+      nEl.style.cssText = "font-size:11px;color:#cbc3dc;line-height:1.4;";
+      nEl.textContent = note;
+      card.appendChild(nEl);
+    }
+    grid.appendChild(card);
+  }
+}
+
+function bindCharManagerUi() {
+  const fillSelect = (id, list) => {
+    const node = el(id);
+    if (!node) return;
+    node.innerHTML = list.map(([k, lb]) => '<option value="' + esc(k) + '">' + esc(lb) + "</option>").join("");
+  };
+  fillSelect("cm-ap-hair_style", PD_HAIR_STYLES);
+  fillSelect("cm-ap-outfit_style", PD_OUTFITS);
+  fillSelect("cm-ap-accessory", PD_ACCESSORIES);
+
+  const colorBox = el("cm-ap-colors");
+  if (colorBox) {
+    colorBox.innerHTML = PD_COLOR_FIELDS.map(([k, lb]) =>
+      '<div class="field"><label>' + esc(lb) + '</label><input type="color" class="px-inp" id="cm-ap-' + esc(k)
+      + '" value="#888888" style="padding:1px;height:26px;"></div>'
+    ).join("");
+  }
+
+  if (el("btn-cm-back")) {
+    el("btn-cm-back").onclick = () => confirmDiscardCmDraft(() => {
+      state.cmRegenGen++;
+      state.view = "hub";
+      renderViewShell();
+      runAction("get_world_snapshot", {}).catch((e) => toast(e.message, true));
+    });
+  }
+  if (el("btn-cm-import-actor")) el("btn-cm-import-actor").onclick = openImportActorModal;
+  if (el("btn-cm-pixel-pack")) {
+    el("btn-cm-pixel-pack").onclick = () => {
+      const act = getCmSelectedActor();
+      openPixelPackModal(act, {
+        onBack: () => {},
+        onApplied: () => {
+          state.cmAppearanceDirty = false;
+          renderCharManager({ preserveDraft: false });
+        },
+      });
+    };
+  }
+  if (el("btn-cm-refresh")) {
+    el("btn-cm-refresh").onclick = () => {
+      runAction("get_world_snapshot", {})
+        .then(() => {
+          if (state.cmTab === "relations") return loadCharManagerRelations(true);
+        })
+        .then(() => toast("已刷新角色与世界信息"))
+        .catch((e) => toast(e.message, true));
+    };
+  }
+  if (el("btn-cm-expr")) {
+    el("btn-cm-expr").onclick = () => openExpressionModal(getCmSelectedActor());
+  }
+  if (el("btn-cm-remove")) {
+    el("btn-cm-remove").onclick = () => {
+      const act = getCmSelectedActor();
+      if (!act) return;
+      openConfirm(
+        "确定要将「" + act.name + "」从文字世界移除吗？",
+        () => runAction("remove_actor", { actor_id: act.actor_id }).then(() => {
+          state.cmAppearanceDirty = false;
+          state.cmActorId = "";
+          state.cmRelations = null;
+          renderCharManager({ preserveDraft: false });
+          toast("已移除「" + act.name + "」");
+        }),
+      );
+    };
+  }
+
+  document.querySelectorAll(".cm-tab[data-cmtab]").forEach((btn) => {
+    btn.onclick = () => {
+      state.cmTab = btn.dataset.cmtab === "relations" ? "relations" : "appearance";
+      renderCharManager({ preserveDraft: true });
+    };
+  });
+
+  // Inline 外观编辑控件绑定
+  ["hair_style", "outfit_style", "accessory"].forEach((k) => {
+    const node = el("cm-ap-" + k);
+    if (!node) return;
+    node.addEventListener("change", () => {
+      if (!state.cmDraft) state.cmDraft = {};
+      state.cmDraft.custom_frames = {};
+      state.cmDraftUploadedUrl = "";
+      state.cmAppearanceDirty = true;
+      cmRedrawAppearance();
+    });
+  });
+  PD_COLOR_FIELDS.forEach(([k]) => {
+    const node = el("cm-ap-" + k);
+    if (!node) return;
+    node.addEventListener("input", () => {
+      if (!state.cmDraft) state.cmDraft = {};
+      state.cmDraft.custom_frames = {};
+      state.cmDraftUploadedUrl = "";
+      state.cmAppearanceDirty = true;
+      cmRedrawAppearance();
+    });
+  });
+  if (el("cm-ap-map-style")) {
+    el("cm-ap-map-style").addEventListener("change", () => {
+      state.cmDraftMapStyle = el("cm-ap-map-style").value;
+      state.cmAppearanceDirty = true;
+      cmRedrawAppearance();
+    });
+  }
+  if (el("cm-ap-img-file")) {
+    el("cm-ap-img-file").addEventListener("change", (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => {
+        const rawUrl = String(r.result || "");
+        pdExtractNativePixelSprite(rawUrl)
+          .then((cf) => {
+            if (!state.cmDraft) state.cmDraft = {};
+            state.cmDraft.custom_frames = cf;
+            state.cmDraftUploadedUrl = rawUrl;
+            state.cmAppearanceDirty = true;
+            cmRedrawAppearance();
+            toast("已无损提取 " + cf.w + "×" + cf.h + " 像素小人（请点击保存）");
+          })
+          .catch((e) => toast(e.message, true));
+      };
+      r.readAsDataURL(f);
+      ev.target.value = "";
+    });
+  }
+  if (el("btn-cm-ap-clear")) {
+    el("btn-cm-ap-clear").onclick = () => {
+      if (!state.cmDraft) state.cmDraft = {};
+      state.cmDraft.custom_frames = {};
+      state.cmDraftUploadedUrl = "";
+      state.cmAppearanceDirty = true;
+      cmRedrawAppearance();
+      toast("已切换回基础模板，可用下方下拉与色板微调");
+    };
+  }
+  if (el("btn-cm-ap-pack")) {
+    el("btn-cm-ap-pack").onclick = () => {
+      const act = getCmSelectedActor();
+      if (!act) return toast("请先选择角色", true);
+      openPixelPackModal(act, {
+        onBack: () => {},
+        onApplied: () => {
+          state.cmAppearanceDirty = false;
+          renderCharManager({ preserveDraft: false });
+        },
+      });
+    };
+  }
+  if (el("btn-cm-ap-regen")) {
+    el("btn-cm-ap-regen").onclick = () => {
+      const act = getCmSelectedActor();
+      if (!act) return toast("请先选择角色", true);
+      const btn = el("btn-cm-ap-regen");
+      btn.disabled = true;
+      const prevLabel = btn.textContent;
+      btn.textContent = "检索与生成中…";
+      const myGen = ++state.cmRegenGen;
+      runRegenAppearanceJob({
+        actorId: act.actor_id,
+        useWeb: Boolean(el("cm-ap-use-web") && el("cm-ap-use-web").checked),
+        genMode: (el("cm-ap-gen-mode") && el("cm-ap-gen-mode").value) || "auto",
+        isStillActive: () => myGen === state.cmRegenGen && state.view === "characters" && state.cmActorId === act.actor_id,
+        onTick: (lbl) => { btn.textContent = lbl; },
+        applyResult: (r, frames, msg) => {
+          if (!state.cmDraft) state.cmDraft = {};
+          state.cmDraftUploadedUrl = "";
+          if (frames) {
+            state.cmDraft.custom_frames = frames;
+          } else {
+            Object.assign(state.cmDraft, r.appearance || {});
+            ["hair_style", "outfit_style", "accessory"].forEach((k) => {
+              if (el("cm-ap-" + k)) el("cm-ap-" + k).value = state.cmDraft[k];
+            });
+            PD_COLOR_FIELDS.forEach(([k]) => {
+              if (el("cm-ap-" + k)) el("cm-ap-" + k).value = state.cmDraft[k];
+            });
+          }
+          state.cmAppearanceDirty = true;
+          cmRedrawAppearance();
+          toast(msg + "（请点击「💾 保存外观」生效）");
+        },
+      })
+        .catch((e) => toast(e.message, true))
+        .finally(() => {
+          if (myGen !== state.cmRegenGen) return;
+          btn.disabled = false;
+          btn.textContent = prevLabel;
+        });
+    };
+  }
+  if (el("btn-cm-ap-reset")) {
+    el("btn-cm-ap-reset").onclick = () => {
+      const act = getCmSelectedActor();
+      state.cmAppearanceDirty = false;
+      cmLoadAppearanceDraft(act);
+      cmRedrawAppearance();
+      toast("已放弃未保存的修改");
+    };
+  }
+  if (el("btn-cm-ap-save")) {
+    el("btn-cm-ap-save").onclick = () => {
+      const act = getCmSelectedActor();
+      if (!act) return toast("请先选择角色", true);
+      const btn = el("btn-cm-ap-save");
+      btn.disabled = true;
+      cmCollectAppearanceDraft();
+      runAction("set_actor_appearance", {
+        actor_id: act.actor_id,
+        appearance: state.cmDraft,
+        map_style: state.cmDraftMapStyle,
+        cache_image_data_url: state.cmDraftUploadedUrl || "",
+      })
+        .then(() => {
+          state.cmAppearanceDirty = false;
+          state.cmDraftUploadedUrl = "";
+          renderCharManager({ preserveDraft: false });
+          toast("已保存「" + act.name + "」的外观与皮肤");
+        })
+        .catch((e) => toast(e.message, true))
+        .finally(() => { btn.disabled = false; });
+    };
+  }
+
+  // 各世界情感态度指针交互绑定
+  document.querySelectorAll("#cm-rel-filter-bar [data-cmrelfilter]").forEach((btn) => {
+    btn.onclick = () => {
+      state.cmRelFilter = btn.dataset.cmrelfilter || "all";
+      renderCharManagerRelations();
+    };
+  });
+  const triggerAddCustomRel = () => {
+    const act = getCmSelectedActor();
+    if (!act) return toast("请先选择角色", true);
+    const inp = el("cm-rel-add-name");
+    const targetName = inp ? inp.value.trim() : "";
+    if (!targetName) return toast("请输入对象角色名称", true);
+    const subj = act.host_character || act.name;
+    if (targetName === subj || targetName === act.name) {
+      return toast("社交指针不能指向角色自身", true);
+    }
+    const key = "char:" + targetName;
+    const existing = state.cmRelations && state.cmRelations.relations && state.cmRelations.relations[key];
+    const relObj = existing || {
+      target_key: key,
+      target_type: "character",
+      target_name: targetName,
+      known: true,
+      rel_stage: "acquainted",
+      attitude_stance: "neutral",
+      call_name: "",
+      relation_tag: "",
+      affective_valence: 0,
+      trust: 0.55,
+      social_willingness: 0.5,
+      shared_memories: "",
+    };
+    const selSp = ((state.snap && state.snap.spaces) || []).find((s) => s.space_id === state.cmRealmId);
+    const spName = state.cmRealmId === "__default__"
+      ? "默认初始关系（新世界/故事继承）"
+      : ((selSp && selSp.name) || state.cmRealmId);
+    if (inp) inp.value = "";
+    openWorldRelationModal(relObj, act, {
+      spaceId: state.cmRealmId,
+      spaceName: spName,
+      onSaved: () => void loadCharManagerRelations(true),
+    });
+  };
+  if (el("btn-cm-rel-add")) el("btn-cm-rel-add").onclick = triggerAddCustomRel;
+  if (el("cm-rel-add-name")) {
+    el("cm-rel-add-name").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") triggerAddCustomRel();
+    });
+  }
 }
 
 function openCreateSpaceModal(enterAfterCreate) {
@@ -6911,6 +8090,7 @@ function openWorldMenuModal() {
     + (isTownRealm ? '<button class="menu-item-btn" id="wm-add-building"><b>🏗️ 在本镇加盖一栋建筑</b><span>自动避让道路选址，连同内室与布告栏一并建成</span></button>' : "")
     + '<button class="menu-item-btn" id="wm-gen-map"><b>🗺️ LLM 生成 / 改造地图</b><span>输入场景描述一键生成家具与地形</span></button>'
     + '<button class="menu-item-btn" id="wm-import-actor"><b>👤 导入角色包</b><span>从宿主或自定义立绘导入角色</span></button>'
+    + '<button class="menu-item-btn" id="wm-char-mgr"><b>🎭 角色管理中心</b><span>管理角色皮肤外观与各世界社交关系</span></button>'
     + '<button class="menu-item-btn" id="wm-palette"><b>🎨 切换 / 编辑调色板</b><span>调整世界色彩风格或导入 Lospec</span></button>'
     + '<button class="menu-item-btn" id="wm-tick"><b>⏱ 推进世界时钟 +1h</b><span>推进时间并触发昼夜与生物钟变化</span></button>'
     + '<button class="menu-item-btn" id="wm-starter"><b>📦 摆入基础测试包</b><span>在当前世界生成一套预设测试物品</span></button>'
@@ -6931,6 +8111,11 @@ function openWorldMenuModal() {
   }
   el("wm-gen-map").onclick = () => openGenerateMapModal("replace_current");
   el("wm-import-actor").onclick = openImportActorModal;
+  el("wm-char-mgr").onclick = () => {
+    closeModal();
+    if (state.autoLife || state.watchLive) setLiveEnabled(false);
+    openCharManager(snap.active_actor_id || "", snap.realm_space_id || sp.space_id || "");
+  };
   el("wm-palette").onclick = openPaletteModal;
   el("wm-tick").onclick = () => {
     closeModal();
@@ -7095,12 +8280,9 @@ async function pollLive(generation) {
       delay = 600;
       return;
     }
-    if (live.speed && live.space_id !== space && PD_ANIM.get(aid)?.moving && !state.eyeMode) return;
-    if (live.space_id !== space && state.uiMode !== "roam") {
-      const full = await runAction("get_world_snapshot", { space_id: live.space_id }, false);
-      if (generation !== state.liveGeneration || space !== state.windowSpaceId || state.snap?.active_actor_id !== aid) return;
-      applySnapshot(full.snapshot, full.terminal, full.chat_history);
-      state.liveWorldRevision = "";
+    if (live.night_skip && Number(live.night_skip.seq || 0) > (state.lastNightSkipSeq | 0)) {
+      state.lastNightSkipSeq = Number(live.night_skip.seq);
+      if (live.night_skip.message) toast(live.night_skip.message);
     }
     if (result.changes?.space_id === state.windowSpaceId && interactGenAtPoll === (state._interactGen | 0)) {
       state.snap.entities = result.changes.entities;
@@ -7114,9 +8296,15 @@ async function pollLive(generation) {
       state.chatHistory = result.chat_history;
       renderDialogueDock();
     }
+    let anyMovedSpace = false;
     for (const row of [live, ...(live.peers || [])]) {
       const actor = state.snap.actors.find((a) => a.actor_id === row.actor_id);
       if (!actor) continue;
+      const rowSp = (row.actor && row.actor.space_id) || row.space_id || "";
+      if (rowSp && actor.space_id !== rowSp) {
+        actor.space_id = rowSp;
+        anyMovedSpace = true;
+      }
       if (row.actor && row.actor.move_seq >= actor.move_seq && row.actor.last_act.seq >= actor.last_act.seq) {
         const autonomy = {...actor.autonomy, ...row.actor.autonomy};
         Object.assign(actor, row.actor, { autonomy });
@@ -7141,7 +8329,71 @@ async function pollLive(generation) {
       }
       state.livePeerRevisions[row.actor_id] = row.revision;
     }
-    if (state.uiMode === "roam") refreshLocalRoamPrompt();
+    if (anyMovedSpace) {
+      renderTownNavBar();
+      if (document.activeElement !== el("actor-select")) renderTopbar();
+    }
+    if (state.uiMode === "roam") {
+      refreshLocalRoamPrompt();
+    } else if (!state.drag && el("modal-mask").classList.contains("hidden")) {
+      if (state.cameraMode === "follow") {
+        const followId = state.followActorId || aid;
+        const followAct = followId ? state.snap.actors.find((a) => a.actor_id === followId && a.actor_status !== "missing") : null;
+        if (followAct) {
+          if (followAct.space_id && followAct.space_id !== state.windowSpaceId) {
+            if (!(PD_ANIM.get(followId)?.moving && !state.eyeMode)) {
+              void switchCameraToActor(followId, { syncActive: true });
+            }
+          } else if (followId !== state.snap?.active_actor_id) {
+            void switchCameraToActor(followId, { syncActive: true });
+          } else {
+            smoothCenterOnCell(followAct.x, followAct.y, { deadzoneRatio: 0.20 });
+          }
+        }
+      } else if (state.cameraMode === "cinema") {
+        const cf = live.cinema_focus;
+        const nowMs = Date.now();
+        if (cf && cf.actor_id) {
+          const curId = state.cinemaTargetActorId;
+          const samePair = Boolean(curId && (cf.actor_id === curId || cf.partner_id === curId));
+          const curValid = Boolean(curId && state.snap.actors.some((a) => a.actor_id === curId && a.actor_status !== "missing"));
+          const shouldCut = !curValid || (
+            !samePair && (
+              cf.priority >= 2
+                ? (Number(cf.priority || 0) > state.cinemaPriority || nowMs >= state.cinemaHoldUntil)
+                : nowMs >= state.cinemaHoldUntil
+            )
+          );
+          if (shouldCut) {
+            state.cinemaTargetActorId = cf.actor_id;
+            state.cinemaPriority = Number(cf.priority || 0);
+            state.cinemaHoldUntil = nowMs + (cf.priority >= 2 ? 7000 : 5000);
+          } else if (samePair && Number(cf.priority || 0) > state.cinemaPriority) {
+            state.cinemaPriority = Number(cf.priority || 0);
+            state.cinemaHoldUntil = Math.max(state.cinemaHoldUntil, nowMs + (cf.priority >= 2 ? 5000 : 3000));
+          }
+          const camId = state.cinemaTargetActorId;
+          const camAct = camId ? state.snap.actors.find((a) => a.actor_id === camId && a.actor_status !== "missing") : null;
+          if (camAct) {
+            if (camAct.space_id && camAct.space_id !== state.windowSpaceId) {
+              if (!(PD_ANIM.get(camId)?.moving && !state.eyeMode)) {
+                void switchCameraToActor(camId, { syncActive: true });
+              }
+            } else if (camId !== state.snap?.active_actor_id) {
+              void switchCameraToActor(camId, { syncActive: true });
+            } else {
+              const pAct = (samePair && cf.partner_id && cf.priority >= 1)
+                ? state.snap.actors.find((a) => a.actor_id === cf.partner_id && a.space_id === state.windowSpaceId)
+                : null;
+              const mx = pAct ? (camAct.x + pAct.x) / 2 : camAct.x;
+              const my = pAct ? (camAct.y + pAct.y) / 2 : camAct.y;
+              smoothCenterOnCell(mx, my, { deadzoneRatio: 0.22 });
+            }
+          }
+        }
+      }
+      renderCameraControls(live.cinema_focus || null);
+    }
     renderViewport();
     renderLiveActivity(live);
     state.liveRevision = live.revision;
@@ -7176,6 +8428,8 @@ function init() {
     state.view = "world";
     state.windowSpaceId = urlSpaceId;
     state.isPopout = Boolean(urlSpaceId || urlView === "world");
+  } else if (urlView === "characters") {
+    state.view = "characters";
   } else {
     state.view = "hub";
     fetch(storyLink.href, { cache: "no-store" })
@@ -7184,9 +8438,11 @@ function init() {
   renderViewShell();
 
   setupCanvasEvents();
+  bindCharManagerUi();
   el("modal-close").onclick = closeModal;
 
   /* ── 世界大厅绑定 ── */
+  if (el("btn-hub-char-mgr")) el("btn-hub-char-mgr").onclick = () => openCharManager();
   el("btn-hub-default-town").onclick = () => openDefaultTown(false);
   el("btn-hub-gen-town").onclick = openGenerateTownModal;
   el("btn-hub-new-world").onclick = () => openCreateSpaceModal(true);
@@ -7457,7 +8713,18 @@ function openWeatherModal() {
   };
 
   el("actor-select").addEventListener("change", (ev) => {
-    if (ev.target.value) runAction("set_active_actor", { actor_id: ev.target.value }).catch((e) => toast(e.message, true));
+    const val = ev.target.value;
+    if (!val) return;
+    state.followActorId = val;
+    if (state.cameraMode === "cinema") {
+      setCameraMode("follow", { userInitiated: true, targetActorId: val, silent: false });
+      return;
+    }
+    switchCameraToActor(val, { syncActive: true, forceCenter: true });
+    renderCameraControls();
+  });
+  document.querySelectorAll("#camera-mode-switch [data-cam]").forEach((btn) => {
+    btn.onclick = () => setCameraMode(btn.dataset.cam, { userInitiated: true });
   });
 
   const setDelivery = (mode) => {
@@ -7905,6 +9172,7 @@ function openWeatherModal() {
     })
     .catch((e) => toast("加载世界失败：" + e.message, true));
   setInterval(() => {
+    if (state.view === "characters") return;
     if ((!el("modal-mask").classList.contains("hidden") && state.externalOverlayContext == null)
         || state.drag || roamInteractBusy || state.inventoryBusy) return;
     if (!isStoryWorld() && state.autoLife && state.view === "world" && state.liveActor) return;

@@ -11,17 +11,15 @@ from unittest.mock import patch
 from _shinsekai import WORLD_CODE
 
 try:
-    from plugins.nanami_story import story_compiler
     from plugins.nanami_story.adapters.persona_adapter import PersonaAdapter
     from plugins.nanami_story.adapters.world_adapter import WorldAdapter
-    from plugins.nanami_story.director import StoryDirector
+    from plugins.nanami_story.fate_runtime import FateRuntime
     from plugins.nanami_story.settings import StorySettings
     _HAS_STORY = True
 except ImportError:
-    story_compiler = None  # type: ignore[assignment]
     PersonaAdapter = None  # type: ignore[assignment]
     WorldAdapter = None  # type: ignore[assignment]
-    StoryDirector = None  # type: ignore[assignment]
+    FateRuntime = None  # type: ignore[assignment]
     StorySettings = None  # type: ignore[assignment]
     _HAS_STORY = False
 from plugins.nanami_world import map_generator, schedule, schema, text_compiler
@@ -406,28 +404,26 @@ class MapGenerationAndScheduleTests(unittest.TestCase):
         hb = WorldHeartbeat(eng, lambda: self.world_settings, project_root=self.root)
         self.addCleanup(hb.stop)
         bridge = WorldBridge(eng, heartbeat=hb)
-        director = StoryDirector(
+        runtime = FateRuntime(
             WorldAdapter(bridge=bridge),
             PersonaAdapter(self.root),
             self.root / "story_data",
             settings_provider=lambda: StorySettings(enabled=True, use_llm_compiler=False),
-            background_observers=False,
         )
-        self.addCleanup(director.close)
+        self.addCleanup(runtime.close)
 
         for w_mode in ("compound", "town"):
             with self.subTest(world_mode=w_mode):
-                compiled = story_compiler.compile_story_spec({
-                    "genre": "mystery",
+                session = runtime.start_standalone_stage({
+                    "title": f"{w_mode}测试舞台",
                     "world_mode": w_mode,
-                    "tone": "cozy",
-                    "pace": "standard",
+                    "experience_mode": "observer",
                     "native_npc_count": 3,
-                }, use_llm=False)
-                spec = compiled["spec"]
-                self.assertEqual(spec["world_config"]["mode"], w_mode)
-                session = director.start_story(spec, switch_active=False)
-                self.addCleanup(director.delete_story, session["session_id"])
+                    "building_count": 4,
+                    "switch_active": False,
+                    "use_llm": False,
+                })
+                self.addCleanup(runtime.detach_session, session["session_id"], delete_world=True)
 
                 realm = session["realm_space_id"]
                 ws = bridge.dispatch("query_world_state", {"space_id": realm})
@@ -443,17 +439,23 @@ class MapGenerationAndScheduleTests(unittest.TestCase):
                 light = eng.get_lighting(realm)
                 self.assertEqual(light["period"], "day")
 
-                # Clues/props are mapped across spaces & not piled onto a single center coordinate
-                prop_ids = set(session["prop_to_entity"].values())
-                prop_ents = [e for e in ws["realm_entities"] if e["entity_id"] in prop_ids]
-                self.assertGreaterEqual(len({e["space_id"] for e in prop_ents}), 2)
-                floor_pts = [(e["x"], e["y"]) for e in prop_ents if e["z"] == 0 and e["space_id"] == realm]
-                if len(floor_pts) >= 2:
-                    self.assertEqual(len(set(floor_pts)), len(floor_pts))
+                # Fate Weaver opening prop is inside an interior room/floor, NEVER dumped on center plaza
+                deployed_ids = set(session["threads"][0]["nodes"][0]["deployed_entity_ids"])
+                prop_ents = [e for e in ws["realm_entities"] if e["entity_id"] in deployed_ids]
+                self.assertTrue(prop_ents)
+                self.assertTrue(all(e["space_id"] != realm for e in prop_ents), f"prop leaked to center plaza: {prop_ents}")
 
-                # Startup tick must keep story running, NOT prematurely jump to climax/ending
-                ticked = director.tick_session(session["session_id"])
-                self.assertEqual(ticked["status"], "running")
+                # Residents start distributed across building spaces, not piled onto outdoor center
+                realm_sids = {s["space_id"] for s in ws["spaces"] if s.get("realm_space_id") == realm}
+                non_player_actors = [a for a in ws["actors"] if not a.get("is_player") and a["space_id"] in realm_sids]
+                self.assertEqual(len(non_player_actors), 3)
+                self.assertTrue(all(a["space_id"] != realm for a in non_player_actors))
+                self.assertGreaterEqual(len({a["space_id"] for a in non_player_actors}), 2)
+
+                # Startup tick must keep Fate Weaver thread active, NOT prematurely resolve
+                ticked = runtime.tick_session(session["session_id"], use_llm=False)
+                self.assertEqual(ticked["status"], "active")
+                self.assertEqual(ticked["threads"][0]["status"], "active")
 
     def test_holodeck_interior_distinct_themes_and_multitile_furniture(self) -> None:
         prompts = [
@@ -607,22 +609,20 @@ class MapGenerationAndScheduleTests(unittest.TestCase):
         self.assertEqual(self.engine._world["actors"][aid]["space_id"], hub_id, f"Failed to return to hub; ret_seq={ret_seq}")
         self.assertEqual(ret_seq, [secret_sid, study_sid, hub_id])
 
-        # Verify WorldBridge realm_buildings + StoryDirector._map_locations_to_spaces handles 2-hop room
+        # Verify WorldBridge realm_buildings + FateRuntime handles 2-hop compound room cleanly
         ws = self.bridge.dispatch("query_world_state", {"space_id": hub_id})
         self.assertTrue(any(b.get("interior_space_id") == secret_sid for b in ws.get("realm_buildings") or []))
-        director = StoryDirector(
-            WorldAdapter(bridge=self.bridge),
-            PersonaAdapter(self.root),
-            self.root / "story_map_test",
-            settings_provider=lambda: StorySettings(enabled=True, use_llm_compiler=False),
-            background_observers=False,
-        )
-        self.addCleanup(director.close)
-        loc_map = director._map_locations_to_spaces(
-            {"world_config": {"mode": "compound"}, "locations": places}, hub_id, ws,
-        )
-        self.assertEqual(loc_map.get("loc_secret"), secret_sid)
-        self.assertEqual(loc_map.get("loc_study"), study_sid)
+        if _HAS_STORY:
+            runtime = FateRuntime(
+                WorldAdapter(bridge=self.bridge),
+                PersonaAdapter(self.root),
+                self.root / "story_map_test",
+                settings_provider=lambda: StorySettings(enabled=True, use_llm_compiler=False),
+            )
+            self.addCleanup(runtime.close)
+            sess = runtime.attach_world(hub_id, auto_pluck=True, use_llm=False)
+            self.addCleanup(runtime.detach_session, sess["session_id"], delete_world=False)
+            self.assertNotEqual(sess["threads"][0]["nodes"][0]["target_space_id"], hub_id)
 
     def test_non_crossroads_town_skeletons_and_variable_footprints(self) -> None:
         styles = ("ring_plaza", "river_bridges", "coastal_pier", "winding_avenue", "courtyard_manor")

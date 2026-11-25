@@ -28,6 +28,21 @@ _META_AI_RE = re.compile(
     re.IGNORECASE,
 )
 _ECHO_SPLIT_RE = re.compile(r"^[^。！？\n]{1,8}[？?]\s*(?:/|\s+)[^。！？\n]{3,}")
+_INTENT_LEAK_RE = re.compile(
+    r"^(?:顺着|接过)(?:他|她|对方)的话|"
+    r"^(?:(?:先|再|又|只是|连忙|赶紧|随即|略一思考|犹豫了一下|轻轻|轻声|低声|小声|笑着|苦笑|叹气|"
+    r"点头|点点头|摇摇头|应声|应一声|顺着(?:他|她|对方)的话|接过(?:他|她|对方)的话|"
+    r"同意|拒绝|承认|否认|提醒|询问|追问|解释|补充|回应|回复|附和|转移话题|表示|试探|打断|敷衍|反问|安慰|劝说|交代|提到|告知|指出|猜测)"
+    r"[^，,。！？：:\n]{0,12}(?:[，,：:]|\s*(?:他|她|自己|对方|说|道|表示|承认|否认|问|答)))|"
+    r"(?:决策大脑|私密背景|提示词|系统提示|语义意图|扮演角色|作为AI|人设要求|口吻层|嘴巴层)",
+    re.IGNORECASE,
+)
+_INTENT_PREFIX_STRIP_RE = re.compile(
+    r"^(?:(?:先|再|又|只是|连忙|赶紧|随即|略一思考|犹豫了一下|轻轻|轻声|低声|小声|笑着|苦笑|叹气|"
+    r"点头|点点头|摇摇头|应声|应一声|顺着(?:他|她|对方)的话|接过(?:他|她|对方)的话|"
+    r"同意|拒绝|承认|否认|提醒|询问|追问|解释|补充|回应|回复|附和|表示|试探|反问|安慰|劝说|交代|提到|告知|指出|猜测)"
+    r"[^，,。！？：:\n]{0,12}[，,：:]\s*)+(?:说|道|表示|承认|否认|问|答|追问|回复|回应|提到|补充|解释)?[，,：:\s]*"
+)
 _BARE_CHARS_RE = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9]")
 _MAX_HISTORY_PER_ACTOR = 40
 _PLAYER_GREETING_SECONDS = 18.0
@@ -395,6 +410,9 @@ class WorldChatService:
         if not actor_id:
             return
         eff_sid = self._resolve_space_id(actor_id, space_id)
+        hide_thought = bool(
+            hasattr(self._engine, "is_opaque_realm") and self._engine.is_opaque_realm(eff_sid)
+        )
         with self._lock:
             key = self._history_key_locked(actor_id, eff_sid)
             items = self._history.setdefault(key, [])
@@ -404,7 +422,7 @@ class WorldChatService:
                 act_line = f"[自主行动] {summary}"
                 if not items or items[-1].get("text") != act_line:
                     self._append_msg_locked(actor_id, "action", act_line, space_id=eff_sid)
-            if clean_thought:
+            if clean_thought and not hide_thought:
                 bubble = f"（{clean_thought}）" if not (clean_thought.startswith("（") or clean_thought.startswith("(")) else clean_thought
                 if not items or items[-1].get("text") != bubble:
                     self._append_msg_locked(actor_id, "assistant", bubble, emotion=emotion, space_id=eff_sid)
@@ -658,6 +676,19 @@ class WorldChatService:
                 penalty = max(penalty, 3.2)
         return penalty
 
+    @staticmethod
+    def _sanitize_spoken_line(text: Any) -> str:
+        t = _STAGE_DIR_RE.sub("", str(text or "")).strip()
+        if not t:
+            return ""
+        stripped = _INTENT_PREFIX_STRIP_RE.sub("", t).strip()
+        if stripped and len(stripped) >= 2:
+            t = stripped
+        for lq, rq in (("“", "”"), ("「", "」"), ("『", "』"), ('"', '"')):
+            if len(t) >= 3 and t.startswith(lq) and t.endswith(rq):
+                t = t[1:-1].strip()
+        return t
+
     @classmethod
     def _score_mouth_candidate(
         cls,
@@ -672,6 +703,8 @@ class WorldChatService:
         score = 0.0
         if _META_AI_RE.search(t):
             score -= 12.0
+        if _INTENT_LEAK_RE.search(t):
+            score -= 14.0
         if _ECHO_SPLIT_RE.search(t):
             score -= 6.0
         if _STAGE_DIR_RE.search(t):
@@ -706,11 +739,13 @@ class WorldChatService:
         fallback_line: str = "",
         setting_fallback: str = "",
         world_facts: str = "",
+        mind_card: str = "",
     ) -> str:
-        """嘴巴层（Mouth）：隔离复杂规则与长历史，仅看 soul + corpus + 大脑意图，一次产出 6 个口语候选并过防重复门控与守卫。"""
+        """嘴巴层（Mouth）：隔离复杂规则与长历史，仅看 soul + corpus + mind 状态卡 + 大脑意图，一次产出 6 个口语候选并过防重复门控与守卫。"""
         soul = (pctx.get("soul_text") or setting_fallback or actor_name)[:550]
         corpus = pctx.get("corpus_examples") or ""
         ban = pctx.get("off_voice_words") or []
+        card_hint = str(mind_card or "").strip()[:320]
         recent_block = "\n".join(f"- {r}" for r in recent_replies[-5:]) if recent_replies else "（无）"
 
         mouth_sys = (
@@ -720,11 +755,13 @@ class WorldChatService:
             "2. 严禁把内心活动或系统数值（如“打了六局”“进度多少”）念成台词，严禁鹦鹉学舌复读对方刚说过的词（如对方刚说“坐过去吧”，你就别再说“坐过去吧”）；\n"
             "3. 严禁虚构当前房间里不存在的店铺、餐厅或物品；只能用【世界真实物件】里的名词；\n"
             "4. 严禁与【近期已说过的话】重复开头（如连续用“嗯～”“那个…”）或重复同一句式；\n"
-            '5. 一次给出 6 个句式拉开差异的口语候选短句，只输出合法 JSON：{"candidates":["说法1","说法2","说法3","说法4","说法5","说法6"]}'
+            "5. **严禁输出第三人称动作、心理总结或意图说明**（如“应一声，说……”“顺着她的话承认……”“同意，说……”），只能输出角色自己亲口说出的第一人称口语；\n"
+            '6. 一次给出 6 个句式拉开差异的口语候选短句，只输出合法 JSON：{"candidates":["说法1","说法2","说法3","说法4","说法5","说法6"]}'
         )
         mouth_user = (
             (f"【{actor_name}原声语料范例（最重要！严格模仿这种短句口吻）】\n{corpus}\n\n" if corpus else "")
             + f"【{actor_name}性格底色】\n{soul}\n\n"
+            + (f"【此刻心境参考（只用于把握语气分寸，严禁直接念出心境描述或数值）】\n{card_hint}\n\n" if card_hint else "")
             + (f"【禁说离声词】{'、'.join(ban)}\n\n" if ban else "")
             + (f"【世界真实物件（禁止编造除此之外的物品或店铺）】\n{world_facts}\n\n" if world_facts else "")
             + f"【近期已说过的话（避开重复开头与句式）】\n{recent_block}\n\n"
@@ -742,14 +779,14 @@ class WorldChatService:
         chosen = ""
         if isinstance(cands_raw, list) and cands_raw:
             cleaned = [
-                clip_text(_STAGE_DIR_RE.sub("", str(c or "")).strip(), 140, "")
+                clip_text(self._sanitize_spoken_line(c), 140, "")
                 for c in cands_raw
-                if str(c or "").strip()
+                if self._sanitize_spoken_line(c)
             ]
             if cleaned:
                 chosen = max(cleaned, key=lambda c: self._score_mouth_candidate(c, recent_replies, ban, heard_line=heard_line))
         if not chosen:
-            chosen = clip_text(_STAGE_DIR_RE.sub("", fallback_line or intent).strip(), 140, "……嗯。")
+            chosen = clip_text(self._sanitize_spoken_line(fallback_line or intent), 140, "……嗯。")
         return self._run_guard_bridge(pctx.get("guard_mjs"), pctx.get("toolkit_dir"), [chosen])[0]
 
     def _run_mind_mjs(
@@ -1136,7 +1173,7 @@ class WorldChatService:
         seen_peer_ids = self._engine.visible_peer_ids(actor_id)
         peers = [p for p in actors if p["actor_id"] != actor_id and p["space_id"] == actor["space_id"]]
         peer_names = "、".join(
-            f'{p["name"]} [{p["actor_id"]}]（{("休息中" if p["posture"] == "resting" else "清醒") if p["actor_id"] in seen_peer_ids else "在同片镇上，暂未看清"}）'
+            f'{p["name"]} [{p["actor_id"]}]（{("休息中" if p["posture"] == "resting" else ("坐着" if p["posture"] == "sitting" else "清醒")) if p["actor_id"] in seen_peer_ids else "在同片镇上，暂未看清"}）'
             for p in peers
         ) or "无"
         realm_places = self._engine.list_realm_places(eff_sid)
@@ -1505,6 +1542,7 @@ class WorldChatService:
         *,
         reason: str = "",
         generated_only: bool = False,
+        use_mouth: bool | None = None,
     ) -> dict[str, Any]:
         """由角色主动发起的同屋双人社交互动：依据当下状态与态度情感指针生成自然来回并双向更新关系。"""
         actors = self._engine.list_actors()
@@ -1637,8 +1675,8 @@ class WorldChatService:
         )
         mind_a = self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--his", reason or "看到同伴想聊几句", space_id=realm_sid) or {}
         mind_b = self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--his", reason or "同伴走近搭话", space_id=realm_sid) or {}
-        card_a = str(mind_a.get("card") or "")[:360]
-        card_b = str(mind_b.get("card") or "")[:360]
+        card_a = str(mind_a.get("card") or "")[:700]
+        card_b = str(mind_b.get("card") or "")[:700]
         setting_a = self._setting_with_brief(actor_a, pctx_a.get("soul_text") or "")[:650]
         setting_b = self._setting_with_brief(actor_b, pctx_b.get("soul_text") or "")[:650]
         corpus_a = pctx_a.get("corpus_examples") or ""
@@ -1717,6 +1755,7 @@ class WorldChatService:
             return budget, brief
 
         max_turns, state_brief = _compute_chat_budget()
+        eff_use_mouth = (not generated_only) if use_mouth is None else bool(use_mouth)
         if generated_only:
             max_turns = min(2, max_turns)
         realm_places = self._engine.list_realm_places(sid)
@@ -1756,9 +1795,11 @@ class WorldChatService:
                 else f"当前第 {turn_idx} 轮（状态参考上限 {max_turns} 轮）：若双方还有话想聊可继续延展话题（end_chat=false）；若对方或自己困了/饿了/聊尽兴了/不想继续，可由任意一方自然提出结束并设 end_chat=true。"
             )
             grounding_rule = (
-                "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】与【本镇真实场所】里实际存在的物品和地点，以及此刻时间与双方关系经历；严禁虚构镇外不存在的地名！\n"
+                "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】与【本镇真实场所】里实际存在的物品和地点，以及此刻时间与双方关系经历；严禁虚构镇外不存在的地名！"
+                "严禁凭空编造未实际发生、也未在【私密背景与立场】或【眼前物件】中提及的楼上/楼下声响与不存在的线索；若双方已有共同面对的具体事件，请紧扣已知事实与各自立场推进，不要反复寒暄天气或复读相同问句。\n"
                 if is_town_realm
-                else "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】里实际存在的东西、此刻时间与双方关系经历；**严禁虚构房间外不存在的店铺、餐馆、猪扒饭或外出逛街**！想吃东西或玩耍只能针对屋里真实存在的物件；\n"
+                else "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】里实际存在的东西、此刻时间与双方关系经历；**严禁虚构房间外不存在的店铺、餐馆、猪扒饭或外出逛街**！想吃东西或玩耍只能针对屋里真实存在的物件；"
+                "严禁凭空编造未实际发生、也未在【私密背景与立场】或【眼前物件】中提及的声响或不存在的线索；若双方已有共同面对的具体事件，请紧扣已知事实与各自立场推进，不要反复寒暄或复读相同问句。\n"
             )
             brief_a = self._engine.get_actor_private_brief(initiator_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
             brief_b = self._engine.get_actor_private_brief(target_actor_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
@@ -1799,10 +1840,10 @@ class WorldChatService:
                 + f"【对话进程】{pace_hint}\n"
                 + f"【本轮已聊内容】\n{transcript_text}"
             )
-            if generated_only:
+            if generated_only and not eff_use_mouth:
                 sys_prompt += (
-                    "\n这是一次实时碰面。intent_a 和 intent_b 直接填两人各自会说出口的一句短台词。"
-                    "结合当前处境与人物口吻，不填叙述、神态或心声；若约定去某地或交换了情报可附带可选 speech_act。"
+                    "\n这是一次实时碰面。intent_a 和 intent_b 直接填两人各自亲口说出的第一人称口语短台词，"
+                    "严禁写成“应一声，说……”“顺着她的话……”“同意，说……”等第三人称说明、叙述、神态或心声；若约定去某地或交换了情报可附带可选 speech_act。"
                 )
             parsed = text_compiler._ask_llm_json(
                 sys_prompt,
@@ -1816,9 +1857,9 @@ class WorldChatService:
             if not (raw_ia and raw_ib):
                 break
 
-            if generated_only:
-                line_a = clip_text(_STAGE_DIR_RE.sub("", raw_ia).strip(), 72)
-                line_b = clip_text(_STAGE_DIR_RE.sub("", raw_ib).strip(), 72)
+            if not eff_use_mouth:
+                line_a = clip_text(self._sanitize_spoken_line(raw_ia), 72)
+                line_b = clip_text(self._sanitize_spoken_line(raw_ib), 72)
                 ea = clip_text(parsed.get("emotion_a"), 12, "平静")
                 eb = clip_text(parsed.get("emotion_b"), 12, "平静")
             else:
@@ -1828,10 +1869,12 @@ class WorldChatService:
                     a_name, pctx_a, raw_ia, recent_a_lines, listener_name=b_name,
                     heard_line=turns[-1]["line_b"] if turns else "",
                     fallback_line=str(parsed.get("line_a") or raw_ia), setting_fallback=setting_a, world_facts=facts_str,
+                    mind_card=card_a,
                 )
                 line_b = self._mouth_speak(
                     b_name, pctx_b, raw_ib, recent_b_lines, listener_name=a_name, heard_line=line_a,
                     fallback_line=str(parsed.get("line_b") or raw_ib), setting_fallback=setting_b, world_facts=facts_str,
+                    mind_card=card_b,
                 )
                 ea = clip_text(parsed.get("emotion_a"), 16, "好奇" if first_meet and turn_idx == 1 else "开心")
                 eb = clip_text(parsed.get("emotion_b"), 16, "平静" if first_meet and turn_idx == 1 else "微笑")
@@ -1986,6 +2029,13 @@ class WorldChatService:
             custom_persona_dir=custom_pdir,
             isolated_persona=is_isolated,
         )
+        if used_llm and turns:
+            spoken_a = " ".join(str(t.get("line_a") or "").strip() for t in turns if t.get("line_a"))
+            spoken_b = " ".join(str(t.get("line_b") or "").strip() for t in turns if t.get("line_b"))
+            if spoken_a:
+                self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--her", spoken_a, space_id=realm_sid)
+            if spoken_b:
+                self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--her", spoken_b, space_id=realm_sid)
 
         # 长短对话同步轻微反馈到双方精力与心情
         mood_delta = 0.02 * len(turns) if stance_ok else -0.01

@@ -247,9 +247,10 @@ OUTDOOR_PROP_MOTIFS: dict[str, dict[str, Any]] = {
         "placement": "floor",
         "traits": {
             "restable": {
-                "posture": "sitting",
-                "energy_per_min": 0.4,
-                "mood_per_min": 0.25,
+                "rest_mode": "sit",
+                "energy_regen_per_min": 0.008,
+                "comfort": 0.65,
+                "occupied_by": None,
             }
         },
         "tags": ["outdoor", "bench", "rest"],

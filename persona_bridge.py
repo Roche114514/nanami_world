@@ -442,6 +442,22 @@ def _world_relations_path(world_data_root: Path) -> Path:
     return Path(world_data_root) / "social_relations.json"
 
 
+DEFAULT_RELATIONS_REALM = "__default__"
+
+
+def _is_meaningful_rel(entry: Mapping[str, Any] | None) -> bool:
+    if not isinstance(entry, Mapping):
+        return False
+    return bool(
+        entry.get("known")
+        or entry.get("manual_override")
+        or int(entry.get("rounds") or 0) > 0
+        or str(entry.get("call_name") or "").strip()
+        or str(entry.get("relation_tag") or "").strip()
+        or str(entry.get("shared_memories") or "").strip()
+    )
+
+
 def _read_persona_relations_targets(state_root: Path) -> dict[str, dict[str, Any]]:
     raw = _read_json(Path(state_root) / "state" / "relations.json") or {}
     targets = raw.get("targets") if isinstance(raw.get("targets"), dict) else raw
@@ -618,15 +634,20 @@ def read_actor_relations(
     subj = str(host_character or "").strip()
     persona_targets: dict[str, dict[str, Any]] = {}
     user_live: dict[str, Any] = {}
+    default_targets: dict[str, dict[str, Any]] = {}
 
     if not isolated_persona:
-        # 非平行世界可继承人格模型中的基础关系指针作为初值，各世界内的后续互动仍写入各自 space_id 桶独立演化
+        # 非平行世界可继承「默认初始关系」与人格模型中的基础关系指针作为初值，各世界内的后续互动仍写入各自 space_id 桶独立演化
         base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
         if base_dir is not None:
             sr, chat_prefix = _resolve_persona_pointer(base_dir, subj, strict=True)
             if sr is not None and sr.is_dir():
                 persona_targets = _read_persona_relations_targets(sr)
                 user_live = _read_user_fallback_from_mind(sr, chat_key_prefix=chat_prefix)
+        if world_data_root is not None and eff_sid != DEFAULT_RELATIONS_REALM:
+            def_edges = _load_world_edges(world_data_root, DEFAULT_RELATIONS_REALM)
+            if isinstance(def_edges.get(subj), Mapping):
+                default_targets = {str(k): dict(v) for k, v in def_edges[subj].items() if isinstance(v, Mapping)}
 
     world_targets: dict[str, dict[str, Any]] = {}
     if world_data_root is not None:
@@ -649,18 +670,23 @@ def read_actor_relations(
         clean = str(cname or "").strip()
         if clean and clean != subj:
             _add_key(f"char:{clean}")
-    for k in list(persona_targets.keys()) + list(world_targets.keys()):
+    for k in list(persona_targets.keys()) + list(default_targets.keys()) + list(world_targets.keys()):
         if k == "user" or k.startswith("char:"):
             _add_key(k)
 
     result: dict[str, dict[str, Any]] = {}
     for tkey in candidate_keys:
         p_entry = persona_targets.get(tkey)
+        d_entry = default_targets.get(tkey)
         w_entry = world_targets.get(tkey)
-        if w_entry and p_entry:
+        if w_entry and d_entry:
+            chosen = w_entry if float(w_entry.get("updated_at") or 0) >= float(d_entry.get("updated_at") or 0) else d_entry
+        elif w_entry and p_entry:
             chosen = w_entry if float(w_entry.get("updated_at") or 0) >= float(p_entry.get("updated_at") or 0) else p_entry
         elif w_entry:
             chosen = w_entry
+        elif d_entry:
+            chosen = d_entry
         elif p_entry:
             chosen = p_entry
         elif tkey == "user" and user_live:
@@ -669,6 +695,107 @@ def read_actor_relations(
             chosen = None
         result[tkey] = _coerce_rel(tkey, chosen)
     return result
+
+
+def resolve_initial_world_relations(
+    project_root: Path,
+    world_data_root: Path | None,
+    subjects: Sequence[str],
+    *,
+    source_space_id: str = "auto",
+    actor_home_realms: Mapping[str, str] | None = None,
+    sandbox_realm_ids: Sequence[str] | None = None,
+    custom_persona_dir: str = "",
+    include_user: bool = True,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """为新世界或独立场景解析各角色的初始情感指针（仅复制初值，绝不回写源世界）。"""
+    src = str(source_space_id or "auto").strip()
+    if src == "story_fresh" or world_data_root is None:
+        return {}
+
+    clean_subjects = list(dict.fromkeys(str(s or "").strip() for s in subjects if str(s or "").strip()))
+    if not clean_subjects:
+        return {}
+
+    doc = _read_relations_doc(world_data_root)
+    worlds = doc.get("worlds") if isinstance(doc.get("worlds"), Mapping) else {}
+    sandbox_list = list(
+        dict.fromkeys(
+            str(s or "").strip()
+            for s in (sandbox_realm_ids or ())
+            if str(s or "").strip() and str(s or "").strip() != DEFAULT_RELATIONS_REALM
+        )
+    )
+    base_dir = _find_base_persona_dir(project_root, custom_persona_dir=custom_persona_dir)
+
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for subj in clean_subjects:
+        persona_targets: dict[str, dict[str, Any]] = {}
+        user_live: dict[str, Any] = {}
+        if base_dir is not None:
+            sr, chat_prefix = _resolve_persona_pointer(base_dir, subj, strict=True)
+            if sr is not None and sr.is_dir():
+                persona_targets = _read_persona_relations_targets(sr)
+                user_live = _read_user_fallback_from_mind(sr, chat_key_prefix=chat_prefix)
+
+        def _edge_in(realm_id: str, tkey: str) -> dict[str, Any] | None:
+            if not realm_id:
+                return None
+            bucket = worlds.get(realm_id)
+            if not isinstance(bucket, Mapping):
+                return None
+            edges = bucket.get("edges")
+            if not isinstance(edges, Mapping):
+                return None
+            smap = edges.get(subj)
+            if not isinstance(smap, Mapping):
+                return None
+            row = smap.get(tkey)
+            return dict(row) if isinstance(row, Mapping) else None
+
+        target_keys: list[str] = (["user"] if include_user else []) + [
+            f"char:{other}" for other in clean_subjects if other != subj
+        ]
+        resolved_subj: dict[str, dict[str, Any]] = {}
+        for tkey in target_keys:
+            p_cand = persona_targets.get(tkey) or (user_live if tkey == "user" else None)
+            chosen: dict[str, Any] | None = None
+
+            if src == DEFAULT_RELATIONS_REALM:
+                chosen = _edge_in(DEFAULT_RELATIONS_REALM, tkey)
+            elif src and src != "auto":
+                chosen = _edge_in(src, tkey) or _edge_in(DEFAULT_RELATIONS_REALM, tkey)
+                if chosen is None and _is_meaningful_rel(p_cand):
+                    chosen = dict(p_cand)
+            else:
+                chosen = _edge_in(DEFAULT_RELATIONS_REALM, tkey)
+                if chosen is None:
+                    home_r = str((actor_home_realms or {}).get(subj) or "").strip()
+                    if home_r and home_r in sandbox_list:
+                        chosen = _edge_in(home_r, tkey)
+                if chosen is None:
+                    cands = [
+                        edge
+                        for r_id in sandbox_list
+                        if (edge := _edge_in(r_id, tkey)) is not None
+                    ]
+                    if cands:
+                        chosen = max(
+                            cands,
+                            key=lambda e: (
+                                1 if e.get("manual_override") else 0,
+                                float(e.get("updated_at") or 0.0),
+                            ),
+                        )
+                if chosen is None and _is_meaningful_rel(p_cand):
+                    chosen = dict(p_cand)
+
+            if chosen is not None:
+                resolved_subj[tkey] = _coerce_rel(tkey, chosen)
+
+        if resolved_subj:
+            out[subj] = resolved_subj
+    return out
 
 
 def _bump_directed_edge(

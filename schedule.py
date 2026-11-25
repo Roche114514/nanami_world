@@ -229,17 +229,17 @@ def build_actor_schedule(
 
     if (reading_score >= game_score and reading_score >= social_score) or safety >= 0.70:
         evening = _slot(
-            "evening_wind_down", 18.5, 21.75, "傍晚静阅时光",
+            "evening_wind_down", 18.5, 23.5, "傍晚静阅时光",
             ["reading", "comfort", "rest"], ["library", "public", "home"], library_id or resolved_home, library_name or home_name, 0.62,
         )
     elif social_score >= game_score:
         evening = _slot(
-            "evening_wind_down", 18.5, 21.75, "傍晚街区社交",
+            "evening_wind_down", 18.5, 23.5, "傍晚街区社交",
             ["social", "food"], ["cafe", "public"], cafe_id, cafe_name, 0.62,
         )
     else:
         evening = _slot(
-            "evening_wind_down", 18.5, 21.75, "晚间放松娱乐",
+            "evening_wind_down", 18.5, 23.5, "晚间放松娱乐",
             ["game", "comfort"], ["arcade", "home"], arcade_id, arcade_name, 0.62,
         )
 
@@ -257,8 +257,8 @@ def build_actor_schedule(
         afternoon,
         evening,
         _slot(
-            "night_rest", 21.75, 7.0, "夜间归宿休息",
-            ["rest", "comfort"], ["home", "house"], resolved_home, home_name, 0.85,
+            "night_rest", 23.5, 7.0, "夜间归宿休息",
+            ["rest", "comfort"], ["home", "house"], resolved_home, home_name, 0.92,
         ),
     ]
 
@@ -283,15 +283,21 @@ def active_schedule_context(
     has_active_modulation: bool = False,
     in_crisis: bool = False,
     nocturnal_active: bool = False,
+    clock_hour: float | None = None,
 ) -> dict[str, Any]:
     """根据当前生理时钟与 Daw 仲裁状态，计算作息槽与温和软先验缩放系数。"""
     sched = schedule if isinstance(schedule, Mapping) else {}
     slots = [s for s in (sched.get("slots") or ()) if isinstance(s, Mapping)]
     b_hour = float(bio_hour) % 24.0
-    slot = next(
-        (s for s in slots if _in_window(b_hour, float(s.get("start_bio", 0.0)), float(s.get("end_bio", 24.0)))),
-        slots[-1] if slots else {},
-    )
+    in_night_curfew = clock_hour is not None and _in_window(float(clock_hour) % 24.0, 23.5, 7.0)
+    night_slot = next((s for s in slots if str(s.get("slot_id") or "") == "night_rest"), None)
+    if in_night_curfew and night_slot is not None and not nocturnal_active:
+        slot = night_slot
+    else:
+        slot = next(
+            (s for s in slots if _in_window(b_hour, float(s.get("start_bio", 0.0)), float(s.get("end_bio", 24.0)))),
+            slots[-1] if slots else {},
+        )
     if not slot:
         return {"slot": {}, "effective_scale": 0.0, "adherence": 0.0, "bio_clock": _fmt_hour(b_hour), "prompt_line": ""}
 
@@ -304,6 +310,8 @@ def active_schedule_context(
 
     if slot_id == "night_rest" and not in_crisis and (nocturnal_active or not home_sid):
         effective_scale = 0.0
+    elif in_night_curfew and slot_id == "night_rest" and not nocturnal_active and home_sid and not in_crisis:
+        effective_scale = max(adherence * slot_w, 0.92)
     elif in_crisis:
         effective_scale = adherence * 0.25 if slot_id == "night_rest" else 0.0
     elif arbitration == "社会脑/语言主导" or has_active_modulation:
@@ -351,8 +359,11 @@ def routine_candidate_bonus(
     pref_cats = slot.get("preferred_categories") or ()
     pref_place = str(slot.get("preferred_place_id") or "").strip()
     slot_id = str(slot.get("slot_id") or "")
+    has_home = bool(str(ctx.get("home_space_id") or "").strip())
 
-    if drive and drive in pref_domains:
+    if slot_id == "night_rest" and has_home and kind == "entity" and drive == "rest" and not is_inside_home:
+        bonus -= 0.45 * scale
+    elif drive and drive in pref_domains:
         bonus += 0.48 * scale
 
     if kind == "visit":

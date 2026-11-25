@@ -218,6 +218,7 @@
     "builtin": true,
     "traits": {
       "restable": {
+        "rest_mode": "sleep",
         "energy_regen_per_min": 0.015,
         "comfort": 0.85,
         "occupied_by": null
@@ -795,6 +796,7 @@
     "builtin": true,
     "traits": {
       "restable": {
+        "rest_mode": "sleep",
         "energy_regen_per_min": 0.022,
         "comfort": 0.92,
         "occupied_by": null
@@ -2119,6 +2121,7 @@
     "traits": {
       "portable": { "weight": "light" },
       "restable": {
+        "rest_mode": "sleep",
         "energy_regen_per_min": 0.012,
         "comfort": 0.78,
         "occupied_by": null

@@ -7,10 +7,11 @@ import threading
 import time
 import unittest
 from pathlib import Path
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from _shinsekai import WORLD_CODE
+from _shinsekai import PROJECT, WORLD_CODE
 
 from plugins.nanami_world import PLUGIN_ID, PLUGIN_VERSION, world_page
 from plugins.nanami_world.engine import WorldEngine
@@ -192,6 +193,254 @@ class LiveSimulationTests(unittest.TestCase):
             self.assertFalse({first, second} & self.live._chatting)
             self.live.control(first, "viewer", "stop", 1)
             self.assertTrue(self.live.managed(first))
+
+    def test_three_layer_social_mouth_intent_sanitize_and_opaque_thought_hiding(self) -> None:
+        # 1. Third-person intent leaks are cleaned and heavily penalized against natural spoken dialogue
+        self.assertEqual(self.chat._sanitize_spoken_line("应一声，说展柜合着呢"), "展柜合着呢")
+        bad_score = self.chat._score_mouth_candidate("顺着她的话承认自己在巡夜", [], [])
+        bad_score_2 = self.chat._score_mouth_candidate("应一声，说展柜合着呢", [], [])
+        good_score = self.chat._score_mouth_candidate("展柜还合着呢，我刚才路过看了一眼。", [], [])
+        self.assertGreater(good_score, bad_score)
+        self.assertGreater(good_score, bad_score_2)
+
+        # 2. conduct_actor_social_exchange(..., generated_only=True, use_mouth=True) engages _mouth_speak and mind.mjs --her
+        room = self.engine.create_space(name="三层对话室", width=12, height=10, wall_rows=0, opaque_minds=True)["space_id"]
+        a = self.engine.import_actor(name="七海千秋", space_id=room, x=4, y=4)["actor_id"]
+        b = self.engine.import_actor(name="日向创", space_id=room, x=5, y=4)["actor_id"]
+
+        def fake_llm(system, user, **kwargs):
+            if '"intent_a"' in system:
+                return {"intent_a": "询问对方有没有看到桌上的笔记本", "intent_b": "回应说刚才似乎瞥见过", "end_chat": True}
+            if '"candidates"' in system:
+                if "七海千秋" in system:
+                    return {"candidates": ["顺着她的话承认自己在巡夜", "那个，日向君刚才看见桌上的笔记本了吗？"]}
+                return {"candidates": ["顺着她的话回忆刚才路过桌角", "嗯，好像就在那边的桌角上。"]}
+            return {}
+
+        mind_calls: list[tuple[str, str, str]] = []
+
+        def fake_mind(mind_mjs, state_root, actor_id, flag, text, *, space_id="room_default"):
+            mind_calls.append((actor_id, flag, text))
+            if flag == "--his":
+                return {"card": f"{actor_id} 心境微紧"}
+            return None
+
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", side_effect=fake_llm), \
+                patch.object(self.chat, "_run_mind_mjs", side_effect=fake_mind), \
+                patch.object(self.chat, "_mouth_speak", wraps=self.chat._mouth_speak) as mouth_spy:
+            res = self.chat.conduct_actor_social_exchange(a, b, reason="核对笔记", generated_only=True, use_mouth=True)
+
+        self.assertEqual(mouth_spy.call_count, 2)
+        self.assertEqual(mouth_spy.call_args_list[0].kwargs.get("mind_card"), f"{a} 心境微紧")
+        self.assertEqual(mouth_spy.call_args_list[1].kwargs.get("mind_card"), f"{b} 心境微紧")
+        self.assertEqual(res["turns"][0]["line_a"], "那个，日向君刚才看见桌上的笔记本了吗？")
+        self.assertEqual(res["turns"][0]["line_b"], "嗯，好像就在那边的桌角上。")
+        her_calls = [(aid, text) for aid, flag, text in mind_calls if flag == "--her"]
+        self.assertEqual(len(her_calls), 2)
+
+        # 3. Opaque realm suppresses logging raw internal thoughts into chat_history
+        self.chat.append_autonomous_activity(
+            a, action_summary="检查了「笔记本」", thought="这段心声绝不应该出现在公共对话框", emotion="平静", space_id=room,
+        )
+        hist_texts = [m["text"] for m in self.chat.get_history(a, space_id=room)]
+        self.assertTrue(any("检查了「笔记本」" in t for t in hist_texts))
+        self.assertFalse(any("这段心声绝不应该出现" in t for t in hist_texts))
+
+    def test_night_skip_at_2330_curfew_wakes_and_restores_residents(self) -> None:
+        room = self.engine.create_space(name="夜晚宿舍", width=12, height=10, wall_rows=0)["space_id"]
+        bed_a = self.engine.place_from_blueprint("default_bed", room, 2, 2)["entity_id"]
+        bed_b = self.engine.place_from_blueprint("default_bed", room, 8, 2)["entity_id"]
+        a = self.engine.import_actor(name="住客甲", space_id=room, x=2, y=3)["actor_id"]
+        b = self.engine.import_actor(name="住客乙", space_id=room, x=8, y=3)["actor_id"]
+        self.engine.set_realm_initial_hour(room, 23.6)
+
+        # Neither asleep -> no night skip
+        self.assertIsNone(self.engine.try_skip_night(room))
+        # Only one asleep (the other still active at night) -> no night skip
+        self.engine.execute_act(a, bed_a, "rest")
+        self.assertIsNone(self.engine.try_skip_night(room))
+        # Both asleep, but mid-conversation -> no night skip
+        self.engine.execute_act(b, bed_b, "rest")
+        self.assertIsNone(self.engine.try_skip_night(room, chatting_ids={b}))
+
+        self.engine.record_social_feedback(a, room, "睡前聊起明早见面的安排", peer_id=b)
+        skip = self.engine.try_skip_night(room, consolidate_memory=True)
+        self.assertIsNotNone(skip)
+        self.assertEqual(skip["to_clock"], "07:00")
+        lt = self.engine.get_lighting(room)
+        self.assertGreaterEqual(float(lt["hour_float"]), 6.9)
+        self.assertLessEqual(float(lt["hour_float"]), 7.1)
+        for aid in (a, b):
+            fr = self.engine.live_actor_frame(aid)
+            self.assertEqual(fr["posture"], "standing")
+            self.assertIsNone(fr["resting_on_id"])
+            self.assertGreaterEqual(float(fr["vitals"]["energy"]), 0.94)
+            self.assertLessEqual(float(fr["vitals"]["sleep_pressure"]), 0.08)
+        # Second immediate call refuses to double-skip same night
+        self.assertIsNone(self.engine.try_skip_night(room))
+
+    def test_cinema_focus_across_spaces_and_camera_ui_invariants(self) -> None:
+        town_res = self.engine.create_default_town()
+        town = town_res["town_space_id"]
+        cafe = f"{town}__cafe"
+        idle_a = self.engine.import_actor(name="路人丙", space_id=town, x=15, y=15)["actor_id"]
+        spk_1 = self.engine.import_actor(name="七海千秋", space_id=cafe, x=4, y=4)["actor_id"]
+        spk_2 = self.engine.import_actor(name="日向创", space_id=cafe, x=5, y=4)["actor_id"]
+
+        entered, release = threading.Event(), threading.Event()
+
+        def conv(*_a, **_kw):
+            entered.set()
+            release.wait(6)
+            return {"turns": [{"line_a": "这里的茶杯还是温的。", "line_b": "我刚好看过吧台。"}]}
+
+        with patch.object(self.chat, "conduct_actor_social_exchange", side_effect=conv):
+            self.live.control(idle_a, "cam_viewer", "start", 4)
+            self.until(lambda: self.live.managed(spk_1) and self.live.managed(spk_2), timeout=5)
+            self.live._meet(spk_1, spk_2, "核对线索", user_requested=True)
+            try:
+                self.assertTrue(entered.wait(2))
+                during_view = self.live.frame(idle_a, "cam_viewer", -1)
+                cf_during = during_view.get("cinema_focus") or {}
+                self.assertIn(cf_during.get("actor_id"), (spk_1, spk_2))
+                self.assertEqual(cf_during.get("space_id"), cafe)
+                self.assertGreaterEqual(int(cf_during.get("priority") or 0), 2)
+            finally:
+                release.set()
+            speaking_focus = self.until(
+                lambda: (
+                    (f := (self.live.frame(idle_a, "cam_viewer", -1).get("cinema_focus") or {}))
+                    and f.get("priority") == 3 and f
+                ),
+                timeout=4,
+            )
+            self.assertEqual(speaking_focus["space_id"], cafe)
+            self.assertIn(speaking_focus["actor_id"], (spk_1, spk_2))
+            self.live.control(idle_a, "cam_viewer", "stop", 1)
+
+        html = (PROJECT / "plugins" / "nanami_world" / "web" / "world.html").read_text(encoding="utf-8")
+        self.assertIn("camera-mode-switch", html)
+        for cam_mode in ('data-cam="free"', 'data-cam="follow"', 'data-cam="cinema"'):
+            self.assertIn(cam_mode, html)
+        self.assertIsNone(re.search(r"\b(?:window\.)?(?:alert|confirm|prompt)\s*\(", html))
+
+    def test_park_bench_and_chairs_sit_awake_and_never_act_as_sleep_beds(self) -> None:
+        from plugins.nanami_world import projector, schema
+        from plugins.nanami_world.outdoor_designer import synthesize_outdoor_blueprint
+
+        room = self.engine.create_space(name="广场长椅测试", width=12, height=10, wall_rows=0)["space_id"]
+        bench_bp = synthesize_outdoor_blueprint("park_bench")
+        self.assertEqual(bench_bp["traits"]["restable"]["rest_mode"], "sit")
+        saved_bench = self.engine.save_blueprint(bench_bp)
+        bench_ent = self.engine.place_from_blueprint(saved_bench["blueprint_id"], room, 4, 4)
+        self.assertEqual(bench_ent["traits"]["restable"]["rest_mode"], "sit")
+
+        sofa_bp = schema.normalize_blueprint({
+            "name": "丝绒听音长椅",
+            "traits": {"restable": {"energy_regen_per_min": 0.015, "comfort": 0.85, "occupied_by": None}},
+            "tags": ["furniture", "sofa", "rest"],
+        })
+        self.assertEqual(sofa_bp["traits"]["restable"]["rest_mode"], "sit")
+
+        chair_bp = schema.normalize_blueprint({
+            "name": "靠背木椅",
+            "traits": {"restable": {"energy_regen_per_min": 0.011, "comfort": 0.72, "occupied_by": None}},
+            "tags": ["furniture", "chair", "rest"],
+        })
+        self.assertEqual(chair_bp["traits"]["restable"]["rest_mode"], "sit")
+
+        bed_bp = self.engine.all_blueprints()["default_bed"]
+        self.assertEqual(bed_bp["traits"]["restable"]["rest_mode"], "sleep")
+
+        hinata = self.engine.import_actor(name="日向创", space_id=room, x=4, y=5)["actor_id"]
+        nanami = self.engine.import_actor(name="七海千秋", space_id=room, x=5, y=4)["actor_id"]
+
+        # Sitting on bench sets posture="sitting" (awake!), never sleeping
+        res = self.engine.execute_act(hinata, bench_ent["entity_id"], "rest")
+        self.assertIn("坐了下来", res)
+        self.assertNotIn("睡觉", res)
+        hinata_frame = self.engine.live_actor_frame(hinata)
+        self.assertEqual(hinata_frame["posture"], "sitting")
+        self.assertEqual(hinata_frame["resting_on_id"], bench_ent["entity_id"])
+
+        raw_h = self.engine._world["actors"][hinata]
+        self.assertNotEqual(raw_h["expression"]["tag"], "熟睡")
+        self.assertIn("正坐着", projector.project_view(self.engine, hinata))
+        self.assertIn("正坐在上面", " ".join(self.engine.entity_state_tags(self.engine._world["entities"][bench_ent["entity_id"]])))
+
+        # Peer can talk normally with seated actor (NOT blocked as asleep)
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", return_value={
+            "intent_a": "日向君，坐在这里吹风吗？",
+            "intent_b": "嗯，我有些事想跟你商量。",
+            "end_chat": True,
+        }):
+            talk_res = self.chat.conduct_actor_social_exchange(nanami, hinata, reason="在长椅边说话", generated_only=True)
+        self.assertTrue(talk_res["turns"])
+        self.assertEqual(talk_res["turns"][0]["line_b"], "嗯，我有些事想跟你商量。")
+
+        # Late night: sitting on a park bench NEVER counts as sleeping in bed
+        self.engine.set_realm_initial_hour(room, 23.6)
+        self.assertIsNone(self.engine.try_skip_night(room))
+
+        # Sleepy actor looking for a bed in heartbeat NEVER picks a park bench
+        bed_ent = self.engine.place_from_blueprint("default_bed", room, 8, 2)
+        self.engine.place_actor(nanami, room, 7, 2)
+        self.engine.set_actor_vitals(nanami, {"energy": 0.15, "sleep_pressure": 0.90})
+        self.heartbeat.step(actor_id=nanami, advance_minutes=0.2, use_llm=False)
+        self.heartbeat.step(actor_id=nanami, advance_minutes=0.2, use_llm=False)
+        nanami_after = self.engine.live_actor_frame(nanami)
+        self.assertEqual(nanami_after.get("resting_on_id"), bed_ent["entity_id"])
+        self.assertEqual(nanami_after.get("posture"), "resting")
+        # Even without any bed present, a sleepy actor must NOT go sleep on a free park bench
+        self.engine.execute_act(hinata, bench_ent["entity_id"], "leave_rest")
+        self.engine.remove_entity(bed_ent["entity_id"])
+        sleepy_c = self.engine.import_actor(name="困倦旅人", space_id=room, x=3, y=4)["actor_id"]
+        self.engine.set_actor_vitals(sleepy_c, {"energy": 0.12, "sleep_pressure": 0.92})
+        self.heartbeat.step(actor_id=sleepy_c, advance_minutes=0.2, use_llm=False)
+        self.heartbeat.step(actor_id=sleepy_c, advance_minutes=0.2, use_llm=False)
+        self.assertNotEqual(self.engine.live_actor_frame(sleepy_c).get("resting_on_id"), bench_ent["entity_id"])
+        self.assertNotEqual(self.engine.live_actor_frame(sleepy_c).get("posture"), "resting")
+
+    def test_cafe_lounge_sofa_sits_awake_and_persona_choice_wakes_sleeper(self) -> None:
+        from plugins.nanami_world import schema
+
+        cafe_sofa_bp = schema.normalize_blueprint({
+            "name": "靠窗卡座沙发",
+            "brief": "暖布垫包裹的舒适小憩卡座。",
+            "traits": {"restable": {"energy_regen_per_min": 0.016, "comfort": 0.88, "occupied_by": None}},
+            "tags": ["furniture", "sofa", "rest"],
+        })
+        self.assertEqual(cafe_sofa_bp["traits"]["restable"]["rest_mode"], "sit")
+        self.assertEqual(self.engine.all_blueprints()["default_sofa"]["traits"]["restable"]["rest_mode"], "sleep")
+
+        room = self.engine.create_space(name="自习休眠测试", width=12, height=10, wall_rows=0)["space_id"]
+        saved_cafe_sofa = self.engine.save_blueprint(cafe_sofa_bp)
+        sofa_ent = self.engine.place_from_blueprint(saved_cafe_sofa["blueprint_id"], room, 4, 4)
+        bed_ent = self.engine.place_from_blueprint("default_bed", room, 8, 2)
+        nanami = self.engine.import_actor(name="七海千秋", space_id=room, x=4, y=5)["actor_id"]
+        hinata = self.engine.import_actor(name="日向创", space_id=room, x=2, y=5)["actor_id"]
+
+        # Lounge/booth sofa sets posture="sitting", never sleeping
+        res_sofa = self.engine.execute_act(nanami, sofa_ent["entity_id"], "rest")
+        self.assertIn("坐了下来", res_sofa)
+        self.assertEqual(self.engine.live_actor_frame(nanami)["posture"], "sitting")
+
+        # Even if actor fell asleep on a real bed, committing a story persona_choice wakes them up
+        self.engine.execute_act(nanami, bed_ent["entity_id"], "rest")
+        self.assertEqual(self.engine.live_actor_frame(nanami)["posture"], "resting")
+        self.engine.set_actor_vitals(nanami, {"energy": 0.78, "sleep_pressure": 0.15})
+        self.engine.propose_actor_commitment(
+            nanami,
+            {"commitment_id": "fate:wake_test", "kind": "social", "target": hinata, "reason": "去找日向创说话", "priority": "high"},
+            space_id=room,
+            preempt=True,
+        )
+        for _ in range(8):
+            self.heartbeat.step(actor_id=nanami, advance_minutes=0.2, use_llm=False)
+            if self.engine.live_actor_frame(nanami)["posture"] != "resting":
+                break
+        self.assertNotEqual(self.engine.live_actor_frame(nanami)["posture"], "resting")
+
 
 if __name__ == "__main__":
     unittest.main()

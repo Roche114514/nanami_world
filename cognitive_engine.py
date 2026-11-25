@@ -10,10 +10,19 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import episodic_memory, persona_bridge, schedule, text_compiler, venue_semantics, weather
-from .schema import clip_text, inscription_is_new
+from .schema import clip_text, infer_rest_mode, inscription_is_new
 
 
 logger = logging.getLogger(__name__)
+
+
+def _is_seat_entity(entity: Mapping[str, Any] | None) -> bool:
+    if not isinstance(entity, Mapping):
+        return False
+    traits = entity.get("traits") or {}
+    if "restable" not in traits:
+        return False
+    return infer_rest_mode(traits.get("restable"), name=str(entity.get("name") or ""), tags=entity.get("tags") or ()) == "sit"
 
 _DOMAINS = {
     "rest": "休息", "food": "饮食", "game": "游戏", "reading": "阅读",
@@ -407,7 +416,8 @@ class CognitiveEngine:
                     seen_cids.append(item_cid)
             state["applied_commitments"] = seen_cids[-12:]
             is_covert_commit = pending_commitment.get("source") == "covert"
-            is_external_commit = pending_commitment.get("source") == "external"
+            is_persona_choice = pending_commitment.get("source") == "persona_choice"
+            is_external_commit = pending_commitment.get("source") in ("external", "persona_choice")
             arrival_in_progress = self._is_agreed_arrival(intention)
             new_arrival = self._is_agreed_arrival(pending_commitment)
             speech_action_in_progress = bool(
@@ -437,7 +447,14 @@ class CognitiveEngine:
                 pending_commitment.get("source") == "speech_act"
                 and vit["energy"] >= 0.25 and vit["sleep_pressure"] < 0.85
             )
-            rest_ok = state["drives"]["rest"] < 0.82 or speech_act_ok or going_to_rest or ((is_covert_commit or is_external_commit) and vit["energy"] >= 0.12)
+            ext_energy_floor = 0.18 if is_persona_choice else 0.12
+            rest_ok = (
+                state["drives"]["rest"] < 0.82
+                or speech_act_ok
+                or going_to_rest
+                or (is_covert_commit and vit["energy"] >= 0.12)
+                or (is_external_commit and vit["energy"] >= ext_energy_floor)
+            )
             food_ok = (
                 state["drives"]["food"] < 0.85
                 or speech_act_ok
@@ -510,15 +527,42 @@ class CognitiveEngine:
                 intention = None
         picked = intention
         external_wake_active = bool(
-            picked and (picked.get("kind") == "seek_player" or picked.get("covert_directive_id"))
+            picked and (
+                picked.get("kind") == "seek_player"
+                or picked.get("covert_directive_id")
+                or picked.get("source") == "persona_choice"
+            )
             and vit["energy"] >= 0.18
         )
-        if actor.get("posture") == "resting" and not external_wake_active and (
-            state["drives"]["rest"] >= 0.35 or now < state.get("agreed_rest_until", -1)
-            or (local_rest and joint_visit.get("met"))
+        clock_now_h = float((scene.get("lighting") or {}).get("hour_float", 12.0))
+        curfew_sleeping_home = bool(
+            (clock_now_h >= 23.5 or clock_now_h < 6.5)
+            and not scene.get("nocturnal_active")
+            and scene.get("home_space_id")
+            and sid == scene.get("home_space_id")
+        )
+        if (
+            actor.get("posture") == "resting"
+            and not external_wake_active
+            and (
+                state["drives"]["rest"] >= 0.35
+                or now < state.get("agreed_rest_until", -1)
+                or (local_rest and joint_visit.get("met"))
+                or curfew_sleeping_home
+            )
         ):
-            goal, drive, thought = "休息一会儿", "rest", "再坐一会儿。"
+            goal, drive, thought = "休息一会儿", "rest", "再睡一会儿。"
             state["arbitration"] = "生理稳态主导"
+        elif (
+            actor.get("posture") == "sitting"
+            and not external_wake_active
+            and (
+                now < state.get("agreed_rest_until", -1)
+                or (local_rest and joint_visit.get("met"))
+            )
+        ):
+            goal, drive, thought = "坐着歇一会儿", "rest", "再坐一会儿。"
+            state["arbitration"] = "社会脑/语言主导"
         elif vit["disengaged"]:
             goal, drive, thought = "独自待一会儿", "calm", "想安静一下。"
             state["arbitration"] = "生理稳态主导"
@@ -1064,7 +1108,7 @@ class CognitiveEngine:
                         "pfc_committed": True, "commitment_id": cid, "source": source,
                     }
                 same_any = next((p for p in peers if p["actor_id"] == target), None)
-                if same_any is not None and source in ("language", "speech_act"):
+                if same_any is not None and source in ("language", "speech_act", "persona_choice", "external"):
                     return {
                         "kind": "social", "key": f"social:{sid}:{target}:", "target": target, "space": sid,
                         "x": same_any["x"], "y": same_any["y"],
@@ -1072,7 +1116,7 @@ class CognitiveEngine:
                         "drive": "social", "utility": 8.0, "action": "", "phase": "approach",
                         "pfc_committed": True, "commitment_id": cid, "source": source,
                     }
-            if not peer_space and source in ("language", "speech_act"):
+            if not peer_space and source in ("language", "speech_act", "persona_choice", "external"):
                 actor_row = next((a for a in (scene.get("realm_actors") or ()) if a["actor_id"] == target), None)
                 if actor_row is not None:
                     peer_space = str(actor_row.get("space_id") or "")
@@ -1086,7 +1130,7 @@ class CognitiveEngine:
                             "pfc_committed": True, "commitment_id": cid, "source": source,
                         }
             if peer_space and peer_space != sid and peer_space in realm_places:
-                if source in ("language", "speech_act"):
+                if source in ("language", "speech_act", "persona_choice", "external"):
                     self._ensure_portal_known(state, scene, peer_space, source, now)
                 step = self._portal_graph_next_hop(state["portals"], sid, peer_space)
                 if step is not None:
@@ -1106,6 +1150,29 @@ class CognitiveEngine:
                 assigned = scene.get("covert_entity") or {}
                 if assigned.get("entity_id") == target:
                     ent = assigned
+            if ent is None and source in ("persona_choice", "external"):
+                world_ent = (getattr(self.engine, "_world", {}) or {}).get("entities", {}).get(target)
+                if isinstance(world_ent, Mapping):
+                    ent_sid = str(world_ent.get("space_id") or "")
+                    parent_id = str(world_ent.get("parent_id") or "")
+                    if ent_sid == sid and not parent_id.startswith("inventory:"):
+                        ent = dict(world_ent)
+                    elif ent_sid and ent_sid != sid and ent_sid in realm_places:
+                        self._ensure_portal_known(state, scene, ent_sid, source, now)
+                        step = self._portal_graph_next_hop(state["portals"], sid, ent_sid)
+                        if step is not None:
+                            portal = step[1]
+                            return {
+                                "kind": "visit", "key": f"visit:{sid}:{ent_sid}:", "target": ent_sid, "space": sid,
+                                "x": portal["x"], "y": portal["y"],
+                                "goal": reason or f"去「{realm_places[ent_sid]}」查看「{world_ent.get('name', '物件')}」",
+                                "drive": drive if drive in _DOMAINS else "curiosity", "utility": 8.0,
+                                "action": "", "phase": "travel",
+                                "target_entity_id": target,
+                                "target_entity_action": str(commitment.get("action") or "").strip().lower(),
+                                "note_text": str(commitment.get("note_text") or ""),
+                                "pfc_committed": True, "commitment_id": cid, "source": source,
+                            }
             if ent is None:
                 return None
             req_action = str(commitment.get("action") or "").strip().lower()
@@ -1185,8 +1252,14 @@ class CognitiveEngine:
     def _update_drives(self, state: dict[str, Any], scene: dict[str, Any]) -> None:
         actor, percept, now = scene["actor"], scene["percept"], scene["minutes"]
         vit, aut, profile = actor["vitals"], actor["autonomy"], percept["behavior_profile"]
-        night = (0.35 if percept["circadian_phase"] == "evening" else 0.65
-                 if percept["circadian_phase"] == "deep_night" else 0.0)
+        clock_hour = float((scene.get("lighting") or {}).get("hour_float", 12.0))
+        in_night_curfew = clock_hour >= 23.5 or clock_hour < 6.5
+        if in_night_curfew:
+            night = 0.65
+        elif clock_hour >= 21.0:
+            night = 0.22
+        else:
+            night = 0.0
         night *= percept.get("circadian_strength", 0)
         if scene.get("nocturnal_active") and vit["energy"] >= 0.18:
             night *= 0.20
@@ -1271,6 +1344,8 @@ class CognitiveEngine:
 
         pref_zone = str(modulation.get("preferred_zone") or "").strip() if modulation else ""
         w_mod = weather.weather_cognitive_modifiers(scene.get("weather"), profile, is_outdoor=(not inside))
+        clock_hour = float((scene.get("lighting") or {}).get("hour_float", 12.0))
+        in_night_curfew = (clock_hour >= 23.5 or clock_hour < 6.5) and not scene.get("nocturnal_active")
         sched_ctx = schedule.active_schedule_context(
             scene.get("schedule"),
             float(percept.get("bio_hour", 12.0)),
@@ -1280,6 +1355,7 @@ class CognitiveEngine:
             has_active_modulation=bool(modulation and bias_scale > 0),
             in_crisis=in_crisis,
             nocturnal_active=bool(scene.get("nocturnal_active")),
+            clock_hour=clock_hour,
         )
         scene["schedule_ctx"] = sched_ctx
         building_cats = {
@@ -1295,6 +1371,7 @@ class CognitiveEngine:
         home_sid = str(scene.get("home_space_id") or sched_ctx.get("home_space_id") or "")
         has_free_restable = any(
             "restable" in (e.get("traits") or {})
+            and not _is_seat_entity(e)
             and not (e.get("traits", {}).get("restable") or {}).get("occupied_by")
             for e in scene["visible"]
         )
@@ -1447,8 +1524,20 @@ class CognitiveEngine:
                     public = space["space_kind"] == "town" or "public_utility" in ent.get("tags", [])
                     value = 1.7 - (3.5 * profile["norm_compliance"] if public else 0.0)
                     information = 0
-                verb = {"rest": "在此休息", "read": "阅读", "consume": "尝尝", "interact": "使用",
-                        "open": "打开", "turn_on": "点亮"}[action]
+                is_seat = action == "rest" and _is_seat_entity(ent)
+                if is_seat and (in_night_curfew or vitals["sleep_pressure"] >= 0.72 or vitals["energy"] < 0.25):
+                    continue
+                if action == "rest" and in_night_curfew and home_sid and space.get("space_kind") == "town" and vitals["energy"] >= 0.22 and vitals["sleep_pressure"] < 0.85:
+                    continue
+                if action == "rest" and not is_seat and in_night_curfew and home_sid and sid == home_sid and self._level(state, "action", "rest", now) < 1.5:
+                    value += 1.4
+                if is_seat:
+                    value *= 0.65
+                    information = 0.05
+                verb = (
+                    {"rest": "坐一会儿" if is_seat else "在此休息", "read": "阅读", "consume": "尝尝", "interact": "使用",
+                     "open": "打开", "turn_on": "点亮"}[action]
+                )
                 add("entity", eid, drive, f"{verb}「{ent['name']}」", ent["x"], ent["y"], value, information, action=action)
             text = self._expression_text(state, scene)
             if allow_diary and text and ent["traits"].get("inscribable", {}).get("writable_by_ai"):
@@ -1457,6 +1546,16 @@ class CognitiveEngine:
                 if inscription_is_new(text, entries):
                     add("entity", eid, "expression", f"在「{ent['name']}」留一句话", ent["x"], ent["y"],
                         1.25 if board else 2.2, 0, action="write")
+
+        home_place = state["places"].get(home_sid, {}) if home_sid else {}
+        home_since_left = now - float(home_place.get("last_left", -1e9))
+        home_rest_conf = float((home_place.get("affordances") or {}).get("rest", {}).get("confidence", 0.75))
+        home_curfew_ready = (
+            in_night_curfew and bool(home_sid)
+            and not (0.0 <= home_since_left < 1.2)
+            and self._level(state, "place", home_sid, now) < 2.0
+            and home_rest_conf >= 0.30
+        )
 
         parent_sid = str(space.get("parent_space_id") or "")
         for portal in state["portals"].values():
@@ -1467,8 +1566,12 @@ class CognitiveEngine:
             if is_exit_portal:
                 dwell = now - float(here.get("arrived", now))
                 exit_label = "回到镇上" if target == scene["realm"] else f"返回「{portal['name']}」"
-                add("exit", target, "explore", exit_label, portal["x"], portal["y"],
-                    2.90 + min(1.8, dwell / 12) if inside else 0.0, 0.55)
+                if inside and home_curfew_ready and sid != home_sid:
+                    add("exit", target, "rest", "夜深了，动身回住处休息", portal["x"], portal["y"],
+                        4.20 + min(1.2, dwell / 12), 0.35)
+                else:
+                    add("exit", target, "explore", exit_label, portal["x"], portal["y"],
+                        2.90 + min(1.8, dwell / 12) if inside else 0.0, 0.55)
                 continue
             place = state["places"].get(target, {})
             since_left = now - float(place.get("last_left", -1e9))
@@ -1477,6 +1580,9 @@ class CognitiveEngine:
                     0.85 + 0.15 * (1 + math.tanh(_activation(memory["samples"], now, percept["memory_decay"]))) / 2
                 ) for domain, memory in place.get("affordances", {}).items() if memory["confidence"] >= 0.3
             }
+            is_home_curfew_target = home_curfew_ready and target == home_sid
+            if is_home_curfew_target and "rest" not in affordances:
+                affordances["rest"] = self._domain_value("rest", state, scene) * 0.75
             drive = max(affordances, key=affordances.get, default="explore")
             if "engage" in scene and 0.0 <= since_left < 1.2 and not (
                 (drive == "rest" and drives["rest"] >= 0.72) or (drive == "food" and drives["food"] >= 0.75)
@@ -1487,9 +1593,18 @@ class CognitiveEngine:
             if inside and not (drive == "rest" and drives["rest"] >= 0.72):
                 novelty *= 0.55
             recall = 0.80 + 0.20 * (1 + math.tanh(_activation(portal["samples"], now, percept["memory_decay"]))) / 2
+            home_bonus = 1.1 if is_home_curfew_target else 0.0
             add("visit", target, drive, f"去「{portal['name']}」", portal["x"], portal["y"],
-                1.25 + 0.78 * affordances.get(drive, 0.7),
+                1.25 + 0.78 * affordances.get(drive, 0.7) + home_bonus,
                 novelty * travel_confidence * portal["confidence"] * recall)
+        if home_curfew_ready and sid != home_sid and not any(
+            c["kind"] in ("visit", "exit") and c.get("drive") == "rest" for c in results
+        ):
+            home_hop = self._portal_graph_next_hop(state["portals"], sid, home_sid, min_conf=0.25)
+            if home_hop:
+                hop_target, hop_portal = home_hop
+                add("visit", hop_target, "rest", "夜深了，动身回住处休息", hop_portal["x"], hop_portal["y"],
+                    3.8 + 0.65 * self._domain_value("rest", state, scene), 0.25)
 
         if not inside or not any(c["kind"] == "exit" for c in results):
             for x, y, target, goal, novelty in self._frontiers(state, scene):
@@ -1600,9 +1715,11 @@ class CognitiveEngine:
             if (
                 not scene.get("nocturnal_active")
                 and sched_slot == "night_rest"
-                and intention["kind"] == "visit"
                 and home_sid
-                and intention.get("target") == home_sid
+                and (
+                    (intention["kind"] == "visit" and intention.get("target") == home_sid)
+                    or (intention["kind"] == "exit" and actor.get("space_id") != home_sid)
+                )
             ):
                 return False
             if scene.get("nocturnal_active") and intention.get("kind") in ("entity", "social", "visit", "exit"):
@@ -1827,6 +1944,45 @@ class CognitiveEngine:
         if kind == "visit" and sid == target:
             if intention.get("covert_directive_id") and (scene.get("covert_directive") or {}).get("kind") == "entity":
                 return "done", []
+            if intention.get("target_entity_id"):
+                teid = str(intention.pop("target_entity_id"))
+                req_act = str(intention.pop("target_entity_action", "") or "").strip().lower()
+                ent_obj = next((e for e in scene["visible"] if e["entity_id"] == teid), None)
+                if ent_obj is None:
+                    raw_ent = (getattr(self.engine, "_world", {}) or {}).get("entities", {}).get(teid)
+                    if isinstance(raw_ent, Mapping) and str(raw_ent.get("space_id") or "") == sid and not str(raw_ent.get("parent_id") or "").startswith("inventory:"):
+                        ent_obj = dict(raw_ent)
+                if ent_obj is not None:
+                    legal = dict(self.engine.legal_verbs(ent_obj, actor))
+                    affordances = self._affordances(ent_obj, space)
+                    if req_act and (req_act in legal or (req_act == "write" and "inscribable" in (ent_obj.get("traits") or {}))):
+                        picked_act = req_act
+                    elif "read" in legal and "inscribable" in (ent_obj.get("traits") or {}):
+                        picked_act = "read"
+                    elif "look" in legal:
+                        picked_act = "look"
+                    elif affordances:
+                        picked_act = affordances[0][1]
+                    elif legal:
+                        picked_act = next(iter(legal))
+                    else:
+                        picked_act = ""
+                    if picked_act:
+                        intention.update({
+                            "kind": "entity",
+                            "key": f"entity:{sid}:{teid}:{picked_act}",
+                            "target": teid,
+                            "space": sid,
+                            "x": int(ent_obj["x"]),
+                            "y": int(ent_obj["y"]),
+                            "action": picked_act,
+                            "phase": "approach",
+                        })
+                        return self._use_entity(
+                            state, scene, ent_obj, intention.get("drive") or "curiosity", picked_act,
+                            note_text=str(intention.get("note_text") or ""),
+                        )
+                return "done", []
             if intention.get("joint_visit_id"):
                 with self.engine._lock:
                     status, logs = self._joint_visit_activity(intention, state, scene, talk)
@@ -1864,6 +2020,10 @@ class CognitiveEngine:
             assigned = scene.get("covert_entity") or {}
             if assigned.get("entity_id") == target:
                 entity = assigned
+        if entity is None and intention.get("source") in ("persona_choice", "external"):
+            world_ent = (getattr(self.engine, "_world", {}) or {}).get("entities", {}).get(target)
+            if isinstance(world_ent, Mapping) and str(world_ent.get("space_id") or "") == sid and not str(world_ent.get("parent_id") or "").startswith("inventory:"):
+                entity = dict(world_ent)
         if entity is None:
             return "blocked", []
         return self._use_entity(
@@ -2079,13 +2239,20 @@ class CognitiveEngine:
             and self._place_is_lodging(str(intention.get("target") or ""), scene)
         )
         if agreed_rest:
-            beds = [(e, action) for e, action in options if "bedroom" in e.get("tags", ())]
+            beds = [(e, action) for e, action in options if not _is_seat_entity(e) and "bedroom" in e.get("tags", ())]
             if beds:
                 options = beds
             else:
                 status, logs = self._look_for_bed(intention, state, scene)
                 if status == "progress":
                     return status, logs
+                sleep_beds = [(e, action) for e, action in options if not _is_seat_entity(e)]
+                if sleep_beds:
+                    options = sleep_beds
+        elif drive == "rest":
+            sleep_beds = [(e, action) for e, action in options if not _is_seat_entity(e)]
+            if sleep_beds:
+                options = sleep_beds
         if drive == "social":
             options = [(e, action) for e in scene["visible"] for domain, action in self._affordances(e, scene["space"])
                        if domain == "food"]
@@ -2132,7 +2299,16 @@ class CognitiveEngine:
     ) -> tuple[str, list[str]]:
         actor, space, now = scene["actor"], scene["space"], scene["minutes"]
         eid = entity["entity_id"]
-        if entity.get("parent_id") != f"actor:{actor['actor_id']}" and self.engine.chebyshev_distance(actor, entity) > 1:
+        is_vis = any(e["entity_id"] == eid for e in scene["visible"])
+        if entity.get("parent_id") != f"actor:{actor['actor_id']}" and (
+            self.engine.chebyshev_distance(actor, entity) > 1 or not is_vis
+        ):
+            ent_zone = self.engine.get_zone_at(space, int(entity.get("x") or 0), int(entity.get("y") or 0))
+            if not is_vis and isinstance(ent_zone, Mapping):
+                z_reg = (int(ent_zone["x"]), int(ent_zone["y"]), int(ent_zone["x"]) + int(ent_zone["w"]) - 1, int(ent_zone["y"]) + int(ent_zone["h"]) - 1)
+                status, logs = self._walk(scene, state, entity["x"], entity["y"], 1, region=z_reg)
+                if status != "blocked":
+                    return status, logs
             return self._walk(scene, state, entity["x"], entity["y"], 1)
         entries = entity["traits"].get("inscribable", {}).get("entries", [])
         if action == "write":

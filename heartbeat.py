@@ -215,15 +215,28 @@ class WorldHeartbeat:
                 taken.extend(f"{aid}: {line}" for line in loan_decision["actions"])
                 continue
 
-            scene = self._engine.cognitive_scene(aid)
-            if scene is not None:
-                decision = self._cognitive.step(scene, settings, use_llm=eff_llm, talk=self._cognitive_talk)
-                decisions.append(decision)
-                taken.extend(f"{aid}: {line}" for line in decision["actions"])
-                self._log_autonomous_activity(
-                    aid, scene["space"]["space_id"], "；".join(decision["actions"]), decision,
-                )
-                continue
+            if self.live.managed(aid):
+                with self.live._step_gate:
+                    scene = self._engine.cognitive_scene(aid)
+                    if scene is not None:
+                        decision = self._cognitive.step(scene, settings, use_llm=eff_llm, talk=self._cognitive_talk)
+                        self.live.sync_external_step(aid)
+                        decisions.append(decision)
+                        taken.extend(f"{aid}: {line}" for line in decision["actions"])
+                        self._log_autonomous_activity(
+                            aid, scene["space"]["space_id"], "；".join(decision["actions"]), decision,
+                        )
+                        continue
+            else:
+                scene = self._engine.cognitive_scene(aid)
+                if scene is not None:
+                    decision = self._cognitive.step(scene, settings, use_llm=eff_llm, talk=self._cognitive_talk)
+                    decisions.append(decision)
+                    taken.extend(f"{aid}: {line}" for line in decision["actions"])
+                    self._log_autonomous_activity(
+                        aid, scene["space"]["space_id"], "；".join(decision["actions"]), decision,
+                    )
+                    continue
 
             sp_snap = self._engine.snapshot_for_ui(act["space_id"])
             vis = self._engine.visible_entities(aid)
@@ -803,6 +816,11 @@ class WorldHeartbeat:
                 e for e in vis
                 if "restable" in (e.get("traits") or {})
                 and (e.get("traits") or {})["restable"].get("occupied_by") is None
+                and schema.infer_rest_mode(
+                    (e.get("traits") or {}).get("restable"),
+                    name=str(e.get("name") or ""),
+                    tags=e.get("tags") or (),
+                ) != "sit"
             ]
             if free_beds:
                 free_beds.sort(

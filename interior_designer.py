@@ -207,7 +207,7 @@ FURNITURE_MOTIFS: dict[str, dict[str, Any]] = {
         "default_brief": "嵌着木雕扶手与厚实软垫的宽敞双人沙发。",
         "solid": False,
         "placement": "floor",
-        "traits": {"restable": {"energy_regen_per_min": 0.016, "comfort": 0.88, "occupied_by": None}},
+        "traits": {"restable": {"rest_mode": "sit", "energy_regen_per_min": 0.016, "comfort": 0.88, "occupied_by": None}},
         "tags": ["furniture", "sofa", "rest"],
         "rows": _mirror32([
             "................................",
@@ -901,7 +901,7 @@ FURNITURE_MOTIFS: dict[str, dict[str, Any]] = {
         "default_brief": "弧形扶栏的温润实木椅，座面放着薄布坐垫。",
         "solid": False,
         "placement": "floor",
-        "traits": {"restable": {"energy_regen_per_min": 0.011, "comfort": 0.72, "occupied_by": None}},
+        "traits": {"restable": {"rest_mode": "sit", "energy_regen_per_min": 0.011, "comfort": 0.72, "occupied_by": None}},
         "tags": ["furniture", "chair", "rest"],
         "rows": _fit_rows([
             "................",
@@ -928,7 +928,7 @@ FURNITURE_MOTIFS: dict[str, dict[str, Any]] = {
         "default_brief": "旋转铁木面高脚凳，最适合挨在吧台边小坐。",
         "solid": False,
         "placement": "floor",
-        "traits": {"restable": {"energy_regen_per_min": 0.010, "comfort": 0.68, "occupied_by": None}},
+        "traits": {"restable": {"rest_mode": "sit", "energy_regen_per_min": 0.010, "comfort": 0.68, "occupied_by": None}},
         "tags": ["furniture", "stool", "rest"],
         "rows": _fit_rows([
             "................",

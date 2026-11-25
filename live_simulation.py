@@ -57,6 +57,9 @@ class LiveActor:
     seen_preempt_seq: int = 0
     user_chat_until: float = 0.0
     conversation_seq: int = 0
+    last_talk_at: float = 0.0
+    last_talk_partner: str = ""
+    last_talk_seq: int = 0
 
 
 class LiveSimulation:
@@ -81,12 +84,14 @@ class LiveSimulation:
         self._social_until: dict[tuple[str, str], float] = {}
         self._noticed_until: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
+        self._step_gate = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nanami-reflection")
         self._maintenance = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nanami-live-bridge")
         self._social = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nanami-live-social")
         self._outstanding = 0
+        self._talk_seq = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -107,6 +112,24 @@ class LiveSimulation:
         with self._lock:
             actor = self._actors.get(actor_id)
             return bool(actor and actor.expiry > time.monotonic())
+
+    def sync_external_step(self, actor_id: str) -> None:
+        """同步外部心跳步进后的最新实体位置与空间状态，防止实时电机复用旧路径。"""
+        frame = self.engine.live_actor_frame(actor_id)
+        if not frame:
+            return
+        now = time.monotonic()
+        with self._lock:
+            item = self._actors.get(actor_id)
+            if item is None:
+                return
+            item.frame = frame
+            item.route, item.engagement = [], None
+            item.phase = "idle"
+            item.duration = 0.0
+            item.next_at = now + 0.25
+            item.revision += 1
+            item.world_revision += 1
 
     def set_background_roster(self, realm: str, actor_ids: list[str]) -> None:
         frames = {aid: self.engine.live_actor_frame(aid) for aid in actor_ids}
@@ -221,6 +244,47 @@ class LiveSimulation:
                     self._set_speed(item, speed, now)
             return self._view(actor, now)
 
+    def _cinema_focus_locked(self, candidates: list[LiveActor], now: float) -> dict[str, Any] | None:
+        by_id = {str(item.frame.get("actor_id") or ""): item for item in candidates}
+        best_rank: tuple[int, float, float] | None = None
+        best_payload: dict[str, Any] | None = None
+        for item in candidates:
+            aid_x = str(item.frame.get("actor_id") or "")
+            if not aid_x or item.frame.get("actor_status", "active") != "active":
+                continue
+            speaking = next(((txt, st, ed) for txt, st, ed in item.speech_queue if st <= now < ed), None)
+            if speaking is not None:
+                prio, reason = 3, "speaking"
+                rank = (3, float(item.last_talk_seq), float(speaking[1]))
+            elif aid_x in self._chatting or item.phase == "conversing":
+                prio, reason = 2, "conversing"
+                rank = (2, float(item.last_talk_seq), float(item.conversation_seq))
+            elif item.last_talk_at > 0 and now - item.last_talk_at <= 6.0:
+                prio, reason = 1, "recent_dialogue"
+                rank = (1, float(item.last_talk_seq), float(item.last_talk_at))
+            elif item.frame.get("posture") != "resting" and item.phase in ("engaging", "walking"):
+                prio, reason = 0, "activity"
+                rank = (0, float(item.revision), float(item.last_plan_at))
+            else:
+                continue
+            if best_rank is None or rank > best_rank:
+                best_rank = rank
+                partner_id = str(item.last_talk_partner or "")
+                partner_item = by_id.get(partner_id) if partner_id else None
+                best_payload = {
+                    "actor_id": aid_x,
+                    "actor_name": str(item.frame.get("name") or aid_x),
+                    "partner_id": partner_id,
+                    "partner_name": str(partner_item.frame.get("name") or "") if partner_item else "",
+                    "space_id": str(item.frame.get("space_id") or ""),
+                    "x": int(item.frame.get("x") or 0),
+                    "y": int(item.frame.get("y") or 0),
+                    "reason": reason,
+                    "priority": prio,
+                    "seq": int(item.last_talk_seq or item.conversation_seq or item.revision),
+                }
+        return best_payload
+
     def frame(self, actor_id: str, owner: str, after: int, peer_after: dict[str, int] | None = None) -> dict[str, Any]:
         now = time.monotonic()
         with self._lock:
@@ -234,14 +298,21 @@ class LiveSimulation:
             view = self._delta(actor, now, after)
             sid = actor.frame["space_id"]
             group = self._background.get(actor_id)
-            view["peers"] = [
-                self._delta(item, now, (peer_after or {}).get(aid, -1))
+            peer_items = [
+                item
                 for aid, item in self._actors.items()
                 if aid != actor_id and item.expiry > now
                 and item.frame.get("actor_status", "active") == "active"
                 and (item.frame["space_id"] == sid or (actor.owner and item.owner == actor.owner)
                      or (group and self._background.get(aid) == group))
             ]
+            view["peers"] = [
+                self._delta(item, now, (peer_after or {}).get(str(item.frame.get("actor_id") or ""), -1))
+                for item in peer_items
+            ]
+            focus = self._cinema_focus_locked([actor, *peer_items], now)
+            if focus is not None:
+                view["cinema_focus"] = focus
         return self.engine.redact_live_view_if_opaque(view, sid)
 
     def _delta(self, actor: LiveActor, now: float, after: int) -> dict[str, Any]:
@@ -311,13 +382,41 @@ class LiveSimulation:
                 self.engine.tick_physics(
                     minimum_elapsed_minutes=0.05, time_scale=scale, consolidate_memory=settings.episodic_memory_enabled,
                 )
+                with self._lock:
+                    active_spaces = {str(actor.frame.get("space_id") or "") for _, actor in actors if actor.frame.get("space_id")}
+                    chatting_snapshot = set(self._chatting)
+                if hasattr(self.engine, "try_skip_night") and active_spaces:
+                    checked_realms: set[str] = set()
+                    for sp_x in active_spaces:
+                        r_sid = self.engine.realm_space_id(sp_x) if hasattr(self.engine, "realm_space_id") else sp_x
+                        if not r_sid or r_sid in checked_realms:
+                            continue
+                        checked_realms.add(r_sid)
+                        skip = self.engine.try_skip_night(
+                            r_sid, chatting_ids=chatting_snapshot, consolidate_memory=settings.episodic_memory_enabled,
+                        )
+                        if skip:
+                            woken = set(skip.get("woken_actors") or ())
+                            refreshed = {aid_w: self.engine.live_actor_frame(aid_w) for aid_w in woken}
+                            with self._lock:
+                                for aid_w, fr_w in refreshed.items():
+                                    item_w = self._actors.get(aid_w)
+                                    if item_w and fr_w:
+                                        item_w.frame = fr_w
+                                        item_w.route, item_w.engagement = [], None
+                                        item_w.phase = "idle"
+                                        item_w.duration = 0.0
+                                        item_w.next_at = now + 0.4
+                                        item_w.revision += 1
+                                        item_w.world_revision += 1
                 if now - last_maintenance >= 4 and (maintenance is None or maintenance.done()):
                     maintenance = self._maintenance.submit(self.maintain)
                     last_maintenance = now
                 for aid, actor in actors:
                     if actor.speed and actor.next_at <= now:
                         try:
-                            self._advance(aid, actor, settings)
+                            with self._step_gate:
+                                self._advance(aid, actor, settings)
                         except Exception:
                             with self._lock:
                                 actor.next_at = time.monotonic() + 1.0
@@ -439,12 +538,17 @@ class LiveSimulation:
             if use_model or greeting_player:
                 participants = (aid,) if greeting_player else key
                 self._chatting.update(participants)
+                self._talk_seq += 1
+                talk_seq = self._talk_seq
                 for participant in participants:
                     if participant in self._actors:
                         runtime = self._actors[participant]
                         runtime.route, runtime.engagement = [], None
                         runtime.phase = "conversing"
                         runtime.conversation_seq += 1
+                        runtime.last_talk_at = now
+                        runtime.last_talk_partner = peer_id if participant == aid else aid
+                        runtime.last_talk_seq = talk_seq
                 if greeting_player:
                     self._social.submit(
                         self._greet_player, service, aid, peer_id, reason, use_model, urgent_seek_player,
@@ -470,7 +574,9 @@ class LiveSimulation:
     def _speak(self, service: Any, aid: str, peer: str, reason: str, *, rendezvous: bool = False) -> None:
         result = {}
         try:
-            response = service.conduct_actor_social_exchange(aid, peer, reason=reason, generated_only=True)
+            response = service.conduct_actor_social_exchange(
+                aid, peer, reason=reason, generated_only=True, use_mouth=True,
+            )
             if isinstance(response, dict):
                 result = response
         except Exception:
@@ -492,6 +598,11 @@ class LiveSimulation:
                     turns = [{"line_a": result["line_a"], "line_b": result["line_b"]}]
                 sa = result.get("speech_act") if isinstance(result.get("speech_act"), dict) else {}
                 has_turns = bool(turns)
+                if has_turns:
+                    self._talk_seq += 1
+                    talk_seq = self._talk_seq
+                else:
+                    talk_seq = 0
                 max_duration = 0.0
                 for index, participant in enumerate((aid, peer)):
                     self._chatting.discard(participant)
@@ -504,6 +615,9 @@ class LiveSimulation:
                         actor.duration = duration
                         actor.phase = "conversing" if has_turns else "dwell"
                         if has_turns:
+                            actor.last_talk_at = now
+                            actor.last_talk_partner = peer if index == 0 else aid
+                            actor.last_talk_seq = talk_seq
                             step_sec = 2.2 / spd
                             key_line = "line_a" if index == 0 else "line_b"
                             actor.speech_queue = [

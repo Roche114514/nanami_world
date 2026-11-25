@@ -466,7 +466,10 @@ def register_pages(
         appearance_payload: dict[str, Any] | None = None
         if isinstance(v.get("appearance"), Mapping):
             appearance_payload = dict(v["appearance"])
-        elif not req_actor_id or req_actor_id not in existing_ids:
+        elif (
+            (not req_actor_id or req_actor_id not in existing_ids)
+            and (sprite_prompt or not hasattr(engine, "has_saved_character_appearance") or not engine.has_saved_character_appearance(lookup_name))
+        ):
             app_desc = sprite_prompt
             if not app_desc and matched_host:
                 app_desc = (str(matched_host.get("brief") or "") + "。" + str(matched_host.get("setting") or "")).strip("。")
@@ -748,6 +751,75 @@ def register_pages(
         )
         return _snap_ok({"actor": updated}, space_id=sid)
 
+    def _act_get_actor_relations(v: dict[str, Any]) -> dict[str, Any]:
+        sid = str(v.get("space_id") or "").strip()
+        if not sid:
+            sid = str(engine.snapshot_for_ui().get("active_space_id") or "room_default")
+        is_default_bucket = sid == persona_bridge.DEFAULT_RELATIONS_REALM
+        if is_default_bucket:
+            realm_sid = persona_bridge.DEFAULT_RELATIONS_REALM
+            isolated_persona = False
+        else:
+            realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
+            isolated_persona = engine.is_isolated_persona_realm(realm_sid) if hasattr(engine, "is_isolated_persona_realm") else False
+
+        subj = str(v.get("subject_character") or "").strip()
+        aid = str(v.get("actor_id") or "").strip()
+        actors_all = engine.list_actors()
+        if not subj:
+            if not aid:
+                aid = engine.resolve_actor_id(space_id="" if is_default_bucket else sid)
+            act = next((a for a in actors_all if a.get("actor_id") == aid), None)
+            if act:
+                subj = str(act.get("host_character") or act.get("name") or "").strip()
+        if not subj:
+            raise ValueError("缺少主体角色名称或角色 ID。")
+
+        in_realm_names: list[str] = []
+        other_actor_names: list[str] = []
+        seen_names: set[str] = {subj}
+        for a in actors_all:
+            if a.get("is_player") or a.get("actor_status", "active") == "missing":
+                continue
+            cname = str(a.get("host_character") or a.get("name") or "").strip()
+            if not cname or cname in seen_names:
+                continue
+            a_sid = str(a.get("space_id") or "")
+            a_realm = engine.realm_space_id(a_sid) if (a_sid and hasattr(engine, "realm_space_id")) else a_sid
+            a_iso = engine.is_isolated_persona_realm(a_realm) if (a_realm and hasattr(engine, "is_isolated_persona_realm")) else False
+            if not is_default_bucket and a_realm == realm_sid:
+                seen_names.add(cname)
+                in_realm_names.append(cname)
+            elif not a_iso:
+                seen_names.add(cname)
+                other_actor_names.append(cname)
+
+        host_names: list[str] = []
+        for hc in engine.list_host_characters():
+            cname = str(hc.get("name") or "").strip()
+            if cname and cname not in seen_names:
+                seen_names.add(cname)
+                host_names.append(cname)
+
+        cfg = settings_store.get()
+        relations = persona_bridge.read_actor_relations(
+            engine.project_root,
+            subj,
+            space_id=realm_sid,
+            world_data_root=engine.data_root,
+            custom_persona_dir=str(getattr(cfg, "persona_data_dir", "") or ""),
+            known_actors=in_realm_names + other_actor_names + host_names,
+            isolated_persona=isolated_persona,
+        )
+        return {
+            "ok": True,
+            "realm_space_id": realm_sid,
+            "space_id": sid,
+            "subject_character": subj,
+            "in_realm_names": in_realm_names,
+            "relations": relations,
+        }
+
     def _act_save_world_relation(v: dict[str, Any]) -> dict[str, Any]:
         sid = str(v.get("space_id") or "").strip()
         if not sid:
@@ -774,7 +846,11 @@ def register_pages(
         if "cool_off_turns" in v and v.get("cool_off_turns") not in (None, ""):
             patch["cool_off_turns"] = int(v["cool_off_turns"])
 
-        realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
+        is_default_bucket = sid == persona_bridge.DEFAULT_RELATIONS_REALM
+        if is_default_bucket:
+            realm_sid = persona_bridge.DEFAULT_RELATIONS_REALM
+        else:
+            realm_sid = engine.realm_space_id(sid) if hasattr(engine, "realm_space_id") else sid
         edge = persona_bridge.save_world_actor_relation(
             engine.data_root,
             realm_sid,
@@ -782,7 +858,37 @@ def register_pages(
             target_key,
             patch,
         )
-        return _snap_ok({"relation": edge, "space_id": sid}, space_id=sid)
+        reverse_edge: dict[str, Any] | None = None
+        if bool(v.get("sync_reverse")) and target_key.startswith("char:"):
+            other_subj = target_key.split(":", 1)[1].strip()
+            if other_subj and other_subj != subj:
+                rev_patch = {
+                    k: patch[k]
+                    for k in (
+                        "known",
+                        "rel_stage",
+                        "attitude_stance",
+                        "relation_tag",
+                        "shared_memories",
+                        "affective_valence",
+                        "trust",
+                        "warmth",
+                        "social_willingness",
+                        "repulsion",
+                    )
+                    if k in patch
+                }
+                reverse_edge = persona_bridge.save_world_actor_relation(
+                    engine.data_root,
+                    realm_sid,
+                    other_subj,
+                    f"char:{subj}",
+                    rev_patch,
+                )
+        extra_res: dict[str, Any] = {"relation": edge, "space_id": sid, "realm_space_id": realm_sid}
+        if reverse_edge is not None:
+            extra_res["reverse_relation"] = reverse_edge
+        return _snap_ok(extra_res, space_id="" if is_default_bucket else sid)
 
     def _act_create_default_town(v: dict[str, Any]) -> dict[str, Any]:
         _ensure_default_host_actor()
@@ -949,19 +1055,24 @@ def register_pages(
         if not live:
             return {"ok": True, "live": {}, **extra}
         sid = live["space_id"]
-        live = engine.redact_live_view_if_opaque(live, sid)
-        cur_w = engine.get_weather(sid)
-        cur_lt = engine.get_lighting(sid)
+        req_sid = str(v.get("space_id") or "").strip()
+        view_sid = req_sid if (req_sid and hasattr(engine, "has_space") and engine.has_space(req_sid)) else sid
+        live = engine.redact_live_view_if_opaque(live, view_sid)
+        cur_w = engine.get_weather(view_sid)
+        cur_lt = engine.get_lighting(view_sid)
+        night_skip = engine.latest_night_skip(view_sid) if hasattr(engine, "latest_night_skip") else None
+        live["night_skip"] = night_skip
         version = "|".join([
             *(f"{row['actor_id']}:{row['world_revision']}" for row in [live, *live["peers"]]
-              if row["space_id"] == sid),
+              if row["space_id"] == view_sid),
             f"w:{cur_w.get('transition_seq', 0)}",
             f"p:{cur_lt.get('period', '')}:{'1' if cur_lt.get('is_dark') else '0'}",
+            f"ns:{(night_skip or {}).get('seq', 0)}",
         ])
         live["world_version"] = version
         out = {"ok": True, "live": live, **extra}
-        if sid == v.get("space_id") and version != v.get("world_version"):
-            out["changes"] = engine.live_space_changes(sid)
+        if view_sid == req_sid and version != v.get("world_version"):
+            out["changes"] = engine.live_space_changes(view_sid)
         if world_chat is not None:
             history = world_chat.get_history_if_changed(aid, sid, str(v.get("history_after", "")))
             if history is not None:
@@ -1393,6 +1504,7 @@ def register_pages(
         ("remove_actor", "移除角色", _act_remove_actor),
         ("trigger_social_talk", "同屋角色交流", _act_trigger_social_talk),
         ("set_world_actor_mood", "调整本世界心情", _act_set_world_actor_mood),
+        ("get_actor_relations", "读取指定世界角色社交指针", _act_get_actor_relations),
         ("save_world_relation", "保存本世界社交指针", _act_save_world_relation),
         ("set_actor_appearance", "保存像素小人外观", _act_set_actor_appearance),
         ("regen_actor_appearance", "按设定生成小人外观", _act_regen_actor_appearance),
