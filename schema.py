@@ -29,6 +29,7 @@ VALID_PLACEMENTS: frozenset[str] = frozenset({"floor", "wall", "surface_only", "
 VALID_LIGHT_MODES: frozenset[str] = frozenset({"auto", "dawn", "day", "dusk", "night"})
 VALID_SPACE_KINDS: frozenset[str] = frozenset({"room", "town", "building"})
 VALID_ACTOR_STATUSES: tuple[str, ...] = ("active", "incapacitated", "missing")
+AWAKE_REST_RECOVERY_TARGET = 0.35
 PIXEL_SLOTS: frozenset[str] = frozenset({".", "o", "1", "2", "3", "a", "b"})
 
 MAX_BRIEF_CHARS = 25
@@ -926,6 +927,7 @@ def normalize_autonomy(raw: Any) -> dict[str, Any]:
     recent = [str(x).strip() for x in (src.get("recent_targets") or []) if str(x).strip()]
     out = {
         "enabled": bool(src.get("enabled", True)),
+        "awake_rest": bool(src.get("awake_rest", False)),
         "current_goal": clip_text(src.get("current_goal"), 36, "刚来到空间，正四处打量"),
         "current_drive": clip_text(src.get("current_drive"), 24, "curiosity"),
         "last_thought": clip_text(src.get("last_thought"), 60, ""),

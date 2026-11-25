@@ -48,6 +48,7 @@ SUPPORTED_OPS: tuple[str, ...] = (
     "resume_resting_group",
     "set_background_roster",
     "gather_actors",
+    "set_dialogue_focus",
     "set_overlay",
     "poll_events",
     "query_world_state",
@@ -173,6 +174,7 @@ class WorldBridge:
                     "covert_directive": True,
                     "dispatch_npc_to_player": True,
                     "dialogue_exchange_events": True,
+                    "dialogue_focus": self._heartbeat is not None,
                     "external_overlay": True,
                     "overlay_cards": True,
                     "ephemeral_blueprints": True,
@@ -720,6 +722,25 @@ class WorldBridge:
                 space_id=str(data.get("space_id") or "").strip(),
                 preempt=bool(data.get("preempt", True)),
             )
+
+        if clean_op == "set_dialogue_focus":
+            sid = str(data.get("space_id") or "").strip()
+            scenes = data.get("scenes")
+            if not sid or not isinstance(scenes, list) or len(scenes) > 3:
+                raise ValueError("需要提供世界 ID 与当前关键对话列表。")
+            for scene in scenes:
+                actor_ids = scene.get("actor_ids") if isinstance(scene, Mapping) else None
+                if (not isinstance(actor_ids, list) or len(actor_ids) != 2
+                        or not all(isinstance(aid, str) and aid for aid in actor_ids)
+                        or actor_ids[0] == actor_ids[1]
+                        or not isinstance(scene.get("scene_id"), str) or not scene["scene_id"]
+                        or not isinstance(scene.get("topic"), str) or not scene["topic"]
+                        or not isinstance(scene.get("review_pending", False), bool)
+                        or not isinstance(scene.get("revision"), int) or scene["revision"] < 0):
+                    raise ValueError("关键对话须包含两名不同的角色、话题和当前轮次。")
+            if self._heartbeat is not None:
+                self._heartbeat.live.set_dialogue_focus(self._engine.realm_space_id(sid), scenes)
+            return {"ok": True, "available": self._heartbeat is not None}
 
         if clean_op == "propose_actor_commitment":
             aid = str(data.get("actor_id") or "").strip()

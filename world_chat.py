@@ -53,6 +53,45 @@ _CHAT_DOMAINS = frozenset({
     "expression", "comfort", "curiosity", "hobby", "music",
 })
 _INVITATION_DECLINES = ("不用", "不必", "不想", "不去", "改天", "下次", "先不", "去不了", "算了", "我自己")
+_THIRD_PARTY_VOCATIVE = (
+    r"(?:^|[，,。！？!?…：:\s])(?:喂|欸|诶|哎|那个)?[，,、\s]*(?:{names})(?:同学|小姐|老师|前辈|先生|君|酱)?(?:[，,、！!～~]|(?=你))"
+    r"|(?:^|[（(])(?:转身)?(?:对着?|转向|看向|望向|朝着?)(?:{names})(?:同学|小姐|老师|前辈|先生|君|酱)?(?:说|问|喊|开口|[）)：:，,])"
+)
+_THIRD_PARTY_PROXIMITY = re.compile(
+    r"(?:[都就也还正已经可]*)(?:站|坐|走|跑|凑|来到|到|在|离)(?:在|到|了|得|这儿|这里|那儿|那里){0,3}"
+    r"(?:咱们|我们|我|你|两人|这|这边)?(?:的)?(?:跟前|眼前|身旁|身边|面前|旁边)"
+    r"|(?:[都就也还正已经可]*)(?:在这[儿里边]|来这[儿里边]|过来了)"
+)
+_HYPOTHETICAL_PRESENCE = re.compile(r"如果|要是|万一|等(?:到|着)?|假如|说不定|也许|可能|好像|希望|别让|让|没|不在")
+_UNNAMED_BYSTANDER = re.compile(r"趁(?:那个人|人家|人|她|他)(?:现在)?(?:就|还|正)?在(?:咱们|我们|我|你)?(?:跟前|眼前|身旁|身边|面前|旁边)")
+_PLANNED_OPENING = re.compile(
+    r"见面想表达(?:（对「(?P<listener>[^」]+)」）)?：(?P<line>.*?)(?=\s+(?:亲见实证：|严禁编造)|$)",
+    re.S,
+)
+
+
+def _social_name_forms(name: str) -> set[str]:
+    names = {name} if name else set()
+    if re.fullmatch(r"[\u4e00-\u9fff]{3,6}", name):
+        names.update((name[:2], name[-2:]))
+    return names
+
+
+def _social_address_pattern(names: set[str]) -> re.Pattern[str] | None:
+    if not names:
+        return None
+    alternatives = "|".join(re.escape(name) for name in sorted(names, key=lambda name: (-len(name), name)))
+    return re.compile(_THIRD_PARTY_VOCATIVE.format(names=alternatives))
+
+
+def _claims_third_party_proximity(line: str, names: set[str]) -> bool:
+    for clause in re.split(r"[，,。！？!?；;]", line):
+        for name in names:
+            before, found, after = clause.partition(name)
+            proximity = _THIRD_PARTY_PROXIMITY.match(after) if found else None
+            if proximity and not _HYPOTHETICAL_PRESENCE.search(before) and "的话" not in after:
+                return True
+    return False
 
 
 def _resolve_realm_place_id(raw_target: Any, realm_places: dict[str, str]) -> str:
@@ -464,7 +503,7 @@ class WorldChatService:
         *,
         limit: int = 7,
     ) -> str:
-        """从角色专属 corpus.tsv（或全局语料）优先抽取 casual/curious 原声口癖范例。"""
+        """从角色专属 corpus.tsv（可选回退到全局语料）抽取 casual/curious 样例。"""
         cands: list[Path] = []
         if profile_dir is not None:
             cands.append(profile_dir / "corpus.tsv")
@@ -531,6 +570,7 @@ class WorldChatService:
         corpus_limit: int = 5,
         strict_lookup: bool = False,
         isolated_realm_id: str = "",
+        own_corpus_only: bool = False,
     ) -> dict[str, Any]:
         """只读探测 nanami_persona 的全套上下文：mind.mjs / guard_bridge.mjs / soul.md / corpus.tsv / off-voice.json。"""
         settings = self._settings_provider()
@@ -578,12 +618,12 @@ class WorldChatService:
             for cand in soul_cands:
                 if cand.is_file():
                     try:
-                        soul_text = cand.read_text(encoding="utf-8")[:1200]
+                        soul_text = cand.read_text(encoding="utf-8-sig")[:2400 if own_corpus_only else 1200]
                         break
                     except OSError:
                         pass
 
-        corpus_base = None if (strict_lookup and profile_dir is None) else base_dir
+        corpus_base = None if own_corpus_only or (strict_lookup and profile_dir is None) else base_dir
         corpus_examples = self._sample_corpus_examples(profile_dir, corpus_base, limit=corpus_limit)
         off_voice_words = self._read_off_voice_ban(profile_dir)
         effective_state_root = state_root
@@ -740,9 +780,11 @@ class WorldChatService:
         setting_fallback: str = "",
         world_facts: str = "",
         mind_card: str = "",
+        nearby_bystanders: str = "",
+        line_allowed: Callable[[str], bool] | None = None,
     ) -> str:
         """嘴巴层（Mouth）：隔离复杂规则与长历史，仅看 soul + corpus + mind 状态卡 + 大脑意图，一次产出 6 个口语候选并过防重复门控与守卫。"""
-        soul = (pctx.get("soul_text") or setting_fallback or actor_name)[:550]
+        soul = (pctx.get("soul_text") or setting_fallback or actor_name)[:2400 if line_allowed else 550]
         corpus = pctx.get("corpus_examples") or ""
         ban = pctx.get("off_voice_words") or []
         card_hint = str(mind_card or "").strip()[:320]
@@ -751,19 +793,28 @@ class WorldChatService:
         mouth_sys = (
             f"你是「{actor_name}」的发声嘴巴（只负责把大脑意图转成真人张嘴说的话，不要做说教或内心汇报）。\n"
             "必须严格遵守：\n"
-            "1. **优先模仿【原声语料范例】的真实说话节奏、停顿和口吻**（通常 1 句短话，4–24 字，像真人脱口而出）；\n"
+            "1. 以【角色人格档案】为准，保留角色自己的自称、称呼、停顿和分寸；有【角色语料范例】时只参考说话方式，不把范例里的人物、事件或原句搬进当前场景。句长随表达需要变化；\n"
             "2. 严禁把内心活动或系统数值（如“打了六局”“进度多少”）念成台词，严禁鹦鹉学舌复读对方刚说过的词（如对方刚说“坐过去吧”，你就别再说“坐过去吧”）；\n"
             "3. 严禁虚构当前房间里不存在的店铺、餐厅或物品；只能用【世界真实物件】里的名词；\n"
             "4. 严禁与【近期已说过的话】重复开头（如连续用“嗯～”“那个…”）或重复同一句式；\n"
             "5. **严禁输出第三人称动作、心理总结或意图说明**（如“应一声，说……”“顺着她的话承认……”“同意，说……”），只能输出角色自己亲口说出的第一人称口语；\n"
             '6. 一次给出 6 个句式拉开差异的口语候选短句，只输出合法 JSON：{"candidates":["说法1","说法2","说法3","说法4","说法5","说法6"]}'
         )
+        if line_allowed:
+            mouth_sys += (
+                f"\n当前只对「{listener_name}」开口，回应对方刚说的具体内容。"
+                "旁人可以被提及，但不能替旁人发言、朝旁人说话，或把尚未到场的人说成已经到跟前。"
+                "若当前意图涉及之后和旁人交谈，只能向当前听众说打算、顾虑或请他帮忙。"
+                "候选必须推进当下这一拍，别用反复保证、催促、复述来填充。"
+                "台词里不带说话人标签、情绪值或舞台说明。"
+            )
         mouth_user = (
-            (f"【{actor_name}原声语料范例（最重要！严格模仿这种短句口吻）】\n{corpus}\n\n" if corpus else "")
-            + f"【{actor_name}性格底色】\n{soul}\n\n"
+            f"【{actor_name}角色人格档案】\n{soul}\n\n"
+            + (f"【{actor_name}角色语料范例（人物和情节只是例句）】\n{corpus}\n\n" if corpus else "")
             + (f"【此刻心境参考（只用于把握语气分寸，严禁直接念出心境描述或数值）】\n{card_hint}\n\n" if card_hint else "")
             + (f"【禁说离声词】{'、'.join(ban)}\n\n" if ban else "")
             + (f"【世界真实物件（禁止编造除此之外的物品或店铺）】\n{world_facts}\n\n" if world_facts else "")
+            + (f"【此刻可见且站在说话人跟前的旁人（均未参加对话）】{nearby_bystanders or '无'}\n\n" if line_allowed else "")
             + f"【近期已说过的话（避开重复开头与句式）】\n{recent_block}\n\n"
             + (f"【{listener_name}刚说（严禁复读对方用词）】{heard_line}\n" if heard_line else "")
             + f"【大脑这轮要表达的意图】{intent}"
@@ -776,18 +827,31 @@ class WorldChatService:
             max_tokens=320,
         )
         cands_raw = parsed.get("candidates") if isinstance(parsed, dict) else None
+
+        def acceptable(line: str) -> bool:
+            return bool(line and (line_allowed is None or (
+                line_allowed(line) and not _INTENT_LEAK_RE.search(line) and not any(w and w in line for w in ban)
+            )))
+
         chosen = ""
         if isinstance(cands_raw, list) and cands_raw:
             cleaned = [
-                clip_text(self._sanitize_spoken_line(c), 140, "")
+                clip_text(self._sanitize_spoken_line(c), 140)
                 for c in cands_raw
-                if self._sanitize_spoken_line(c)
+                if isinstance(c, str) and (line_allowed is None or line_allowed(c))
             ]
+            cleaned = [c for c in cleaned if acceptable(c)]
             if cleaned:
                 chosen = max(cleaned, key=lambda c: self._score_mouth_candidate(c, recent_replies, ban, heard_line=heard_line))
         if not chosen:
-            chosen = clip_text(self._sanitize_spoken_line(fallback_line or intent), 140, "……嗯。")
-        return self._run_guard_bridge(pctx.get("guard_mjs"), pctx.get("toolkit_dir"), [chosen])[0]
+            if line_allowed is None:
+                chosen = clip_text(self._sanitize_spoken_line(fallback_line or intent), 140, "……嗯。")
+            elif line_allowed(fallback_line):
+                chosen = clip_text(self._sanitize_spoken_line(fallback_line), 140)
+            if not acceptable(chosen):
+                return ""
+        guarded = self._run_guard_bridge(pctx.get("guard_mjs"), pctx.get("toolkit_dir"), [chosen])[0]
+        return guarded if acceptable(guarded) else chosen
 
     def _run_mind_mjs(
         self,
@@ -799,14 +863,16 @@ class WorldChatService:
         *,
         space_id: str = "room_default",
     ) -> dict[str, Any] | None:
-        if mind_mjs is None or state_root is None or not text.strip():
+        if mind_mjs is None or state_root is None or (flag != "--idle" and not text.strip()):
             return None
         node = _find_node_exe()
         if not node:
             return None
         sid = str(space_id or "room_default").strip() or "room_default"
-        cmd = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{sid}:{actor_id}", flag, text]
-        if flag == "--his":
+        cmd = [node, str(mind_mjs), "--root", str(state_root), "--chat", f"world:{sid}:{actor_id}", flag]
+        if flag != "--idle":
+            cmd.append(text)
+        if flag in ("--his", "--idle"):
             cmd.append("--json")
         try:
             kwargs: dict[str, Any] = {
@@ -820,7 +886,7 @@ class WorldChatService:
             proc = subprocess.run(cmd, **kwargs)
             if proc.returncode != 0 or not proc.stdout.strip():
                 return None
-            if flag == "--his":
+            if flag in ("--his", "--idle"):
                 return json.loads(proc.stdout)
         except Exception:
             logger.debug("nanami_world: 调用 mind.mjs 跳过", exc_info=True)
@@ -1543,6 +1609,8 @@ class WorldChatService:
         reason: str = "",
         generated_only: bool = False,
         use_mouth: bool | None = None,
+        dialogue_focus: Mapping[str, Any] | None = None,
+        focus_is_current: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """由角色主动发起的同屋双人社交互动：依据当下状态与态度情感指针生成自然来回并双向更新关系。"""
         actors = self._engine.list_actors()
@@ -1626,6 +1694,54 @@ class WorldChatService:
                 if remembered:
                     memory_context += f"【{person['name']}记住的亲历片段（往事）】{'；'.join(remembered)}\n"
         actors_map_now = {a["actor_id"]: a for a in actors if a.get("space_id") == sid}
+        visible_peers_a = self._engine.visible_peer_ids(initiator_id, spatial_filter=True)
+        visible_peers_b = self._engine.visible_peer_ids(target_actor_id, spatial_filter=True)
+        pair_names = _social_name_forms(a_name) | _social_name_forms(b_name)
+        pair_names.update(str(edge.get("call_name") or "") for edge in (edge_ab, edge_ba))
+        realm_spaces = {str(a.get("space_id") or "") for a in actors}
+        local_spaces = {s for s in realm_spaces if s and self._realm_space_id(s) == realm_sid}
+        bystanders = [a for a in actors if a["actor_id"] not in (initiator_id, target_actor_id)
+                      and a.get("space_id") in local_spaces]
+        bystander_names = set().union(*(_social_name_forms(str(a.get("name") or "")) for a in bystanders)) - pair_names
+        other_address = _social_address_pattern(bystander_names)
+        other_summary_name = re.compile("|".join(re.escape(name) for name in sorted(bystander_names))) if bystander_names else None
+
+        def nearby_bystanders(actor: Mapping[str, Any], visible: set[str]) -> list[str]:
+            return [a["name"] for a in bystanders if a["actor_id"] in visible
+                    and self._engine.chebyshev_distance(actor, a) <= 1]
+
+        def line_allowed_for(nearby: list[str], listener: str, speaker: str) -> Callable[[str], bool]:
+            absent_nearby = bystander_names - set().union(*(_social_name_forms(n) for n in nearby))
+            wrong_address = _social_address_pattern(
+                (_social_name_forms(speaker) - _social_name_forms(listener))
+            )
+
+            def allowed(line: str) -> bool:
+                return not (
+                    not line
+                    or (other_address and other_address.search(line))
+                    or (wrong_address and wrong_address.search(line))
+                    or _claims_third_party_proximity(line, absent_nearby)
+                    or (not nearby and _UNNAMED_BYSTANDER.search(line))
+                )
+
+            return allowed
+
+        nearby_a = nearby_bystanders(actor_a, visible_peers_a)
+        nearby_b = nearby_bystanders(actor_b, visible_peers_b)
+        allow_a = line_allowed_for(nearby_a, b_name, a_name)
+        allow_b = line_allowed_for(nearby_b, a_name, b_name)
+
+        def paired_brief(aid: str, listener: str, allowed: Callable[[str], bool]) -> str:
+            read_brief = getattr(self._engine, "get_actor_private_brief", None)
+            raw = read_brief(aid, space_id=sid) if callable(read_brief) else ""
+            opening = _PLANNED_OPENING.search(raw)
+            if not opening or ((opening["listener"] or listener) == listener and allowed(opening["line"].strip())):
+                return raw
+            return " ".join((raw[:opening.start()].strip(), raw[opening.end():].strip())).strip()
+
+        brief_a = paired_brief(initiator_id, b_name, allow_a)
+        brief_b = paired_brief(target_actor_id, a_name, allow_b)
         vis_b = self._engine.visible_entities(target_actor_id)
         l0_a = persona_bridge.build_percept_frame(
             self._engine.data_root,
@@ -1635,6 +1751,7 @@ class WorldChatService:
             actor_a,
             vis_a,
             actors_map=actors_map_now,
+            visible_peer_ids=visible_peers_a,
             custom_persona_dir=custom_pdir,
             peer_known=not first_meet,
             advance_exposure=0.12,
@@ -1648,6 +1765,7 @@ class WorldChatService:
             actor_b,
             vis_b,
             actors_map=actors_map_now,
+            visible_peer_ids=visible_peers_b,
             custom_persona_dir=custom_pdir,
             peer_known=not first_meet,
             advance_exposure=0.12,
@@ -1662,25 +1780,32 @@ class WorldChatService:
             if e["z"] >= 0 and not e["parent_id"].startswith("actor:") and "portal" not in e["traits"]
         }
         action_id_ref = "、".join(f"{e['name']}={e['entity_id']}" for e in nearby_objects[:24]) or "无"
-        room_clean_nouns = "、".join(dict.fromkeys((l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]])) or "空房间"
+        room_clean_nouns = "、".join(dict.fromkeys(
+            (l0_a.get("focused_names") or []) + (l0_b.get("focused_names") or []) + [e["name"] for e in vis_a[:12]]
+        )) or "空房间"
+        actual_object_names = {e["name"] for e in nearby_objects}
         pctx_a = self._persona_full_context_for(
-            a_host, corpus_limit=7,
-            strict_lookup=bool(actor_a.get("is_native_npc")),
+            a_host, corpus_limit=5, strict_lookup=True, own_corpus_only=True,
             isolated_realm_id=realm_sid if is_isolated else "",
         )
         pctx_b = self._persona_full_context_for(
-            b_host, corpus_limit=7,
-            strict_lookup=bool(actor_b.get("is_native_npc")),
+            b_host, corpus_limit=5, strict_lookup=True, own_corpus_only=True,
             isolated_realm_id=realm_sid if is_isolated else "",
         )
-        mind_a = self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--his", reason or "看到同伴想聊几句", space_id=realm_sid) or {}
-        mind_b = self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--his", reason or "同伴走近搭话", space_id=realm_sid) or {}
+        prior_turns = [pair for pair in self._recent_pair_turns(initiator_id, b_name, sid)
+                       if not other_address or not any(other_address.search(line) for line in pair)]
+        last_b = prior_turns[-1][1] if prior_turns else ""
+        # The planner trigger is not something either character heard.
+        mind_a = self._run_mind_mjs(
+            pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--idle", "", space_id=realm_sid,
+        ) or {}
+        mind_b = self._run_mind_mjs(
+            pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--idle", "", space_id=realm_sid,
+        ) or {}
         card_a = str(mind_a.get("card") or "")[:700]
         card_b = str(mind_b.get("card") or "")[:700]
-        setting_a = self._setting_with_brief(actor_a, pctx_a.get("soul_text") or "")[:650]
-        setting_b = self._setting_with_brief(actor_b, pctx_b.get("soul_text") or "")[:650]
-        corpus_a = pctx_a.get("corpus_examples") or ""
-        corpus_b = pctx_b.get("corpus_examples") or ""
+        setting_a = self._setting_with_brief(actor_a, pctx_a.get("soul_text") or "")[:3000]
+        setting_b = self._setting_with_brief(actor_b, pctx_b.get("soul_text") or "")[:3000]
 
         def _rel_desc(subj: str, tgt: str, edge: Mapping[str, Any]) -> str:
             if not edge.get("known"):
@@ -1764,7 +1889,6 @@ class WorldChatService:
         visible_by_actor = [{e["entity_id"]: e for e in view} for view in (vis_a, vis_b)]
         valid_eids = set().union(*visible_by_actor)
         turns: list[dict[str, str]] = []
-        prior_turns = self._recent_pair_turns(initiator_id, b_name, sid)
         accepted_turn_keys = [_social_turn_key(*pair) for pair in prior_turns]
         recent_shared_entity = self._engine.recent_joint_entity(initiator_id, target_actor_id)
         repeated = False
@@ -1781,7 +1905,12 @@ class WorldChatService:
         ) or "（刚刚才开始这次接触）"
         follow_up_a: dict[str, Any] | None = None
         follow_up_b: dict[str, Any] | None = None
-        for turn_idx in range(1, max_turns + 1):
+        retried_invalid_round = False
+        retry_hint = ""
+        while len(turns) < max_turns:
+            if focus_is_current and not focus_is_current():
+                return {"turns": [], "used_llm": False}
+            turn_idx = len(turns) + 1
             is_last = turn_idx >= max_turns
             transcript_lines = []
             for idx_t, t in enumerate(turns, 1):
@@ -1794,6 +1923,13 @@ class WorldChatService:
                 if is_last
                 else f"当前第 {turn_idx} 轮（状态参考上限 {max_turns} 轮）：若双方还有话想聊可继续延展话题（end_chat=false）；若对方或自己困了/饿了/聊尽兴了/不想继续，可由任意一方自然提出结束并设 end_chat=true。"
             )
+            if dialogue_focus:
+                pace_hint = (
+                    f"这是围绕「{dialogue_focus['topic']}」的关键双人谈话，请承接两人真的说过的话。"
+                    "让角色按自己的立场推进，避免反复铺垫。对方可以回应、婉拒或明确暂缓。"
+                    "如果只是这一小段达到轮数预算，停在自然的接话处，下一段会继续。"
+                    "如果双方已经谈妥分工或下一步去向，结束本段，把动身留给下一幕。不要安排无关的座位或出游。"
+                )
             grounding_rule = (
                 "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】与【本镇真实场所】里实际存在的物品和地点，以及此刻时间与双方关系经历；严禁虚构镇外不存在的地名！"
                 "严禁凭空编造未实际发生、也未在【私密背景与立场】或【眼前物件】中提及的楼上/楼下声响与不存在的线索；若双方已有共同面对的具体事件，请紧扣已知事实与各自立场推进，不要反复寒暄天气或复读相同问句。\n"
@@ -1801,10 +1937,13 @@ class WorldChatService:
                 else "1. **严格接地（防幻觉）**：只能谈论【当前世界真实物件】里实际存在的东西、此刻时间与双方关系经历；**严禁虚构房间外不存在的店铺、餐馆、猪扒饭或外出逛街**！想吃东西或玩耍只能针对屋里真实存在的物件；"
                 "严禁凭空编造未实际发生、也未在【私密背景与立场】或【眼前物件】中提及的声响或不存在的线索；若双方已有共同面对的具体事件，请紧扣已知事实与各自立场推进，不要反复寒暄或复读相同问句。\n"
             )
-            brief_a = self._engine.get_actor_private_brief(initiator_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
-            brief_b = self._engine.get_actor_private_brief(target_actor_id, space_id=sid) if hasattr(self._engine, "get_actor_private_brief") else ""
             sys_prompt = (
                 f"你是「{a_name}」与「{b_name}」的双人决策大脑（第 {turn_idx} 轮来回，只输出纯语义意图，口吻由各自嘴巴层负责）。\n"
+                f"锁定听众：a 是{a_name}，每句只对{b_name}说；b 是{b_name}，每句只对{a_name}说。"
+                "话题、私下打算和旧记忆都不能决定谁在场。未参与者可以被提及，不能代说或切换成即时听众。"
+                "提及旁人当前是否在跟前，只能以当事角色眼前的旁人名单为准。"
+                "还没见到的旁人若需另谈，就在本次谈话里向当前听众表达打算，留到以后见面再开口。"
+                "整段有实际进展时再总结，别把别人的建议、单方面打算或设想记成已经发生的互动。\n"
                 "原则：\n"
                 + grounding_rule
                 + "2. **跨次记忆（防车轱辘话）**：参考【两人此前刚说过的话】，禁止重复相同的邀约或开场白；\n"
@@ -1823,14 +1962,15 @@ class WorldChatService:
             user_prompt = (
                 f"{l0_a['prompt_block']}\n"
                 f"{l0_b['prompt_block']}\n"
+                f"【此刻可见且站在各自跟前的旁人（均未参加对话）】{a_name}眼前：{'、'.join(nearby_a) or '无'}；{b_name}眼前：{'、'.join(nearby_b) or '无'}\n"
                 f"【可执行动作物件ID（用于 follow_up 和 shared_entity_id，绝不写进对话）】{action_id_ref}\n"
                 + (f"【本镇真实场所（仅填 speech_act 时用 ID）】{realm_places_ref}\n" if is_town_realm else "")
                 + f"【{a_name}底色】{setting_a}\n"
                 + (f"【{a_name}心理状态卡】{card_a}\n" if card_a else "")
-                + (f"【{a_name}私密背景与立场（仅{a_name}本人知晓，对话中只能影响{a_name}的言行且不可直接读出设定原文）】{brief_a}\n" if brief_a else "")
+                + (f"【{a_name}私密背景与立场（仅本人知道的打算，不能作为当前在场或已发生的证据）】{brief_a}\n" if brief_a else "")
                 + f"【{b_name}底色】{setting_b}\n"
                 + (f"【{b_name}心理状态卡】{card_b}\n" if card_b else "")
-                + (f"【{b_name}私密背景与立场（仅{b_name}本人知晓，对话中只能影响{b_name}的言行且不可直接读出设定原文）】{brief_b}\n" if brief_b else "")
+                + (f"【{b_name}私密背景与立场（仅本人知道的打算，不能作为当前在场或已发生的证据）】{brief_b}\n" if brief_b else "")
                 + f"【指针1】{_rel_desc(a_name, b_name, edge_ab)}\n"
                 + f"【指针2】{_rel_desc(b_name, a_name, edge_ba)}\n"
                 + f"【实时状态】{state_brief}\n"
@@ -1838,6 +1978,7 @@ class WorldChatService:
                 + f"【两人此前刚说过的话（禁止重复）】\n{prior_social_block}\n"
                 + f"【触发原因】{reason or '在屋里看到对方，想过来聊聊'}\n"
                 + f"【对话进程】{pace_hint}\n"
+                + retry_hint
                 + f"【本轮已聊内容】\n{transcript_text}"
             )
             if generated_only and not eff_use_mouth:
@@ -1852,35 +1993,46 @@ class WorldChatService:
                 timeout_sec=12.0,
                 max_tokens=460,
             )
+            if focus_is_current and not focus_is_current():
+                return {"turns": [], "used_llm": False}
             raw_ia = str((parsed or {}).get("intent_a") or (parsed or {}).get("line_a") or "").strip() if isinstance(parsed, dict) else ""
             raw_ib = str((parsed or {}).get("intent_b") or (parsed or {}).get("line_b") or "").strip() if isinstance(parsed, dict) else ""
             if not (raw_ia and raw_ib):
                 break
 
             if not eff_use_mouth:
-                line_a = clip_text(self._sanitize_spoken_line(raw_ia), 72)
-                line_b = clip_text(self._sanitize_spoken_line(raw_ib), 72)
+                line_a = clip_text(self._sanitize_spoken_line(raw_ia), 72) if allow_a(raw_ia) else ""
+                line_b = clip_text(self._sanitize_spoken_line(raw_ib), 72) if allow_b(raw_ib) else ""
                 ea = clip_text(parsed.get("emotion_a"), 12, "平静")
                 eb = clip_text(parsed.get("emotion_b"), 12, "平静")
             else:
                 facts_list = parsed.get("keep_facts") if isinstance(parsed.get("keep_facts"), list) else []
-                facts_str = "、".join(str(x).strip() for x in facts_list if str(x).strip()) or room_clean_nouns
+                facts_str = "、".join(x for x in facts_list if isinstance(x, str) and x in actual_object_names) or room_clean_nouns
                 line_a = self._mouth_speak(
                     a_name, pctx_a, raw_ia, recent_a_lines, listener_name=b_name,
-                    heard_line=turns[-1]["line_b"] if turns else "",
-                    fallback_line=str(parsed.get("line_a") or raw_ia), setting_fallback=setting_a, world_facts=facts_str,
-                    mind_card=card_a,
+                    heard_line=turns[-1]["line_b"] if turns else last_b,
+                    fallback_line=str(parsed.get("line_a") or ("" if generated_only else raw_ia)),
+                    setting_fallback=setting_a, world_facts=facts_str,
+                    mind_card=card_a, nearby_bystanders="、".join(nearby_a), line_allowed=allow_a,
                 )
+                if focus_is_current and not focus_is_current():
+                    return {"turns": [], "used_llm": False}
                 line_b = self._mouth_speak(
                     b_name, pctx_b, raw_ib, recent_b_lines, listener_name=a_name, heard_line=line_a,
-                    fallback_line=str(parsed.get("line_b") or raw_ib), setting_fallback=setting_b, world_facts=facts_str,
-                    mind_card=card_b,
-                )
+                    fallback_line=str(parsed.get("line_b") or ("" if generated_only else raw_ib)),
+                    setting_fallback=setting_b, world_facts=facts_str,
+                    mind_card=card_b, nearby_bystanders="、".join(nearby_b), line_allowed=allow_b,
+                ) if line_a else ""
                 ea = clip_text(parsed.get("emotion_a"), 16, "好奇" if first_meet and turn_idx == 1 else "开心")
                 eb = clip_text(parsed.get("emotion_b"), 16, "平静" if first_meet and turn_idx == 1 else "微笑")
-            if not (line_a and line_b):
+            if not (allow_a(line_a) and allow_b(line_b)):
+                if not retried_invalid_round:
+                    retried_invalid_round = True
+                    retry_hint = "【重写本轮】上一版无法作为当前两人的真实对话。只对当前听众说话，继续他们之间的话题；提及第三方时保持实际在场状态。\n"
+                    continue
                 break
 
+            retry_hint = ""
             turn_key = _social_turn_key(line_a, line_b)
             if _repeated_social_turn(turn_key, accepted_turn_keys):
                 end_reason = "话题告一段落"
@@ -1896,7 +2048,7 @@ class WorldChatService:
                     elif v not in (None, "", [], {}):
                         shared[k] = v
             object_plan = {}
-            if not _resolve_realm_place_id(shared.get("shared_place_id"), realm_places):
+            if not dialogue_focus and not _resolve_realm_place_id(shared.get("shared_place_id"), realm_places):
                 proposed_entity = str(shared.get("shared_entity_id") or "")
                 inferred = _accepted_object_outing([*turns[-1:], next_turn], shared_objects)
                 if proposed_entity in shared_objects and not any(word in line_b for word in _INVITATION_DECLINES):
@@ -1919,8 +2071,11 @@ class WorldChatService:
                 follow_up_a = parsed["follow_up_a"]
             if isinstance(parsed.get("follow_up_b"), dict):
                 follow_up_b = parsed["follow_up_b"]
-            if str(parsed.get("memory_note") or "").strip():
-                mem_note = clip_text(parsed.get("memory_note"), 80, mem_note)
+            proposed_note = clip_text(parsed.get("memory_note"), 80)
+            if proposed_note and other_summary_name and other_summary_name.search(proposed_note):
+                mem_note = clip_text(f"{a_name}说「{line_a}」；{b_name}说「{line_b}」", 180)
+            elif proposed_note:
+                mem_note = proposed_note
             if object_plan or bool(parsed.get("end_chat")) or is_last:
                 ended_by = str(parsed.get("ended_by") or ("a" if turn_idx % 2 == 1 else "b")).strip().lower()
                 if ended_by not in ("a", "b"):
@@ -1930,6 +2085,10 @@ class WorldChatService:
 
         if not turns and repeated:
             return {"turns": [], "turns_count": 0, "used_llm": False, "duplicate": True, "speech_act": None}
+        if not turns and retried_invalid_round:
+            return {"turns": [], "used_llm": False, "invalid_dialogue": True}
+        if focus_is_current and not focus_is_current():
+            return {"turns": [], "used_llm": False}
         if generated_only:
             current = [self._engine.live_actor_frame(aid) for aid in (initiator_id, target_actor_id)]
             now_a, now_b = current
@@ -2030,22 +2189,26 @@ class WorldChatService:
             isolated_persona=is_isolated,
         )
         if used_llm and turns:
-            spoken_a = " ".join(str(t.get("line_a") or "").strip() for t in turns if t.get("line_a"))
-            spoken_b = " ".join(str(t.get("line_b") or "").strip() for t in turns if t.get("line_b"))
-            if spoken_a:
-                self._run_mind_mjs(pctx_a.get("mind_mjs"), pctx_a.get("state_root"), initiator_id, "--her", spoken_a, space_id=realm_sid)
-            if spoken_b:
-                self._run_mind_mjs(pctx_b.get("mind_mjs"), pctx_b.get("state_root"), target_actor_id, "--her", spoken_b, space_id=realm_sid)
+            for aid, pctx, own, peer in (
+                (initiator_id, pctx_a, "line_a", "line_b"),
+                (target_actor_id, pctx_b, "line_b", "line_a"),
+            ):
+                self._run_mind_mjs(
+                    pctx.get("mind_mjs"), pctx.get("state_root"), aid, "--his", turns[-1][peer], space_id=realm_sid,
+                )
+                self._run_mind_mjs(
+                    pctx.get("mind_mjs"), pctx.get("state_root"), aid, "--her",
+                    " ".join(t[own] for t in turns), space_id=realm_sid,
+                )
 
-        # 长短对话同步轻微反馈到双方精力与心情
+        # 对话反馈影响心情，身体消耗由世界时间累计。
         mood_delta = 0.02 * len(turns) if stance_ok else -0.01
         for aid_x, act_x in ((initiator_id, actor_a), (target_actor_id, actor_b)):
             vx = act_x.get("vitals") or {}
-            new_e = max(0.05, min(1.0, float(vx.get("energy", 0.72)) - 0.015 * len(turns)))
             new_m = max(-1.0, min(1.0, float(vx.get("mood_v", 0.10)) + mood_delta))
             try:
                 self._engine.set_actor_world_mood(
-                    aid_x, space_id=sid, vitals_patch={"energy": round(new_e, 3), "mood_v": round(new_m, 3)},
+                    aid_x, space_id=sid, vitals_patch={"mood_v": round(new_m, 3)},
                     record_event=False,
                 )
             except Exception:
@@ -2054,12 +2217,12 @@ class WorldChatService:
         expr_a = self._engine.refresh_actor_expression(initiator_id, emotion_hint=emo_a, force_auto=True) or {}
         expr_b = self._engine.refresh_actor_expression(target_actor_id, emotion_hint=emo_b, force_auto=True) or {}
 
-        escort_goals = _accepted_escort(
+        escort_goals = {} if dialogue_focus else _accepted_escort(
             turns, realm_places, realm_buildings, at_night=light_meta.get("period") == "night",
         )
         if escort_goals:
             collected_sa = {**(collected_sa or {}), **escort_goals}
-        if (realm_places and not (collected_sa or {}).get("shared_entity_id")
+        if (not dialogue_focus and realm_places and not (collected_sa or {}).get("shared_entity_id")
                 and not _resolve_realm_place_id((collected_sa or {}).get("shared_place_id"), realm_places)):
             pid, exchanged_lines = _accepted_outing(turns[-2:], realm_places)
             if pid:
@@ -2067,7 +2230,7 @@ class WorldChatService:
                 food_words = ("热饮", "喝杯", "喝茶", "喝咖啡", "吃点东西", "吃东西", "拉面", "蛋糕", "点心", "甜品")
                 collected_sa.setdefault("shared_drive", "food" if any(word in exchanged_lines for word in food_words) else "social")
 
-        if generated_only:
+        if generated_only and not dialogue_focus:
             for side, follow_up, view, person in zip(
                 ("a", "b"), (follow_up_a, follow_up_b), visible_by_actor, (actor_a, actor_b),
             ):
@@ -2084,6 +2247,9 @@ class WorldChatService:
                         "kind": "entity", "target": eid, "drive": drive, "action": action,
                     }}
 
+        if dialogue_focus:
+            collected_sa = {key: value for key, value in (collected_sa or {}).items()
+                            if key in ("tone", "shared_beliefs")}
         speech_act_pair = _build_speech_act_pair(
             collected_sa, realm_places=realm_places, valid_eids=valid_eids, summary=mem_note, shared_objects=shared_objects,
         )
@@ -2171,24 +2337,28 @@ class WorldChatService:
                 "line_b": line_b,
             },
         )
-        self._engine.record_custom_event(
-            "dialogue_exchange",
-            actor_id=initiator_id,
-            space_id=actor_a["space_id"],
-            payload={
-                "mode": "npc_social",
-                "speaker_id": initiator_id,
-                "speaker_name": a_name,
-                "partner_id": target_actor_id,
-                "partner_name": b_name,
-                "turns_count": len(turns),
-                "transcript": [
-                    {"a": clip_text(t["line_a"], 160), "b": clip_text(t["line_b"], 160)}
-                    for t in turns[:4]
-                ],
-                "summary": clip_text(mem_note, 180),
-            },
-        )
+        dialogue_payload = {
+            "mode": "npc_social",
+            "speaker_id": initiator_id,
+            "speaker_name": a_name,
+            "partner_id": target_actor_id,
+            "partner_name": b_name,
+            "turns_count": len(turns),
+            "transcript": [
+                {"a": clip_text(t["line_a"], 160), "b": clip_text(t["line_b"], 160)}
+                for t in turns
+            ],
+            "summary": clip_text(mem_note, 180),
+        }
+        deferred_event = {}
+        if dialogue_focus and generated_only:
+            dialogue_payload["dialogue_scene_id"] = dialogue_focus["scene_id"]
+            dialogue_payload["dialogue_revision"] = dialogue_focus["revision"]
+            deferred_event = {"dialogue_event": {"space_id": sid, "payload": dialogue_payload}}
+        else:
+            self._engine.record_custom_event(
+                "dialogue_exchange", actor_id=initiator_id, space_id=sid, payload=dialogue_payload,
+            )
 
         return {
             "initiator_id": initiator_id,
@@ -2207,4 +2377,5 @@ class WorldChatService:
             "relations": rel_update,
             "speech_act": speech_act_pair,
             "used_llm": used_llm,
+            **deferred_event,
         }

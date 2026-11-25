@@ -16,6 +16,7 @@ from _shinsekai import PROJECT, WORLD_CODE
 from plugins.nanami_world import PLUGIN_ID, PLUGIN_VERSION, world_page
 from plugins.nanami_world.engine import WorldEngine
 from plugins.nanami_world.heartbeat import WorldHeartbeat
+from plugins.nanami_world.live_simulation import LiveActor
 from plugins.nanami_world.settings import WorldSettings
 from plugins.nanami_world.world_chat import WorldChatService
 from sdk.register import PluginCapabilityRegistry
@@ -166,6 +167,172 @@ class LiveSimulationTests(unittest.TestCase):
             self.assertNotIn("chat_history", unchanged)
             self.assertNotIn("changes", unchanged)
 
+    def test_chat_presence_requires_a_nearby_player_in_roam_and_rejects_observer(self) -> None:
+        registry = PluginCapabilityRegistry()
+        registry.set_settings_ui_plugin_context(PLUGIN_ID, PLUGIN_VERSION)
+        world_page.register_pages(
+            registry, code_dir=WORLD_CODE, engine=self.engine, heartbeat=self.heartbeat, world_chat=self.chat,
+            settings_store=SimpleNamespace(get=lambda: self.settings),
+        )
+        canvas = next(page for page in registry.frontend_config_contributions if page.page_id == "world_canvas")
+        presence = next(action.run for action in canvas.actions if action.id == "user_chat_presence")
+        room = self.engine.create_space(name="对话房间", width=14, height=10, wall_rows=0)["space_id"]
+        aid = self.engine.import_actor(name="七海千秋", space_id=room, x=4, y=4)["actor_id"]
+        actor = LiveActor("viewer", self.engine.live_actor_frame(aid), float("inf"), 0)
+        self.live._actors[aid] = actor
+
+        self.engine.set_external_overlay(room, {"title": "观剧", "view_only": True})
+        presence({"actor_id": aid, "active": True})
+        self.assertEqual(actor.user_chat_until, 0)
+        self.engine.set_external_overlay(room, None)
+        pid = self.engine.ensure_player_avatar(space_id=room)["actor_id"]
+        request = {"actor_id": aid, "player_id": pid, "roaming": True}
+        self.engine.place_actor(pid, room, 10, 4)
+        presence(request)
+        self.assertEqual(actor.user_chat_until, 0)
+        self.engine.place_actor(pid, room, 5, 4)
+        presence({**request, "roaming": False})
+        self.assertEqual(actor.user_chat_until, 0)
+        presence(request)
+        self.assertGreater(actor.user_chat_until, time.monotonic())
+        presence({"actor_id": aid, "active": False})
+        self.assertEqual(actor.user_chat_until, 0)
+        self.engine.set_external_overlay(room, {"title": "观剧", "view_only": True})
+        presence(request)
+        self.assertEqual(actor.user_chat_until, 0)
+
+    def test_story_social_waits_for_focus_release_and_ignores_small_talk_cooldown(self) -> None:
+        room = self.engine.create_space(name="剧情讨论", width=12, height=10, wall_rows=0)["space_id"]
+        actor, peer, third = [self.engine.import_actor(name=name, space_id=room, x=x, y=y)["actor_id"]
+                              for name, x, y in (("甲", 4, 4), ("乙", 5, 4), ("丙", 5, 5))]
+        bench = self.engine.place_from_blueprint("default_cat_cushion", room, 7, 5)
+        self.engine.record_social_feedback(actor, room, "约好去坐坐", peer_id=third, speech_act={
+            "shared_entity_id": bench["entity_id"], "shared_drive": "social",
+        })
+        self.assertTrue(self.engine.cognitive_scene(actor)["joint_visit"])
+        self.engine.propose_actor_commitment(actor, {"kind": "social", "target": peer, "reason": "追问草稿"}, preempt=True)
+        self.assertFalse(self.engine.cognitive_scene(actor)["joint_visit"])
+        self.assertFalse(self.engine.cognitive_scene(third, include_rooms=True)["joint_visit"])
+        for aid in (actor, peer, third):
+            self.live._actors[aid] = LiveActor("viewer", self.engine.live_actor_frame(aid), float("inf"), 0, speed=1)
+        self.live.set_dialogue_focus(room, [{"scene_id": "other", "actor_ids": [peer, third], "topic": "另一段对话", "revision": 0}])
+        self.live._social_until[tuple(sorted((actor, peer)))] = time.monotonic() + 40.0
+        with patch.object(self.live, "_request"), patch.object(self.live._social, "submit") as dispatch:
+            self.live._advance(actor, self.live._actors[actor], self.settings)
+            dispatch.assert_not_called()
+            intention = self.engine.cognitive_scene(actor)["actor"]["autonomy"]["cognition"]["active_intention"]
+            self.assertEqual(intention["source"], "persona_choice")
+            self.assertEqual(intention["target"], peer)
+            self.live.set_dialogue_focus(room, [])
+            self.assertFalse(self.live._meet(actor, peer, "随便聊聊"))
+            self.live._advance(actor, self.live._actors[actor], self.settings)
+            dispatch.assert_called_once()
+            self.assertEqual(dispatch.call_args.args[2:5], (actor, peer, "追问草稿"))
+
+    def test_refused_ambient_social_blocks_cross_space_seek_and_immediate_exit(self) -> None:
+        town = self.engine.create_default_town()["town_space_id"]
+        self.engine.set_realm_initial_hour(town, 12.0)
+        library = f"{town}__library"
+        actor = self.engine.import_actor(name="甲", space_id=library, x=5, y=4)["actor_id"]
+        peer = self.engine.import_actor(name="乙", space_id=library, x=6, y=4)["actor_id"]
+        door = next(e for e in self.engine.snapshot_for_ui(town)["entities"]
+                    if e["traits"].get("portal", {}).get("target_space_id") == library)
+        self.engine.update_actor_autonomy(actor, {"cognition": {
+            "last_social_at": -60.0,
+            "active_intention": {
+                "kind": "social", "key": f"social:{library}:{peer}:", "target": peer,
+                "space": library, "x": 6, "y": 4, "drive": "social", "action": "",
+                "phase": "approach", "goal": "和乙聊一聊",
+            },
+            "portals": {f"{town}:{library}": {
+                "space": town, "target": library, "entity": door["entity_id"], "name": "湖畔图书馆",
+                "x": door["x"], "y": door["y"], "source": "direct", "confidence": 1.0, "samples": [0.0],
+            }},
+        }})
+        cognition = self.live.cognition
+        candidates = cognition._candidates
+        observed = []
+
+        def collect(*args, **kwargs):
+            rows = candidates(*args, **kwargs)
+            observed.append(rows)
+            return rows
+
+        def step():
+            scene = self.engine.cognitive_scene(actor, include_rooms=True)
+            scene["engage"] = lambda *args: False
+            cognition.step(scene, self.settings, use_llm=False, talk=lambda *_: [])
+
+        with patch.object(cognition, "_candidates", side_effect=collect):
+            step()
+            self.assertFalse(any(row["kind"] == "exit" for row in observed[-1]))
+            state = self.engine.cognitive_scene(actor)["actor"]["autonomy"]["cognition"]
+            self.assertIn(f"peer:{peer}", state["blocked"])
+            self.engine.place_actor(actor, town, 19, 15)
+            step()
+            self.assertFalse(any(row["kind"] == "seek_peer" and row["target"] == peer for row in observed[-1]))
+
+            state = self.engine.cognitive_scene(actor)["actor"]["autonomy"]["cognition"]
+            state["blocked"].pop(f"peer:{peer}")
+            state["active_intention"] = None
+            self.engine.update_actor_autonomy(actor, {"cognition": state})
+            step()
+            self.assertTrue(any(row["kind"] == "seek_peer" and row["target"] == peer for row in observed[-1]))
+
+    def test_npc_playback_keeps_both_speakers_busy_until_the_last_bubble(self) -> None:
+        room = self.engine.create_space(name="三人对白", width=12, height=10, wall_rows=0)["space_id"]
+        a, b, c = (self.engine.import_actor(name=name, space_id=room, x=x, y=y)["actor_id"]
+                   for name, x, y in (("甲", 5, 4), ("乙", 6, 4), ("丙", 5, 5)))
+        for aid in (a, b, c):
+            self.live._actors[aid] = LiveActor("viewer", self.engine.live_actor_frame(aid), float("inf"), 0)
+        self.live._chatting.update((a, b))
+        with patch.object(self.chat, "conduct_actor_social_exchange", return_value={
+            "turns": [{"line_a": "我先看看这边。", "line_b": "我再去确认一下。"}],
+        }):
+            self.live._speak(self.chat, a, b, "核对情况")
+        end = self.live._actors[b].speech_until
+        self.assertLess(self.live._actors[a].speech_queue[-1][2], end)
+        with patch.object(self.live._social, "submit"), patch(
+            "plugins.nanami_world.live_simulation.time.monotonic", return_value=end - 0.1,
+        ):
+            self.assertFalse(self.live._meet(c, a, "跟甲打招呼"))
+            self.assertFalse(self.live._meet(c, b, "跟乙打招呼"))
+        with patch.object(self.live._social, "submit"), patch(
+            "plugins.nanami_world.live_simulation.time.monotonic", return_value=end,
+        ):
+            self.assertFalse(self.live._meet(a, b, "马上再聊"))
+            self.assertTrue(self.live._meet(c, a, "跟甲打招呼"))
+
+    def test_talking_and_persona_reflection_do_not_drain_world_physical_energy(self) -> None:
+        room = self.engine.create_space(name="长谈测试", width=12, height=10, wall_rows=0)["space_id"]
+        first = self.engine.import_actor(name="哈贝特洛特", space_id=room, x=5, y=4)["actor_id"]
+        second = self.engine.import_actor(name="丰川祥子", space_id=room, x=6, y=4)["actor_id"]
+        topics = iter("苹果 雨伞 山脉 钢琴 电灯 蓝莓 告别 宫殿 沙发 灯塔 桃花 菜单 车站 路牌 阳光 笔记 木桥 小河 绿茶 琴谱 门票 风筝 星星 沙滩 钟楼 橱柜".split())
+
+        def dialogue(*args, **kwargs):
+            topic = next(topics)
+            return {"intent_a": f"聊聊{topic}？", "intent_b": f"{topic}挺有意思。"}
+
+        original = self.engine.live_actor_frame(first)["vitals"]
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", side_effect=dialogue), \
+                patch.object(self.chat, "_mouth_speak", side_effect=lambda name, ctx, intent, *a, **kw: intent), \
+                patch.object(self.chat, "_run_mind_mjs", return_value=None):
+            for _ in range(13):
+                exchange = self.chat.conduct_actor_social_exchange(first, second, generated_only=True, use_mouth=True)
+                self.assertEqual(exchange["turns_count"], 2)
+        self.assertEqual(self.engine.live_actor_frame(first)["vitals"]["energy"], original["energy"])
+        self.assertGreater(self.engine.live_actor_frame(first)["vitals"]["mood_v"], original["mood_v"])
+
+        with patch("plugins.nanami_world.live_simulation.persona_bridge.emit_world_event_to_persona",
+                   return_value={"ok": True}) as emit, patch(
+            "plugins.nanami_world.live_simulation.persona_bridge.read_persona_state",
+            side_effect=[{"world_state": True, "energy": 0.7}, {"world_state": True, "energy": 0.55}],
+        ):
+            self.live._record_thought(first, {"realm": room, "host": "哈贝特洛特", "experience": "聊天"},
+                                      {"thought": "谈得差不多了。", "agenda": "暂歇"})
+            emit.assert_called_once()
+        self.assertEqual(self.engine.live_actor_frame(first)["vitals"]["energy"], original["energy"])
+
     def test_observer_clock_keeps_running_through_a_dialogue_and_actors_resume(self) -> None:
         room = self.engine.create_space(name="观剧场景", width=12, height=10, wall_rows=0)["space_id"]
         first = self.engine.import_actor(name="甲", space_id=room, x=5, y=4)["actor_id"]
@@ -212,7 +379,7 @@ class LiveSimulationTests(unittest.TestCase):
             if '"intent_a"' in system:
                 return {"intent_a": "询问对方有没有看到桌上的笔记本", "intent_b": "回应说刚才似乎瞥见过", "end_chat": True}
             if '"candidates"' in system:
-                if "七海千秋" in system:
+                if "「七海千秋」的发声" in system:
                     return {"candidates": ["顺着她的话承认自己在巡夜", "那个，日向君刚才看见桌上的笔记本了吗？"]}
                 return {"candidates": ["顺着她的话回忆刚才路过桌角", "嗯，好像就在那边的桌角上。"]}
             return {}
@@ -221,7 +388,7 @@ class LiveSimulationTests(unittest.TestCase):
 
         def fake_mind(mind_mjs, state_root, actor_id, flag, text, *, space_id="room_default"):
             mind_calls.append((actor_id, flag, text))
-            if flag == "--his":
+            if flag in ("--his", "--idle"):
                 return {"card": f"{actor_id} 心境微紧"}
             return None
 
@@ -235,6 +402,9 @@ class LiveSimulationTests(unittest.TestCase):
         self.assertEqual(mouth_spy.call_args_list[1].kwargs.get("mind_card"), f"{b} 心境微紧")
         self.assertEqual(res["turns"][0]["line_a"], "那个，日向君刚才看见桌上的笔记本了吗？")
         self.assertEqual(res["turns"][0]["line_b"], "嗯，好像就在那边的桌角上。")
+        self.assertEqual(mind_calls[:2], [(a, "--idle", ""), (b, "--idle", "")])
+        his_calls = [(aid, text) for aid, flag, text in mind_calls if flag == "--his"]
+        self.assertEqual(his_calls, [(a, res["turns"][0]["line_b"]), (b, res["turns"][0]["line_a"])])
         her_calls = [(aid, text) for aid, flag, text in mind_calls if flag == "--her"]
         self.assertEqual(len(her_calls), 2)
 
@@ -245,6 +415,110 @@ class LiveSimulationTests(unittest.TestCase):
         hist_texts = [m["text"] for m in self.chat.get_history(a, space_id=room)]
         self.assertTrue(any("检查了「笔记本」" in t for t in hist_texts))
         self.assertFalse(any("这段心声绝不应该出现" in t for t in hist_texts))
+
+    def test_story_dialogue_waits_for_peer_and_then_preempts_ambient_routes(self) -> None:
+        room = self.engine.create_space(name="中庭", width=18, height=10, wall_rows=0)["space_id"]
+        a = self.engine.import_actor(name="七海千秋", space_id=room, x=3, y=4)["actor_id"]
+        b = self.engine.import_actor(name="日向创", space_id=room, x=12, y=4)["actor_id"]
+        now = time.monotonic()
+        first = LiveActor("test", self.engine.live_actor_frame(a), float("inf"), now, speed=4, route=[(2, 4)])
+        second = LiveActor("test", self.engine.live_actor_frame(b), float("inf"), now, speed=4, route=[(13, 4)])
+        self.live._actors.update({a: first, b: second})
+        self.live.set_dialogue_focus(room, [{
+            "scene_id": "paper_note",
+            "actor_ids": [a, b],
+            "topic": "谈谈纸条上的话",
+            "revision": 0,
+        }])
+        second.user_chat_until = now + 3
+        with patch("plugins.nanami_world.live_simulation.time.monotonic", return_value=now):
+            self.live._advance(a, first, self.settings)
+        self.assertEqual(first.phase, "waiting")
+        self.assertEqual(first.route, [])
+        self.assertEqual(self.engine.live_actor_frame(a)["x"], 3)
+
+        now += 4
+        first.engagement = second.engagement = ("ambient", "interact")
+        with patch.object(self.live._social, "submit") as dispatch:
+            for _ in range(40):
+                now += 0.25
+                with patch("plugins.nanami_world.live_simulation.time.monotonic", return_value=now):
+                    for aid, actor in ((a, first), (b, second)):
+                        if actor.next_at <= now:
+                            self.live._advance(aid, actor, self.settings)
+                if dispatch.called:
+                    break
+            self.assertTrue(dispatch.called, "两名当事人应会合并生成关键对白")
+            self.assertEqual(dispatch.call_args.args[2:4], (a, b))
+            self.assertEqual(dispatch.call_args.kwargs["focus"].scene_id, "paper_note")
+        self.assertEqual((second.frame["x"], second.frame["y"]), (12, 4))
+
+    def test_npc_exchange_retries_false_arrival_and_commits_only_pair_dialogue(self) -> None:
+        room = self.engine.create_space(name="庭院", width=16, height=12, wall_rows=0)["space_id"]
+        elsewhere = self.engine.create_space(name="休息室", width=12, height=10, wall_rows=0, parent_space_id=room)["space_id"]
+        habetrot = self.engine.import_actor(name="哈贝特洛特", space_id=room, x=4, y=4)["actor_id"]
+        hinata = self.engine.import_actor(name="日向创", space_id=room, x=5, y=4)["actor_id"]
+        nanami = self.engine.import_actor(name="七海千秋", space_id=elsewhere, x=4, y=4)["actor_id"]
+        self.engine.import_actor(name="远处的人", space_id=elsewhere, x=4, y=4)
+        self.engine.set_actor_private_brief(
+            hinata, "当前决定：之后在掌机上打两局。\n见面想表达：七海！正好，要不要来一局？\n亲见实证：看过草稿。"
+        )
+        self.engine.set_actor_private_brief(habetrot, "见面想表达（对「七海千秋」）：来给咱讲讲这一关。")
+
+        planner_calls = []
+
+        def fake_llm(system, user, **kwargs):
+            if '"intent_a"' in system:
+                planner_calls.append(user)
+                return {
+                    "intent_a": "商量日向创之后怎么开口",
+                    "intent_b": "回应刚才的话",
+                    "memory_note": "日向创直接邀请七海玩游戏。",
+                    "end_chat": True,
+                }
+            if "发声嘴巴" in system and "「哈贝特洛特」的发声" in system:
+                options = ["七海都站到跟前了，你还磨蹭啥？", "趁人就在跟前赶紧开口啊"]
+                if len(planner_calls) > 1:
+                    options += ["要是碰到七海，你先问她想玩什么。"]
+                return {"candidates": options}
+            return {"candidates": [
+                "七海，来一局吧。", "（对七海说）有空吗，陪我打一局？", "我先去找她，见面再问。",
+            ]}
+
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", side_effect=fake_llm):
+            result = self.chat.conduct_actor_social_exchange(habetrot, hinata, generated_only=True, use_mouth=True)
+
+        self.assertEqual(len(planner_calls), 2)
+        self.assertIn("【重写本轮】", planner_calls[1])
+        self.assertIn("日向创眼前：无", planner_calls[0])
+        self.assertNotIn("远处的人", planner_calls[0])
+        self.assertNotIn("七海！正好", planner_calls[0])
+        self.assertNotIn("来给咱讲讲这一关", planner_calls[0])
+        self.assertIn("亲见实证：看过草稿。", planner_calls[0])
+        self.assertEqual(result["turns"][0]["line_a"], "要是碰到七海，你先问她想玩什么。")
+        self.assertEqual(result["turns"][0]["line_b"], "我先去找她，见面再问。")
+        events = [e["payload"] for e in self.engine.read_recent_events() if e["kind"] == "dialogue_exchange"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual((events[0]["speaker_id"], events[0]["partner_id"]), (habetrot, hinata))
+        self.assertNotIn("直接邀请七海", events[0]["summary"])
+        self.assertEqual(self.chat.get_history(nanami, space_id=elsewhere), [])
+        self.assertNotIn("站到跟前了", str(self.chat.get_history(hinata, space_id=room)))
+
+    def test_visible_bystander_cannot_be_silently_added_as_listener(self) -> None:
+        room = self.engine.create_space(name="庭院", width=10, height=10, wall_rows=0)["space_id"]
+        a = self.engine.import_actor(name="哈贝特洛特", space_id=room, x=4, y=4)["actor_id"]
+        b = self.engine.import_actor(name="日向创", space_id=room, x=5, y=4)["actor_id"]
+        self.engine.import_actor(name="七海千秋", space_id=room, x=4, y=5)
+        bad = {"line_a": "七海都站到跟前了。", "line_b": "七海，来一局吧。", "end_chat": True}
+        good = {"line_a": "七海都站到跟前了。", "line_b": "我待会儿就去找她。", "end_chat": True}
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", side_effect=[bad, bad]):
+            invalid = self.chat.conduct_actor_social_exchange(a, b, generated_only=True)
+        self.assertEqual(invalid["turns"], [])
+        self.assertTrue(invalid["invalid_dialogue"])
+        self.assertEqual(self.chat.get_history(a, space_id=room), [])
+        with patch("plugins.nanami_world.world_chat.text_compiler._ask_llm_json", return_value=good):
+            valid = self.chat.conduct_actor_social_exchange(a, b, generated_only=True)
+        self.assertEqual(valid["turns"][0]["line_a"], good["line_a"])
 
     def test_night_skip_at_2330_curfew_wakes_and_restores_residents(self) -> None:
         room = self.engine.create_space(name="夜晚宿舍", width=12, height=10, wall_rows=0)["space_id"]

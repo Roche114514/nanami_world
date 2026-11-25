@@ -6,6 +6,12 @@
 
 ---
 
+## 主分支更新
+
+- 观剧和电影镜头切换时，NPC 继续自主行动。聊天暂停需要附近的真实玩家发起漫游交谈。
+- `WorldBridge` 新增 `set_dialogue_focus`，对接 [故事引擎](https://github.com/Roche114514/nanami_story) 的关键对话。对白播放后才向上层交付原话，上一幕结束时解除聚焦。
+- 故事抉择优先于日常闲聊和结伴行动。搭话被拒时同步暂停跨空间寻人，进门后短暂驻留，减少闲逛和反复穿门。
+
 ## v0.5.5 更新
 
 - **观剧视角升级与安全切房**：观剧模式支持**自由视角 / 观战视角（`follow`） / 电影视角（`cinema`，自动跟随当前对话或关键行动角色并跨建筑切换）**；修复观剧模式切换房间时误将房间内角色传出门外的问题。
@@ -84,6 +90,7 @@
 
 ```text
 python -B -m unittest discover -s github/nanami_world/tests -p "test_nanami_*.py" -v
+node --test github/nanami_world/tests/*.cjs
 python -B github/nanami_world/tests/experiment_nanami_town.py
 ```
 

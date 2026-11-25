@@ -134,10 +134,10 @@ class WorldHeartbeat:
             ts_key = f"{sid}::{aid}"
             prev_ts = self._last_persona_ts.get(ts_key, -1.0)
             patch = {"preferred_domains": synced["preferred_domains"]}
-            if remote_ts > 0 and cur_vit.get("source") == "builtin":
-                patch.update({field: synced[field] for field in ("energy", "sleep_pressure", "mood_v", "agenda", "disengaged")})
+            first_sync = remote_ts > 0 and cur_vit.get("source") == "builtin"
+            if first_sync:
                 patch["source"] = "nanami_persona"
-            if synced["world_state"] and remote_ts > prev_ts:
+            if first_sync or (synced["world_state"] and remote_ts > prev_ts):
                 patch.update({field: synced[field] for field in ("mood_v", "agenda", "disengaged")})
             if any(cur_vit.get(key) != value for key, value in patch.items()):
                 self._engine.set_actor_world_mood(aid, space_id=sid, vitals_patch=patch, record_event=False)
@@ -242,7 +242,15 @@ class WorldHeartbeat:
             vis = self._engine.visible_entities(aid)
 
             plan: dict[str, Any] | None = None
-            if eff_llm:
+            vitals = act["vitals"]
+            hour = float(sp_snap["lighting"].get("hour_float", 12))
+            awake_rest_limit = schema.AWAKE_REST_RECOVERY_TARGET if aut.get("awake_rest") else 0.25
+            if (6.5 <= hour < 21.0 and vitals["sleep_pressure"] < 0.72 and vitals["energy"] < awake_rest_limit):
+                if act["posture"] != "resting":
+                    plan = {"goal": "停下来歇一会儿", "drive": "rest", "awake_rest": True, "emotion": "困倦"}
+                else:
+                    plan = self._decide_with_rules(act, vis, sp_snap, settings, force_autonomy=force_autonomy)
+            elif eff_llm:
                 plan = self._decide_with_llm(act, vis, sp_snap)
             if plan is None:
                 plan = self._decide_with_rules(act, vis, sp_snap, settings, force_autonomy=force_autonomy)
@@ -265,6 +273,7 @@ class WorldHeartbeat:
                 {
                     "current_goal": plan.get("goal") or aut["current_goal"],
                     "current_drive": plan.get("drive") or aut["current_drive"],
+                    "awake_rest": bool(plan.get("awake_rest")),
                     "last_thought": plan.get("thought") or "",
                     "last_action_summary": summary,
                     "last_step_ts": round(time.time(), 3),
@@ -390,15 +399,17 @@ class WorldHeartbeat:
                 peer = next((a for a in actors_now if a["actor_id"] == tgt_aid), None)
                 if not me or me.get("is_player") or not peer or me["space_id"] != peer["space_id"]:
                     continue
+                active_int = ((me.get("autonomy") or {}).get("cognition") or {}).get("active_intention") or {}
+                urgent_player = peer.get("is_player") and active_int.get("kind") == "seek_player"
+                if not urgent_player and self.live.blocks_ambient_social(actor_id, tgt_aid):
+                    continue
                 if peer.get("is_player"):
                     chat_svc = self._chat_service_provider() if self._chat_service_provider else None
                     if chat_svc is not None:
-                        active_int = ((me.get("autonomy") or {}).get("cognition") or {}).get("active_intention") or {}
-                        is_urgent = active_int.get("kind") == "seek_player"
                         greeting = chat_svc.greet_player(
                             actor_id, tgt_aid, reason=reason,
                             use_llm=self._settings_provider().heartbeat_use_llm,
-                            urgent=is_urgent,
+                            urgent=bool(urgent_player),
                         )
                         if greeting:
                             self.live.hold_for_user_chat(actor_id, greeting["wait_seconds"])
@@ -809,7 +820,7 @@ class WorldHeartbeat:
         is_daytime = (7.0 <= bio_hour < 22.0) if c_str >= 0.35 else True
         need_sleep = (
             (sleep_p >= 0.45 or energy <= 0.60) if is_late_night
-            else ((sleep_p >= 0.85 or energy <= 0.22) if is_daytime else (sleep_p >= 0.62 or energy <= 0.38))
+            else (sleep_p >= (0.85 if is_daytime else 0.62))
         )
         if need_sleep and actor.get("posture") != "resting":
             free_beds = [
@@ -842,7 +853,7 @@ class WorldHeartbeat:
         if actor.get("posture") == "resting":
             wake_ready = (
                 (force_autonomy and energy >= 0.62 and sleep_p <= 0.48)
-                or (not is_late_night and ((energy >= 0.76 and sleep_p <= 0.38) or (hour >= 8 and energy >= 0.60 and sleep_p <= 0.48)))
+                or (not is_late_night and sleep_p <= 0.48 and (hour >= 6.5 or energy >= 0.76))
             )
             if wake_ready and actor.get("resting_on_id"):
                 rid = actor["resting_on_id"]

@@ -509,8 +509,6 @@ def register_pages(
                 actor["actor_id"],
                 space_id=actor["space_id"],
                 vitals_patch={
-                    "energy": synced["energy"],
-                    "sleep_pressure": synced["sleep_pressure"],
                     "mood_v": synced["mood_v"],
                     "agenda": synced["agenda"],
                     "disengaged": synced["disengaged"],
@@ -1132,7 +1130,7 @@ def register_pages(
         if not aid:
             raise ValueError("当前房间内还没有角色，请先导入角色。")
         actor = engine.live_actor_frame(aid)
-        overlay = engine.get_external_overlay(req_sid or (actor or {}).get("space_id", ""))
+        overlay = engine.get_external_overlay((actor or {}).get("space_id") or req_sid)
         if overlay and overlay.get("view_only"):
             raise ValueError("当前舞台仅供观剧或复盘。")
         if world_chat is None:
@@ -1140,7 +1138,8 @@ def register_pages(
         text = str(v.get("text") or "").strip()
         if not text:
             raise ValueError("请输入想对她说的话。")
-        heartbeat.live.hold_for_user_chat(aid, 20.0)
+        if v.get("roaming") is True and _face_to_face_player(aid, str(v.get("player_id") or "")):
+            heartbeat.live.hold_for_user_chat(aid, 20.0)
         res = world_chat.chat(aid, text, space_id=req_sid)
         if res.get("action_queued") or engine.pending_preempt_seq(aid) > 0:
             cog_now = (next((a for a in engine.list_actors() if a["actor_id"] == aid), None) or {}).get("autonomy", {}).get("cognition") or {}
@@ -1392,8 +1391,8 @@ def register_pages(
             target_kind=str(v.get("target_kind") or ""),
             target_id=str(v.get("target_id") or ""),
         )
-        if res.get("kind") == "talk_actor" and res.get("target_actor_id"):
-            heartbeat.live.hold_for_user_chat(str(res["target_actor_id"]), 22.0)
+        if res.get("kind") == "talk_actor" and _face_to_face_player(res["target_actor_id"], pid):
+            heartbeat.live.hold_for_user_chat(res["target_actor_id"], 22.0)
         sid = str(res["space_id"])
         if res.get("kind") == "entered_space":
             return _snap_ok({"interaction": res}, space_id=sid)
@@ -1441,20 +1440,37 @@ def register_pages(
                 out["changes"] = engine.live_space_changes(player["space_id"], entity_ids=[dirty_id])
         return out
 
+    def _face_to_face_player(aid: str, pid: str) -> bool:
+        if not aid or not pid:
+            return False
+        with engine._lock:
+            actor = engine.live_actor_frame(aid)
+            player = engine.live_actor_frame(pid)
+            if not actor or not player or actor.get("is_player") or not player.get("is_player"):
+                return False
+            sid = actor["space_id"]
+            overlay = engine.get_external_overlay(sid) or {}
+            return bool(
+                player["space_id"] == sid and pid == engine.player_actor_id(sid)
+                and player.get("actor_status", "active") == actor.get("actor_status", "active") == "active"
+                and not overlay.get("view_only") and engine.chebyshev_distance(player, actor) <= 3
+            )
+
     def _act_user_chat_presence(v: dict[str, Any]) -> dict[str, Any]:
         aid = str(v.get("actor_id") or "").strip()
         active = bool(v.get("active", True))
-        if aid:
-            if active:
-                heartbeat.live.hold_for_user_chat(aid, float(v.get("seconds") or 20.0))
-            else:
-                heartbeat.live.release_user_chat(aid)
+        if aid and not active:
+            heartbeat.live.release_user_chat(aid)
+        elif v.get("roaming") is True and _face_to_face_player(aid, str(v.get("player_id") or "")):
+            heartbeat.live.hold_for_user_chat(aid, 20.0)
         return {"ok": True}
 
     def _act_open_player_greeting(v: dict[str, Any]) -> dict[str, Any]:
         if world_chat is None:
             return {"ok": True}
         sid = str(v.get("space_id") or "")
+        if (engine.get_external_overlay(sid) or {}).get("view_only"):
+            return {"ok": True}
         greeting = world_chat.open_player_greeting(str(v.get("greeting_id") or ""), sid)
         if greeting is None:
             return {"ok": True}

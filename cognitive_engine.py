@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import episodic_memory, persona_bridge, schedule, text_compiler, venue_semantics, weather
-from .schema import clip_text, infer_rest_mode, inscription_is_new
+from .schema import AWAKE_REST_RECOVERY_TARGET, clip_text, infer_rest_mode, inscription_is_new
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,16 @@ def _is_seat_entity(entity: Mapping[str, Any] | None) -> bool:
     if "restable" not in traits:
         return False
     return infer_rest_mode(traits.get("restable"), name=str(entity.get("name") or ""), tags=entity.get("tags") or ()) == "sit"
+
+
+def _is_sleep_time(scene: Mapping[str, Any]) -> bool:
+    hour = float((scene.get("lighting") or {}).get("hour_float", 12.0))
+    return (hour >= 21.0 or hour < 6.5) and not scene.get("nocturnal_active")
+
+
+def _needs_sleep(scene: Mapping[str, Any]) -> bool:
+    return _is_sleep_time(scene) or scene["actor"]["vitals"]["sleep_pressure"] >= 0.72
+
 
 _DOMAINS = {
     "rest": "休息", "food": "饮食", "game": "游戏", "reading": "阅读",
@@ -114,6 +124,7 @@ class CognitiveEngine:
         sid, aid, now = actor["space_id"], actor["actor_id"], scene["minutes"]
         aut, vit = actor["autonomy"], actor["vitals"]
         state = aut.get("cognition") or {}
+        awake_rest = False
         for key in ("places", "zones", "portals", "tracks", "blocked", "read", "peers"):
             state.setdefault(key, {})
         player_ids = scene["player_ids"]
@@ -251,7 +262,8 @@ class CognitiveEngine:
                 pg.get("kind") == "visit" and pg.get("target") == spid
                 and (pg.get("action") == "escort" or (pg.get("drive") == "rest" and target_is_lodging))
             )
-            if spid in realm_places and not personal_arrival and not social_signal.get("joint_visit_id"):
+            accept_speech_plan = (pending_commitment or {}).get("source") != "persona_choice" and not social_signal.get("joint_visit_id")
+            if accept_speech_plan and spid in realm_places and not personal_arrival:
                 self._ensure_portal_known(state, scene, spid, "social", now, partner=speaker)
                 sdrive = sa.get("shared_drive") if sa.get("shared_drive") in _DOMAINS else "social"
                 pending_commitment = {
@@ -261,7 +273,7 @@ class CognitiveEngine:
                     "companion_id": social_signal["actor"],
                     "priority": "high", "source": "speech_act",
                 }
-            elif pg and not social_signal.get("joint_visit_id"):
+            elif accept_speech_plan and pg:
                 pg_kind = str(pg.get("kind") or "").strip()
                 pg_tgt = str(pg.get("target") or "").strip()
                 pg_drv = str(pg.get("drive") or "").strip()
@@ -300,10 +312,13 @@ class CognitiveEngine:
 
         joint_id = str(joint_visit.get("id") or "")
         local_rest = joint_visit.get("seated_id") == aid
+        active = state.get("active_intention") or {}
+        story_in_progress = any((state.get(key) or {}).get("source") == "persona_choice"
+                                for key in ("active_intention", "suspended_intention"))
         if (joint_id and actor["posture"] != "resting"
                 and (local_rest or (vit["energy"] >= 0.25 and vit["sleep_pressure"] < 0.85))
-                and (state.get("active_intention") or {}).get("joint_visit_id") != joint_id
-                and (pending_commitment or {}).get("source") not in ("language", "speech_act")):
+                and active.get("joint_visit_id") != joint_id and not story_in_progress
+                and (pending_commitment or {}).get("source") not in ("language", "speech_act", "persona_choice")):
             target = joint_visit["target"]
             name = joint_visit.get("entity_name") or scene["realm_places"][target]
             pending_commitment = {
@@ -322,8 +337,9 @@ class CognitiveEngine:
         )
         candidates = self._candidates(state, scene, peers, relations, diary_ready, seen_peer_ids=seen_peer_ids)
         intention = state.get("active_intention")
-        directed_cast = scene.get("isolated_persona") and scene.get("external_private_brief")
-        if directed_cast and intention and self._ambient_travel(intention, actor, state, scene):
+        directed_cast = scene.get("dialogue_focus_active") or (scene.get("isolated_persona") and scene.get("external_private_brief"))
+        reunion = scene.get("dialogue_reunion") or {}
+        if intention and intention.get("dialogue_reunion") and intention["dialogue_reunion"] != reunion.get("scene_id"):
             intention = None
         waiting_for_privacy = False
         if intention and intention["action"] == "write" and not diary_ready and not intention.get("covert_directive_id"):
@@ -331,7 +347,7 @@ class CognitiveEngine:
         if recently_spoke and (
             social_signal["mood_delta"] <= -0.15
             or (isinstance(social_signal.get("speech_act"), Mapping) and social_signal["speech_act"].get("tone") == "tense")
-        ) and intention and intention["drive"] != "rest":
+        ) and intention and intention["drive"] != "rest" and intention.get("source") != "persona_choice":
             intention = None
         if intention and intention["kind"] not in ("visit", "seek_peer", "seek_player") and intention["space"] != sid:
             intention = None
@@ -340,6 +356,10 @@ class CognitiveEngine:
             if sid != dest_space:
                 if self._portal_graph_next_hop(state["portals"], sid, dest_space) is None:
                     intention = None
+        if intention and not intention.get("pfc_committed") and not intention.get("joint_visit_id"):
+            if (intention["kind"] in ("social", "seek_peer")
+                    and self._ambient_social_blocked(intention["target"], state, scene)):
+                intention = None
 
         covert = scene.get("covert_directive") if isinstance(scene.get("covert_directive"), Mapping) else None
         in_reach = False
@@ -425,6 +445,8 @@ class CognitiveEngine:
             )
             if is_covert_commit or is_external_commit:
                 may_replace = True
+            elif story_in_progress and pending_commitment.get("source") == "speech_act":
+                may_replace = False
             elif arrival_in_progress:
                 may_replace = new_arrival or pending_commitment.get("source") == "language"
             elif speech_action_in_progress:
@@ -473,8 +495,9 @@ class CognitiveEngine:
                         and (actor.get("posture") == "resting" or (state["drives"]["rest"] >= 0.65 and not going_to_rest))
                     )
                     if is_covert_commit or is_external_commit or ((pending_commitment.get("priority") == "high" or low_urgency) and not_sleeping):
-                        if joint_id and not resolved.get("joint_visit_id") and resolved["source"] in ("language", "speech_act"):
+                        if joint_id and not resolved.get("joint_visit_id") and resolved["source"] in ("language", "speech_act", "persona_choice"):
                             self.engine.finish_joint_visit(aid, joint_id, together=True)
+                            local_rest = False
                         if intention is not None and not low_urgency and intention.get("key") != resolved.get("key"):
                             state["suspended_intention"] = intention
                         intention = resolved
@@ -521,17 +544,21 @@ class CognitiveEngine:
                 state["arbitration"] = "社会脑/语言主导"
 
         logs: list[str] = []
+        woke_up = False
+        dialogue_route_blocked = False
+        waiting_for_dialogue = False
+        status = ""
         if waiting_for_privacy:
             candidates = [candidate for candidate in candidates if self._urgent_needs(candidate, state)]
             if intention and not (intention.get("pfc_committed") or self._urgent_needs(intention, state)):
                 intention = None
         picked = intention
         external_wake_active = bool(
-            picked and (
+            (scene.get("dialogue_wake") or (picked and (
                 picked.get("kind") == "seek_player"
                 or picked.get("covert_directive_id")
                 or picked.get("source") == "persona_choice"
-            )
+            )))
             and vit["energy"] >= 0.18
         )
         clock_now_h = float((scene.get("lighting") or {}).get("hour_float", 12.0))
@@ -545,7 +572,8 @@ class CognitiveEngine:
             actor.get("posture") == "resting"
             and not external_wake_active
             and (
-                state["drives"]["rest"] >= 0.35
+                (state["drives"]["rest"] >= 0.35
+                 and (_is_sleep_time(scene) or vit["sleep_pressure"] > 0.48))
                 or now < state.get("agreed_rest_until", -1)
                 or (local_rest and joint_visit.get("met"))
                 or curfew_sleeping_home
@@ -553,6 +581,14 @@ class CognitiveEngine:
         ):
             goal, drive, thought = "休息一会儿", "rest", "再睡一会儿。"
             state["arbitration"] = "生理稳态主导"
+        elif (actor.get("posture") == "resting" and actor.get("resting_on_id")
+              and (scene.get("dialogue_wake") or not external_wake_active)):
+            woke_up, feedback = self.engine.cognitive_act(aid, sid, actor["resting_on_id"], "leave_rest")
+            goal, drive, thought = "起身活动", "explore", ""
+            if woke_up:
+                state["rest_resume_until"] = now + 1.0
+                if feedback:
+                    logs.append(feedback)
         elif (
             actor.get("posture") == "sitting"
             and not external_wake_active
@@ -563,18 +599,41 @@ class CognitiveEngine:
         ):
             goal, drive, thought = "坐着歇一会儿", "rest", "再坐一会儿。"
             state["arbitration"] = "社会脑/语言主导"
+        elif (not _needs_sleep(scene) and not external_wake_active and not committed_protected
+              and vit["energy"] < (AWAKE_REST_RECOVERY_TARGET if aut.get("awake_rest") else 0.25)):
+            awake_rest = True
+            goal, drive, thought = "停下来歇一会儿", "rest", ""
+            state["arbitration"] = "生理稳态主导"
         elif vit["disengaged"]:
             goal, drive, thought = "独自待一会儿", "calm", "想安静一下。"
             state["arbitration"] = "生理稳态主导"
         else:
-            if picked is None and candidates:
+            if reunion and not waiting_for_privacy and not (picked or {}).get("covert_directive_id"):
+                partner = reunion["partner"]
+                waiting_for_dialogue = bool(reunion.get("waiting"))
+                if not waiting_for_dialogue:
+                    picked = self._resolve_commitment(
+                        state, scene, {
+                            "kind": "social", "target": partner["actor_id"], "source": "external",
+                            "id": reunion["scene_id"], "reason": f"去找{partner['name']}接着聊",
+                        }, peers, seen_peer_ids=seen_peer_ids, meeting_peer=partner,
+                    )
+                    if picked:
+                        picked["dialogue_reunion"] = reunion["scene_id"]
+                    else:
+                        dialogue_route_blocked = waiting_for_dialogue = True
+                if waiting_for_dialogue:
+                    picked = intention = None
+                    goal = f"在这里等{partner['name']}" if not dialogue_route_blocked else f"找不到去{partner['name']}身边的路"
+                    drive, thought = "social", ""
+            if not waiting_for_dialogue and picked is None and candidates:
                 picked = candidates[0]
                 reason = state.pop("reflection", "")
                 if reason and use_llm:
                     picked = self._reflect(scene, state, candidates, reason)
                 if scene.get("request_reflection"):
                     self._request_reflection(scene, state, candidates, reason, include_memories=settings.episodic_memory_enabled)
-            elif (picked is not None and picked.get("source") != "speech_act"
+            elif (picked is not None and not picked.get("dialogue_reunion") and picked.get("source") != "speech_act"
                   and scene.get("request_reflection") and candidates):
                 reason = state.get("reflection", "")
                 if reason and not str(reason).startswith("完成了"):
@@ -589,6 +648,8 @@ class CognitiveEngine:
                     state["arbitration"] = "生理稳态主导"
                 previous_error = state.get("prediction_error")
                 status, logs = self._execute(picked, state, scene, talk, candidates)
+                if picked.get("dialogue_reunion"):
+                    dialogue_route_blocked = status == "blocked" or (status == "progress" and not logs)
                 goal, drive = picked["goal"], picked["drive"]
                 covert_id = str(picked.get("covert_directive_id") or "")
                 covert_now = scene.get("covert_directive") if isinstance(scene.get("covert_directive"), Mapping) else {}
@@ -615,9 +676,13 @@ class CognitiveEngine:
                     name = joint_visit.get("entity_name")
                     peer_name = joint_visit["peer_name"]
                     goal = f"和{peer_name}在{name}旁歇一会儿" if name else f"陪{peer_name}在{space['name']}待一会儿"
+                elif status == "waiting":
+                    goal = "等对方方便时交谈"
                 thought = ""
-                if status == "blocked":
+                if status == "blocked" and not picked.get("dialogue_reunion"):
                     state["blocked"][picked["key"]] = state["step"] + 10
+                    if picked["kind"] in ("social", "seek_peer"):
+                        state["blocked"][f"peer:{picked['target']}"] = state["step"] + 10
                     if picked.get("pfc_committed") and state.get("modulation"):
                         state["modulation"]["strength"] = state["modulation"].get("strength", 1.0) * 0.65
                     error = state.get("prediction_error")
@@ -636,7 +701,7 @@ class CognitiveEngine:
                         state.setdefault("reflection", "完成了" + goal)
                 else:
                     intention = picked
-            else:
+            elif not waiting_for_dialogue:
                 goal, drive, thought = ("留意周围" if directed_cast or waiting_for_privacy else "四处观察"), "explore", ""
         state["active_intention"] = intention
         if "engage" in scene:
@@ -651,11 +716,12 @@ class CognitiveEngine:
         recent = list(aut.get("recent_targets", []))
         if logs and target:
             recent = [target, *(value for value in recent if value != target)][:5]
-        is_resting = actor.get("posture") == "resting"
+        is_resting = actor.get("posture") == "resting" and not woke_up
         emotion_hint = "" if is_resting else ("困倦" if drive == "rest" else "")
         next_aut = self.engine.update_actor_autonomy(
             aid, {
                 "cognition": state, "current_goal": goal, "current_drive": drive,
+                "awake_rest": awake_rest,
                 "last_thought": thought, "last_action_summary": "；".join(logs),
                 "last_step_ts": round(time.time(), 3), "recent_targets": recent,
             },
@@ -665,6 +731,11 @@ class CognitiveEngine:
         )
         result = {"actor_id": aid, "goal": next_aut["current_goal"], "drive": next_aut["current_drive"],
                   "thought": thought, "emotion": "熟睡" if is_resting else emotion_hint, "actions": logs}
+        if reunion:
+            result["dialogue_route_blocked"] = dialogue_route_blocked
+            result["waiting_for_dialogue"] = waiting_for_dialogue
+        if "engage" in scene and ((directed_cast and not picked) or (picked and status == "waiting")):
+            result["quiet_dwell"] = True
         if "engage" in scene:
             result["cognition"] = cognitive_summary({"autonomy": next_aut})
         return result
@@ -1008,7 +1079,7 @@ class CognitiveEngine:
 
     def _resolve_commitment(
         self, state: dict[str, Any], scene: dict[str, Any], commitment: Mapping[str, Any], peers: list[dict[str, Any]],
-        *, seen_peer_ids: set[str] | None = None,
+        *, seen_peer_ids: set[str] | None = None, meeting_peer: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         space, sid, now = scene["space"], scene["space"]["space_id"], scene["minutes"]
         kind = str(commitment.get("kind") or "").strip()
@@ -1085,8 +1156,12 @@ class CognitiveEngine:
             return None
 
         if kind == "social" and target not in scene["player_ids"]:
+            if source != "persona_choice" and target in scene.get("social_excluded_peer_ids", ()):
+                return None
             seen_set = {p["actor_id"] for p in peers} if seen_peer_ids is None else seen_peer_ids
             same_peer = next((p for p in peers if p["actor_id"] == target and p["actor_id"] in seen_set), None)
+            if meeting_peer and meeting_peer["space_id"] == sid:
+                same_peer = meeting_peer
             if same_peer is not None:
                 return {
                     "kind": "social", "key": f"social:{sid}:{target}:", "target": target, "space": sid,
@@ -1096,7 +1171,11 @@ class CognitiveEngine:
                     "pfc_committed": True, "commitment_id": cid, "source": source,
                 }
             known_rec = state["peers"].get(target) if isinstance(state["peers"].get(target), Mapping) else {}
-            peer_space = str(known_rec.get("space") or "").strip()
+            if source == "persona_choice":
+                known_rec = next((row for row in scene.get("realm_actors", ()) if row["actor_id"] == target), known_rec)
+            if meeting_peer:
+                known_rec = {"space": meeting_peer["space_id"], "name": meeting_peer["name"]}
+            peer_space = str(known_rec.get("space_id") or known_rec.get("space") or "").strip()
             peer_name = str(known_rec.get("name") or "")
             if peer_space == sid:
                 if "x" in known_rec and "y" in known_rec:
@@ -1384,6 +1463,8 @@ class CognitiveEngine:
                 return
             if key in state["blocked"]:
                 return
+            if kind in ("social", "seek_peer") and self._ambient_social_blocked(target, state, scene):
+                return
             effort = (abs(actor["x"] - x) + abs(actor["y"] - y)) * (0.047 + 0.035 * drives["rest"])
             if "engage" in scene and kind in ("social", "seek_peer") and max(abs(actor["x"] - x), abs(actor["y"] - y)) > 10:
                 effort = min(1.15, effort)
@@ -1525,7 +1606,9 @@ class CognitiveEngine:
                     value = 1.7 - (3.5 * profile["norm_compliance"] if public else 0.0)
                     information = 0
                 is_seat = action == "rest" and _is_seat_entity(ent)
-                if is_seat and (in_night_curfew or vitals["sleep_pressure"] >= 0.72 or vitals["energy"] < 0.25):
+                if is_seat and (in_night_curfew or vitals["sleep_pressure"] >= 0.72):
+                    continue
+                if action == "rest" and not is_seat and not _needs_sleep(scene):
                     continue
                 if action == "rest" and in_night_curfew and home_sid and space.get("space_kind") == "town" and vitals["energy"] >= 0.22 and vitals["sleep_pressure"] < 0.85:
                     continue
@@ -1569,7 +1652,7 @@ class CognitiveEngine:
                 if inside and home_curfew_ready and sid != home_sid:
                     add("exit", target, "rest", "夜深了，动身回住处休息", portal["x"], portal["y"],
                         4.20 + min(1.2, dwell / 12), 0.35)
-                else:
+                elif not inside or dwell >= 1.2:
                     add("exit", target, "explore", exit_label, portal["x"], portal["y"],
                         2.90 + min(1.8, dwell / 12) if inside else 0.0, 0.55)
                 continue
@@ -1580,6 +1663,8 @@ class CognitiveEngine:
                     0.85 + 0.15 * (1 + math.tanh(_activation(memory["samples"], now, percept["memory_decay"]))) / 2
                 ) for domain, memory in place.get("affordances", {}).items() if memory["confidence"] >= 0.3
             }
+            if "rest" in affordances and not _needs_sleep(scene) and self._place_is_lodging(target, scene):
+                affordances.pop("rest")
             is_home_curfew_target = home_curfew_ready and target == home_sid
             if is_home_curfew_target and "rest" not in affordances:
                 affordances["rest"] = self._domain_value("rest", state, scene) * 0.75
@@ -1611,6 +1696,7 @@ class CognitiveEngine:
                 add("explore", target, "explore", goal, x, y, 0.8 + drives["explore"],
                     novelty * travel_confidence)
 
+        social_excluded = scene.get("social_excluded_peer_ids", ())
         if rest < 0.72 and not actor["vitals"]["disengaged"]:
             user_relation = relations.get("user", {})
             if (
@@ -1628,6 +1714,8 @@ class CognitiveEngine:
                             2.6 + 2 * drives["social"] + profile["social_initiative"], 0)
             for peer in peers:
                 pid = peer["actor_id"]
+                if pid in social_excluded:
+                    continue
                 peer_rec = state["peers"].get(pid) if isinstance(state["peers"].get(pid), Mapping) else {}
                 if "engage" in scene and now - float(peer_rec.get("spoke_at", -1e9)) < 2.5:
                     continue
@@ -1665,7 +1753,7 @@ class CognitiveEngine:
         if "engage" in scene and rest < 0.68 and not actor["vitals"]["disengaged"] and drives["social"] >= 0.35:
             realm_places = scene.get("realm_places") or {}
             for peer_id, peer_rec in state["peers"].items():
-                if not isinstance(peer_rec, Mapping):
+                if peer_id in social_excluded or not isinstance(peer_rec, Mapping):
                     continue
                 p_space = str(peer_rec.get("space") or "").strip()
                 if not p_space or p_space == sid or peer_rec.get("posture") == "resting":
@@ -1685,12 +1773,17 @@ class CognitiveEngine:
                     portal["x"], portal["y"],
                     1.65 + 4.0 * drives["social"] + warmth * (0.85 + 0.65 * (1.0 - profile["social_avoidance"])),
                     0.45, target_space=p_space)
-        if scene.get("isolated_persona") and scene.get("external_private_brief"):
-            focused = [c for c in results if not self._ambient_travel(c, actor, state, scene)]
-            chosen = focused or results or fallback_results
+        if scene.get("dialogue_focus_active") or (scene.get("isolated_persona") and scene.get("external_private_brief")):
+            chosen = [c for c in (results or fallback_results) if not self._ambient_travel(c, actor, state, scene)]
         else:
             chosen = results or fallback_results
         return sorted(chosen, key=lambda c: (-c["utility"], c["key"]))
+
+    @staticmethod
+    def _ambient_social_blocked(target: str, state: Mapping[str, Any], scene: Mapping[str, Any]) -> bool:
+        return (f"peer:{target}" in state["blocked"]
+                or target in scene.get("social_excluded_peer_ids", ())
+                or target in scene.get("social_cooldown_peer_ids", ()))
 
     @staticmethod
     def _urgent_needs(intention: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
@@ -1722,8 +1815,6 @@ class CognitiveEngine:
                 )
             ):
                 return False
-            if scene.get("nocturnal_active") and intention.get("kind") in ("entity", "social", "visit", "exit"):
-                return False
         if intention["kind"] in ("explore", "exit", "visit", "seek_peer"):
             return True
         radius = 10 if intention["kind"] in ("entity", "social", "player_greeting", "pack_action", "gift") else 4
@@ -1751,6 +1842,12 @@ class CognitiveEngine:
         actor, space, now = scene["actor"], scene["space"], scene["minutes"]
         sid, ax, ay = space["space_id"], actor["x"], actor["y"]
         recent_blocks = list(state.get("recent_blocks") or [])
+        recent = recent_blocks[-4:]
+        alternating = set(recent) if len(recent) == 4 and recent[:2] == recent[2:] else set()
+        if alternating:
+            _, last_crossed = state["tracks"].get(f"frontier|{recent[-2]}", (0, -1e9))
+            if now - last_crossed >= 1.0:
+                alternating.clear()
         cur_zone = (self.engine.get_zone_at(space, ax, ay) or {}).get("zone_id", "")
         frontiers = []
         offsets = ((0, 8), (8, 0), (0, -8), (-8, 0), (6, 6), (-6, 6), (6, -6), (-6, -6))
@@ -1762,6 +1859,8 @@ class CognitiveEngine:
             if max(abs(x - ax), abs(y - ay)) < 4:
                 continue
             block = f"{sid}:{x // 4}:{y // 4}"
+            if block in alternating:
+                continue
             familiarity = self._level(state, "frontier", block, now)
             raw_novelty = 2.28 * (1.0 - familiarity)
             if "engage" in scene:
@@ -1774,6 +1873,8 @@ class CognitiveEngine:
             if zone["space"] != sid:
                 continue
             x, y = zone["x"] + zone["w"] // 2, zone["y"] + zone["h"] // 2
+            if f"{sid}:{x // 4}:{y // 4}" in alternating:
+                continue
             if not zone.get("visits"):
                 frontiers.append((x, y, f"zone:{zone['zone_id']}", f"去{zone['name']}走走", 2.58))
             elif "engage" in scene and zone.get("zone_id") != cur_zone:
@@ -1824,6 +1925,24 @@ class CognitiveEngine:
         kind, target, drive = intention["kind"], intention["target"], intention["drive"]
         actor, space, now = scene["actor"], scene["space"], scene["minutes"]
         sid = space["space_id"]
+        story_social = intention.get("source") == "persona_choice" and kind in ("social", "seek_peer")
+        if story_social and target in scene.get("social_excluded_peer_ids", ()):
+            return "waiting", []
+        if story_social:
+            peer = next((row for row in scene.get("realm_actors", ()) if row["actor_id"] == target), None)
+            if peer and peer["space_id"] != (intention.get("target_space") or intention["space"]):
+                updated = self._resolve_commitment(state, scene, {
+                    "kind": "social", "target": target, "source": "persona_choice",
+                    "id": intention.get("commitment_id", ""), "reason": intention["goal"],
+                }, scene["actors"], meeting_peer=peer)
+                if not updated:
+                    return "blocked", []
+                intention.clear()
+                intention.update(updated)
+                kind = intention["kind"]
+        if (kind == "visit" and drive == "rest" and self._place_is_lodging(target, scene)
+                and not self._is_agreed_arrival(intention) and not _needs_sleep(scene)):
+            return "blocked", []
         if kind == "player_greeting":
             state["last_player_greeting"] = now
             logs = talk(actor["actor_id"], target, intention["goal"])
@@ -1916,7 +2035,7 @@ class CognitiveEngine:
                 intention["x"] = seen_peer["x"]
                 intention["y"] = seen_peer["y"]
                 intention["phase"] = "approach"
-                return self._talk_to_peer(target, intention["goal"], state, scene, talk)
+                return self._talk_to_peer(target, intention["goal"], state, scene, talk, story_choice=story_social)
             target_space = str(intention.get("target_space") or "")
             if sid != target_space:
                 step = self._portal_graph_next_hop(state["portals"], sid, target_space)
@@ -1935,7 +2054,7 @@ class CognitiveEngine:
                 state["prediction_error"] = message
                 state["reflection"] = message
                 return "blocked", [message]
-            return self._talk_to_peer(target, intention["goal"], state, scene, talk)
+            return self._talk_to_peer(target, intention["goal"], state, scene, talk, story_choice=story_social)
         if kind == "visit" and intention["action"] == "escort":
             if sid == target:
                 return "done", []
@@ -1981,6 +2100,7 @@ class CognitiveEngine:
                         return self._use_entity(
                             state, scene, ent_obj, intention.get("drive") or "curiosity", picked_act,
                             note_text=str(intention.get("note_text") or ""),
+                            planned_sleep=intention.get("source") in ("speech_act", "language", "persona_choice", "external", "covert"),
                         )
                 return "done", []
             if intention.get("joint_visit_id"):
@@ -2013,7 +2133,7 @@ class CognitiveEngine:
             return ("done" if (kind == "exit" and destination == target) else "progress"), logs
 
         if kind == "social":
-            return self._talk_to_peer(target, intention["goal"], state, scene, talk)
+            return self._talk_to_peer(target, intention["goal"], state, scene, talk, story_choice=story_social)
 
         entity = next((e for e in scene["visible"] if e["entity_id"] == target), None)
         if entity is None and intention.get("covert_directive_id"):
@@ -2029,6 +2149,7 @@ class CognitiveEngine:
         return self._use_entity(
             state, scene, entity, drive, intention["action"],
             note_text=str(intention.get("note_text") or ""),
+            planned_sleep=intention.get("source") in ("speech_act", "language", "persona_choice", "external", "covert"),
         )
 
     def _joint_visit_activity(
@@ -2119,8 +2240,10 @@ class CognitiveEngine:
 
     def _talk_to_peer(
         self, target: str, goal: str, state: dict[str, Any], scene: dict[str, Any],
-        talk: Callable[[str, str, str], list[str]],
+        talk: Callable[[str, str, str], list[str]], *, story_choice: bool = False,
     ) -> tuple[str, list[str]]:
+        if target in scene.get("social_excluded_peer_ids", ()):
+            return "blocked", []
         peer = next((p for p in scene["actors"] if p["actor_id"] == target), None)
         if peer is None:
             return "blocked", []
@@ -2128,6 +2251,8 @@ class CognitiveEngine:
         if status != "ready":
             return status, logs
         if peer.get("posture") == "resting":
+            if story_choice:
+                return "waiting", []
             now = scene["minutes"]
             prev = state["peers"].get(target) if isinstance(state["peers"].get(target), Mapping) else {}
             state["peers"][target] = {
@@ -2147,9 +2272,10 @@ class CognitiveEngine:
             state["last_social_at"] = now
             self._accumulate(state, "entity", target, now, 0.85)
             return "done", [note]
-        logs = talk(scene["actor"]["actor_id"], target, goal)
+        meet = scene.get("story_talk", talk) if story_choice else talk
+        logs = meet(scene["actor"]["actor_id"], target, goal)
         if not logs:
-            return "blocked", []
+            return ("waiting" if story_choice else "blocked"), []
         if "engage" in scene:
             return "done", logs
         now = scene["minutes"]
@@ -2233,11 +2359,8 @@ class CognitiveEngine:
             (e, action) for e in scene["visible"] for domain, action in self._affordances(e, scene["space"])
             if domain == drive and action != "read"
         ]
-        agreed_rest = (
-            drive == "rest"
-            and self._is_agreed_arrival(intention)
-            and self._place_is_lodging(str(intention.get("target") or ""), scene)
-        )
+        planned_rest = drive == "rest" and self._is_agreed_arrival(intention)
+        agreed_rest = planned_rest and self._place_is_lodging(str(intention.get("target") or ""), scene)
         if agreed_rest:
             beds = [(e, action) for e, action in options if not _is_seat_entity(e) and "bedroom" in e.get("tags", ())]
             if beds:
@@ -2250,16 +2373,21 @@ class CognitiveEngine:
                 if sleep_beds:
                     options = sleep_beds
         elif drive == "rest":
-            sleep_beds = [(e, action) for e, action in options if not _is_seat_entity(e)]
-            if sleep_beds:
-                options = sleep_beds
+            if planned_rest or _needs_sleep(scene):
+                sleep_beds = [(e, action) for e, action in options if not _is_seat_entity(e)]
+                if sleep_beds:
+                    options = sleep_beds
+            else:
+                options = [(e, action) for e, action in options if _is_seat_entity(e)]
         if drive == "social":
             options = [(e, action) for e in scene["visible"] for domain, action in self._affordances(e, scene["space"])
                        if domain == "food"]
         if options:
             actor = scene["actor"]
             entity, action = min(options, key=lambda item: self.engine.chebyshev_distance(actor, item[0]))
-            status, logs = self._use_entity(state, scene, entity, "food" if drive == "social" else drive, action)
+            status, logs = self._use_entity(
+                state, scene, entity, "food" if drive == "social" else drive, action, planned_sleep=planned_rest,
+            )
             if agreed_rest and status == "done":
                 state["agreed_rest_until"] = scene["minutes"] + 3
             return status, logs
@@ -2295,10 +2423,13 @@ class CognitiveEngine:
 
     def _use_entity(
         self, state: dict[str, Any], scene: dict[str, Any], entity: dict[str, Any], drive: str, action: str,
-        *, note_text: str = "",
+        *, note_text: str = "", planned_sleep: bool = False,
     ) -> tuple[str, list[str]]:
         actor, space, now = scene["actor"], scene["space"], scene["minutes"]
         eid = entity["entity_id"]
+        sleeping_here = action == "rest" and not _is_seat_entity(entity)
+        if sleeping_here and not (planned_sleep or _needs_sleep(scene)):
+            return "blocked", []
         is_vis = any(e["entity_id"] == eid for e in scene["visible"])
         if entity.get("parent_id") != f"actor:{actor['actor_id']}" and (
             self.engine.chebyshev_distance(actor, entity) > 1 or not is_vis
@@ -2323,7 +2454,9 @@ class CognitiveEngine:
         ok, feedback = self.engine.cognitive_act(actor["actor_id"], space["space_id"], eid, action, text=line)
         if not ok:
             return "blocked", [feedback] if feedback else []
-        if action == "read":
+        if sleeping_here and planned_sleep:
+            state["agreed_rest_until"] = now + 3
+        elif action == "read":
             state["read"][eid] = self._read_signature(entries)
             if _is_notice_board(entity, space):
                 directory = self._read_directory(state, scene)

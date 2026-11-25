@@ -450,6 +450,7 @@ class SocialArbitrationTests(unittest.TestCase):
         pair_hb = WorldHeartbeat(
             pair_engine, lambda: pair_settings, project_root=self.root, chat_service_provider=lambda: pair_chat,
         )
+        self.addCleanup(pair_hb.live._social.shutdown, wait=True)
         self.addCleanup(pair_hb.stop)
         pair_chat = WorldChatService(
             pair_engine, project_root=self.root, settings_provider=lambda: pair_settings,
@@ -473,7 +474,11 @@ class SocialArbitrationTests(unittest.TestCase):
 
         def model(system, user, **kwargs):
             if '"intent_a"' in system:
-                return {"intent_a": "日向君，跑这么远总算找到你了。", "intent_b": "我也在找你呢，七海。", "end_chat": True}
+                nanami_line = "日向君，跑这么远总算找到你了。"
+                hinata_line = "我也在找你呢，七海。"
+                if system.startswith("你是「七海千秋」"):
+                    return {"intent_a": nanami_line, "intent_b": hinata_line, "end_chat": True}
+                return {"intent_a": hinata_line, "intent_b": nanami_line, "end_chat": True}
             return {}
 
         with patch("plugins.nanami_world.text_compiler._ask_llm_json", side_effect=model), \

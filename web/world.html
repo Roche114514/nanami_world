@@ -245,10 +245,11 @@
   .chat-msg.action { color: var(--ok); font-size: 11px; font-family: var(--px-font); }
   .chat-msg .who { font-weight: 700; margin-right: 4px; }
   .chat-msg .emo-chip {
-    display: inline-block; margin-left: 6px; padding: 0 5px;
+    display: inline-block; margin-left: 6px; padding: 0 5px; user-select: none;
     font-size: 10px; font-family: var(--px-font); color: var(--accent);
     border: 1px solid var(--border); background: var(--panel-2);
   }
+  .chat-msg .emo-chip::after { content: attr(data-emotion); }
   .chat-input-row { display: flex; gap: 6px; }
   .chat-input-row input { flex: 1 1 auto; min-width: 0; }
 
@@ -1038,7 +1039,7 @@ const state = {
   autoStepping: false,
   dockOpen: true,
   greetingOpening: false,
-  greetingAwaitingInput: false,
+  greetingActorId: "",
   soundEnabled: localStorage.getItem("nanami_world_sound") !== "0",
   rainSoundEnabled: localStorage.getItem("nanami_world_rain_sound") !== "0",
   _weatherRafPhase: 0,
@@ -5010,7 +5011,7 @@ async function showPlayerGreeting(invitation) {
     if (!speaker || speaker.is_player) return;
     state.snap.active_actor_id = speaker.actor_id;
     state.chatHistory = greeting.chat_history;
-    state.greetingAwaitingInput = true;
+    state.greetingActorId = speaker.actor_id;
     state.dockOpen = true;
     renderViewShell();
     renderTopbar();
@@ -5111,8 +5112,25 @@ function renderDialogueDock() {
     if (role === "action") {
       return '<div class="chat-msg action"><span class="who">⚡</span>' + esc(m.text) + "</div>";
     }
-    const emo = m.emotion ? '<span class="emo-chip">' + esc(m.emotion) + "</span>" : "";
-    return '<div class="chat-msg assistant"><span class="who">' + esc(act.name) + "：</span>" + esc(m.text) + emo + "</div>";
+    let speaker = act.name;
+    let listener = "";
+    let line = String(m.text || "");
+    // Older NPC messages already carry the speaker in a perspective-specific prefix.
+    const incoming = /^\[([^\]\r\n]+?) (?:回应|对你说)\]\s*/u.exec(line);
+    const outgoing = /^(?:（对([^）\r\n]+)说）|\(对([^)\r\n]+)说\))\s*/u.exec(line);
+    if (incoming) {
+      speaker = incoming[1];
+      listener = act.name;
+      line = line.slice(incoming[0].length);
+    } else if (outgoing) {
+      listener = outgoing[1] || outgoing[2];
+      line = line.slice(outgoing[0].length);
+    }
+    const emo = m.emotion ? '<span class="emo-chip" role="img" aria-label="情绪：' + esc(m.emotion)
+      + '" data-emotion="' + esc(m.emotion) + '"></span>' : "";
+    const addressedTo = listener ? ' title="对' + esc(listener) + '说"' : "";
+    return '<div class="chat-msg assistant"><span class="who"' + addressedTo + '>'
+      + esc(speaker) + "：</span>" + esc(line) + emo + "</div>";
   }).join("");
   if (nearBottom || hist.length <= 3) logEl.scrollTop = logEl.scrollHeight;
 }
@@ -8799,7 +8817,7 @@ function openWeatherModal() {
     btn.textContent = "回应中";
     state.chatHistory = [...(state.chatHistory || []), { id: "pending-u-" + Date.now(), role: "user", text }];
     renderDialogueDock();
-    runAction("chat_in_world", { actor_id: aid, space_id: curSid, text })
+    runAction("chat_in_world", { actor_id: aid, space_id: curSid, text, roaming: state.uiMode === "roam", player_id: state.playerId })
       .then((res) => {
         const actions = (res.chat_result && res.chat_result.actions_executed) || [];
         if (res.chat_result?.action_queued) {
@@ -8840,11 +8858,32 @@ function openWeatherModal() {
       SoundFX.syncWeather(curW.current || "clear", isOut);
     };
   }
-  const sendChatPresence = (active) => {
-    state.greetingAwaitingInput = false;
-    const aid = (state.snap && state.snap.active_actor_id) || "";
-    if (!aid || aid === state.playerId) return;
-    runAction("user_chat_presence", { actor_id: aid, active, seconds: 20 }, false).catch(() => {});
+  let chatPresenceActor = "";
+  const sendChatPresence = (active, explicitActor = "") => {
+    const snap = state.snap;
+    const aid = explicitActor || snap?.active_actor_id;
+    const player = snap?.actors.find((actor) => actor.actor_id === state.playerId && actor.is_player);
+    const target = snap?.actors.find((actor) => actor.actor_id === aid && !actor.is_player);
+    const present = active && state.view === "world" && state.uiMode === "roam" && state.dockOpen
+      && !snap?.external_overlay?.view_only && !document.hidden
+      && (explicitActor || document.activeElement === el("chat-input"))
+      && player && target && player.space_id === target.space_id
+      && Math.max(Math.abs(player.x - target.x), Math.abs(player.y - target.y)) <= 3;
+    if (chatPresenceActor && (!present || chatPresenceActor !== aid)) {
+      runAction("user_chat_presence", { actor_id: chatPresenceActor, active: false }, false).catch(() => {});
+      chatPresenceActor = "";
+    }
+    if (state.greetingActorId && (!active || (present && state.greetingActorId !== aid))) {
+      runAction("user_chat_presence", { actor_id: state.greetingActorId, active: false }, false).catch(() => {});
+      state.greetingActorId = "";
+    }
+    if (present) {
+      state.greetingActorId = "";
+      chatPresenceActor = aid;
+      runAction("user_chat_presence", {
+        actor_id: aid, player_id: player.actor_id, roaming: true, active: true,
+      }, false).catch(() => {});
+    }
   };
   if (el("btn-dock-close")) {
     el("btn-dock-close").onclick = () => {
@@ -8858,24 +8897,15 @@ function openWeatherModal() {
       state.dockOpen = true;
       renderViewShell();
       renderDialogueDock();
-      sendChatPresence(true);
-      setTimeout(() => { if (el("chat-input")) el("chat-input").focus(); }, 60);
     };
   }
   if (el("chat-input")) {
-    let lastTypeHoldAt = 0;
-    const bumpHold = () => {
-      const now = performance.now();
-      if (state.greetingAwaitingInput || now - lastTypeHoldAt > 4000) {
-        lastTypeHoldAt = now;
-        sendChatPresence(true);
-      }
-    };
-    el("chat-input").addEventListener("focus", bumpHold);
-    el("chat-input").addEventListener("input", bumpHold);
+    el("chat-input").addEventListener("focus", () => sendChatPresence(true));
+    el("chat-input").addEventListener("blur", () => sendChatPresence(false));
   }
+  document.addEventListener("visibilitychange", () => sendChatPresence(true));
   setInterval(() => {
-    if (state.view === "world" && state.dockOpen && state.autoLife && !state.greetingAwaitingInput) sendChatPresence(true);
+    sendChatPresence(true);
   }, 8000);
 
   const triggerRoamInteract = async () => {
@@ -8926,7 +8956,7 @@ function openWeatherModal() {
         state.dockOpen = true;
         renderViewShell();
         renderDialogueDock();
-        sendChatPresence(true);
+        sendChatPresence(true, inter.target_actor_id);
         setTimeout(() => { if (el("chat-input")) el("chat-input").focus(); }, 60);
       } else if (inter.kind === "inspect_actor") {
         showModal(

@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from . import episodic_memory, persona_bridge, schedule, sprite_pack, venue_semantics, weather
 from .schema import (
+    AWAKE_REST_RECOVERY_TARGET,
     DEFAULT_ACTOR_PIXELS_16X24,
     DEFAULT_ACTOR_SLOT_COLORS,
     MAP_STYLES,
@@ -2676,14 +2677,15 @@ class WorldEngine:
 
         desired_bucket = "neutral"
         hint_raw = str(emotion_hint or "").strip()
-        if hint_raw:
+        if posture == "resting":
+            desired_bucket = "sleep_deep"
+            hint_raw = ""
+        elif hint_raw:
             lowered = hint_raw.lower()
             if lowered in _EMOTION_HINT_ALIASES:
                 desired_bucket = _EMOTION_HINT_ALIASES[lowered]
             else:
                 desired_bucket = classify_emotion_bucket(hint_raw)
-        elif posture == "resting" or energy < 0.22 or sleep_p >= 0.80:
-            desired_bucket = "sleep_deep"
         elif energy < 0.45 or sleep_p >= 0.58:
             desired_bucket = "sleepy"
         elif disengaged:
@@ -2701,6 +2703,11 @@ class WorldEngine:
         elif energy >= 0.60 and mood_v >= 0.05:
             desired_bucket = "curious"
 
+        if posture != "resting":
+            pack = [item for item in pack if item.get("bucket") != "sleep_deep"]
+            if desired_bucket == "sleep_deep":
+                desired_bucket = "sleepy"
+                hint_raw = ""
         if not pack:
             return desired_bucket, None
 
@@ -2711,7 +2718,7 @@ class WorldEngine:
 
         fallback_order = {
             "sleep_deep": ("sleep_deep", "sleepy", "sad", "neutral"),
-            "sleepy": ("sleepy", "sleep_deep", "neutral"),
+            "sleepy": ("sleepy", "neutral"),
             "shy": ("shy", "happy", "neutral"),
             "excited": ("excited", "happy", "curious", "neutral"),
             "happy": ("happy", "excited", "neutral"),
@@ -2766,7 +2773,7 @@ class WorldEngine:
             }
             new_expr = {
                 "index": 1,
-                "tag": str(emotion_hint or bucket_labels.get(bucket, "平静")),
+                "tag": bucket_labels[bucket] if bucket in ("sleep_deep", "sleepy") else str(emotion_hint or bucket_labels.get(bucket, "平静")),
                 "bucket": bucket,
                 "path": "",
                 "manual": False,
@@ -3938,6 +3945,11 @@ class WorldEngine:
     ) -> str:
         if actor.get("is_player") or peer.get("is_player"):
             return ""
+        for person in (actor, peer):
+            cognition = person["autonomy"].get("cognition") or {}
+            if any((cognition.get(key) or {}).get("source") == "persona_choice"
+                   for key in ("active_intention", "suspended_intention", "pending_modulation")):
+                return ""
         entity_id = str(sides[0].get("shared_entity_id") or "")
         entity = self._joint_entity_locked(entity_id, actor["space_id"])
         if entity_id and (not entity or sides[1].get("shared_entity_id") != entity_id):
@@ -5039,6 +5051,9 @@ class WorldEngine:
                 "commitment": norm_comm,
             }
             cognition = actor["autonomy"].setdefault("cognition", {})
+            visit = self._joint_visit_locked(actor)
+            if visit:
+                self._finish_joint_visit_locked(aid, visit["id"], together=True)
             cognition["pending_modulation"] = packet
             if preempt:
                 cognition["preempt_seq"] = int(cognition.get("preempt_seq", 0)) + 1
@@ -5283,8 +5298,9 @@ class WorldEngine:
             seek_player_intent = (active.get("kind") == "seek_player") or (
                 isinstance(pending_comm, Mapping) and pending_comm.get("kind") == "seek_player"
             )
+            persona_intent = (active.get("source") == "persona_choice" or pending_mod.get("source") == "persona_choice")
             isolated_persona = self._is_isolated_persona_realm_locked(realm)
-            if (not include_rooms and not (joint_visit or entity_intent or covert_directive or seek_player_intent)
+            if (not include_rooms and not (joint_visit or entity_intent or covert_directive or seek_player_intent or persona_intent)
                     and not (isolated_persona and private_brief) and not self._is_multi_space_realm_locked(realm)):
                 return None
             joint_entity = self._joint_entity_locked(joint_visit.get("entity_id", ""), joint_visit["target"]) if joint_visit else None
@@ -5318,6 +5334,8 @@ class WorldEngine:
                 and a_p.get("space_id") in self._world["spaces"]
                 and self._realm_space_id_locked(a_p["space_id"]) == realm
             ]
+            lighting = compute_lighting(space, self._world["entities"], time.time(), self._realm_clock_offset_locked(sid))
+            hour = lighting["hour_float"]
             return {
                 "actor": copy.deepcopy(actor),
                 "actors": copy.deepcopy([
@@ -5340,13 +5358,12 @@ class WorldEngine:
                 "visible": visible,
                 "visible_peer_ids": visible_peer_ids,
                 "destinations": destinations,
-                "lighting": compute_lighting(
-                    space, self._world["entities"], time.time(), self._realm_clock_offset_locked(sid),
-                ),
+                "lighting": lighting,
                 "weather": self._weather_view_locked(sid),
                 "home_space_id": self._resolve_actor_home_locked(actor, realm),
                 "external_private_brief": private_brief,
-                "nocturnal_active": bool(ext_rec.get("night_active") or (covert_directive is not None)),
+                "nocturnal_active": bool(ext_rec.get("night_active") and (hour >= 21.0 or hour < 6.5)
+                                         or covert_directive is not None),
                 "covert_directive": covert_directive,
                 "covert_target_space": covert_target_space,
                 "covert_entity": covert_entity,
@@ -5390,6 +5407,7 @@ class WorldEngine:
                 "seek_player_target": str(active_int.get("target") or "") if active_int.get("kind") == "seek_player" else "",
                 "joint_visit_id": joint_visit["id"] if joint_visit else "",
                 "speech_action": active_int.get("kind") == "entity" and active_int.get("source") == "speech_act",
+                "story_choice": active_int.get("source") == "persona_choice",
             }
             return frame
 
@@ -7200,6 +7218,7 @@ class WorldEngine:
                     self._record_episode_locked(actor, "exploration", f"走过了{zone['name']}。", subject=zone)
                 previous = zone
         self._clear_actor_rest_locked(actor)
+        actor["autonomy"]["awake_rest"] = False
         self._record_move_locked(actor, path)
         actor["x"], actor["y"] = path[-1]
         self._refresh_actor_expression_locked(actor, action_kind="move")
@@ -8056,11 +8075,11 @@ class WorldEngine:
                     has_rest_ent = bool(rest_id and rest_id in self._world["entities"])
                     is_resting = bool(posture == "resting" and has_rest_ent)
                     is_sitting = bool(posture == "sitting" and has_rest_ent)
+                    cognition = act["autonomy"].setdefault("cognition", {})
                     if is_resting:
                         regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.012)
                         vit["energy"] = round(clamp_float(vit["energy"] + regen * delta_min, 0.0, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] - regen * 0.9 * delta_min, 0.0, 1.0, 0.3), precision)
-                        cognition = act["autonomy"].setdefault("cognition", {})
                         started = cognition.setdefault("rest_started_at", sim_now - delta_min)
                         started_ts = cognition.get("rest_started_ts", last_ts)
                         if advance_minutes is None and started_ts > last_ts:
@@ -8078,7 +8097,10 @@ class WorldEngine:
                         regen = float(((self._world["entities"][rest_id].get("traits") or {}).get("restable") or {}).get("energy_regen_per_min") or 0.008)
                         vit["energy"] = round(clamp_float(vit["energy"] + regen * 0.45 * delta_min, 0.0, 1.0, 0.7), precision)
                     else:
-                        vit["energy"] = round(clamp_float(vit["energy"] - 0.0012 * delta_min, 0.05, 1.0, 0.7), precision)
+                        if act["autonomy"].get("awake_rest") and vit["energy"] < AWAKE_REST_RECOVERY_TARGET:
+                            vit["energy"] = round(min(AWAKE_REST_RECOVERY_TARGET, vit["energy"] + 0.01 * delta_min), precision)
+                        else:
+                            vit["energy"] = round(clamp_float(vit["energy"] - 0.0012 * delta_min, 0.05, 1.0, 0.7), precision)
                         vit["sleep_pressure"] = round(clamp_float(vit["sleep_pressure"] + 0.0015 * delta_min, 0.0, 1.0, 0.3), precision)
                     aut = normalize_autonomy(act.get("autonomy"))
                     hunger_rate = 0.0014 * 0.35 if is_resting else 0.0014
@@ -8425,6 +8447,7 @@ class WorldEngine:
                     "covert_act_cancelled",
                     "covert_act_deferred",
                     "dialogue_exchange",
+                    "dialogue_reunion_blocked",
                     "npc_dispatched_to_player",
                 ):
                     continue

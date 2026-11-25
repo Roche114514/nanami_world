@@ -57,6 +57,105 @@ class CognitiveEngineTests(unittest.TestCase):
     def step(self, heartbeat: WorldHeartbeat, aid: str, *, use_llm: bool = False) -> dict:
         return heartbeat.step(actor_id=aid, advance_minutes=5, use_llm=use_llm)["decisions"][0]
 
+    def test_daytime_dorm_visit_does_not_put_a_mildly_tired_actor_to_bed(self) -> None:
+        engine = self.world("daytime-sleep")
+        aid = engine.import_actor(name="日向创")["actor_id"]
+        town = engine.create_default_town(move_actor_id=aid)["town_space_id"]
+        dorm = f"{town}__guest"
+        engine.set_realm_initial_hour(town, 14.0)
+        bed = next(e for e in engine.snapshot_for_ui(dorm)["entities"] if e["blueprint_id"] == "default_bed")
+        engine.place_actor(aid, dorm, bed["x"], bed["y"] + 1)
+        engine.set_actor_vitals(aid, {"energy": 0.61, "sleep_pressure": 0.27})
+        engine.update_actor_autonomy(aid, {"cognition": {"active_intention": {
+            "kind": "visit", "key": f"visit:{town}:{dorm}:", "target": dorm, "space": town,
+            "x": bed["x"], "y": bed["y"], "goal": "去宿舍休息", "drive": "rest", "action": "", "phase": "activity",
+        }}})
+        heartbeat = self.heartbeat(engine)
+        self.addCleanup(heartbeat.stop)
+        heartbeat.step(actor_id=aid, advance_minutes=0.1, use_llm=False)
+        self.assertEqual(engine.live_actor_frame(aid)["posture"], "standing")
+
+        # Old saves may already contain the bed occupancy.
+        engine.execute_act(aid, bed["entity_id"], "rest")
+        heartbeat.step(actor_id=aid, advance_minutes=0.1, use_llm=False)
+        self.assertEqual(engine.live_actor_frame(aid)["posture"], "standing")
+        self.assertIsNone(engine.live_actor_frame(aid)["resting_on_id"])
+
+        engine.set_actor_vitals(aid, {"energy": 0.20, "sleep_pressure": 0.78})
+        for _ in range(4):
+            heartbeat.step(actor_id=aid, advance_minutes=0.1, use_llm=False)
+            if engine.live_actor_frame(aid)["posture"] == "resting":
+                break
+        self.assertEqual(engine.live_actor_frame(aid)["posture"], "resting")
+
+    def test_exhausted_but_alert_actor_recovers_awake_and_keeps_world_vitals(self) -> None:
+        engine = self.world("awake-rest")
+        aid = engine.import_actor(name="哈贝特洛特", x=5, y=4)["actor_id"]
+        engine.set_realm_initial_hour("room_default", 14.0)
+        engine.place_from_blueprint("default_bed", "room_default", 6, 4)
+        engine.set_actor_vitals(aid, {"energy": 0.20, "sleep_pressure": 0.01})
+        heartbeat = self.heartbeat(engine)
+        self.addCleanup(heartbeat.stop)
+
+        with patch("plugins.nanami_world.heartbeat.persona_bridge.read_persona_state", return_value={
+            "energy": 0.05, "sleep_pressure": 0.99, "mood_v": 0.35, "agenda": "want_company",
+            "disengaged": False, "preferred_domains": ["game"], "updated_at": 1.0, "world_state": True,
+        }):
+            heartbeat.step(actor_id=aid, advance_minutes=0.1, use_llm=False)
+        frame = engine.live_actor_frame(aid)
+        self.assertEqual(frame["posture"], "standing")
+        self.assertLess(frame["vitals"]["sleep_pressure"], 0.02)
+        self.assertEqual(frame["vitals"]["mood_v"], 0.35)
+        self.assertNotEqual(frame["expression"]["bucket"], "sleep_deep")
+        decision = heartbeat.step(actor_id=aid, advance_minutes=0.1, use_llm=False)["decisions"][0]
+        self.assertEqual(decision["goal"], "停下来歇一会儿")
+        engine.tick_physics(advance_minutes=12)
+        frame = engine.live_actor_frame(aid)
+        self.assertEqual(frame["posture"], "standing")
+        self.assertGreater(frame["vitals"]["energy"], 0.30)
+        self.assertLess(frame["vitals"]["sleep_pressure"], 0.05)
+
+    def test_story_explorer_finishes_a_walk_and_avoids_repeating_two_blocks(self) -> None:
+        engine = self.world("story-walk")
+        sid = engine.create_space(name="中庭", width=22, height=14, wall_rows=0,
+                                  space_kind="town", isolated_persona=True)["space_id"]
+        aid = engine.import_actor(name="丰川祥子", space_id=sid, x=12, y=8)["actor_id"]
+        engine.set_actor_private_brief(aid, "在中庭等同伴的消息。", space_id=sid)
+        engine.update_actor_autonomy(aid, {"cognition": {"active_intention": {
+            "kind": "explore", "key": f"explore:{sid}:12:1:", "target": "12:1", "space": sid,
+            "x": 12, "y": 1, "goal": "走到中庭北侧", "drive": "explore", "action": "", "phase": "travel",
+        }}})
+        heartbeat = self.heartbeat(engine)
+        self.addCleanup(heartbeat.stop)
+        cog = heartbeat._cognitive
+        for _ in range(3):
+            scene = engine.cognitive_scene(aid)
+            scene["stride"] = 3
+            decision = cog.step(scene, self.settings, use_llm=False, talk=lambda *_: [])
+            self.assertEqual(decision["goal"], "走到中庭北侧")
+        self.assertLessEqual(engine.live_actor_frame(aid)["y"], 3)
+        engine.update_actor_autonomy(aid, {"cognition": {
+            **engine.cognitive_scene(aid)["actor"]["autonomy"]["cognition"], "active_intention": None,
+        }})
+        seq = engine.live_actor_frame(aid)["move_seq"]
+        for hour in (12.0, 23.0):
+            engine.set_realm_initial_hour(sid, hour)
+            engine.set_actor_private_brief(aid, "在中庭等同伴的消息。", space_id=sid, night_active=True)
+            for _ in range(3):
+                scene = engine.cognitive_scene(aid)
+                scene["engage"] = lambda *args: False
+                decision = cog.step(scene, self.settings, use_llm=False, talk=lambda *_: [])
+                self.assertEqual(decision["goal"], "留意周围")
+            self.assertEqual(engine.live_actor_frame(aid)["move_seq"], seq)
+        scene = engine.cognitive_scene(aid)
+        scene["engage"] = True
+        scene["percept"] = {"memory_decay": 0.8}
+        state = {"zones": {}, "tracks": {f"frontier|{sid}:3:2": (1.0, scene["minutes"])},
+                 "recent_blocks": [f"{sid}:3:2", f"{sid}:3:1"] * 2}
+        targets = cog._frontiers(state, scene)
+        self.assertTrue(targets)
+        self.assertFalse(any(x // 4 == 3 and y // 4 in (1, 2) for x, y, *_ in targets))
+
     def test_thirty_beats_different_personas(self) -> None:
         (self.persona / "pointers.yaml").write_text(
             "pointers:\n" + "".join(
