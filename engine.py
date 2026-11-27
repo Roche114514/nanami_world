@@ -18,7 +18,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import episodic_memory, persona_bridge, schedule, sprite_pack, venue_semantics, weather
+from .build_history import BuildEntry, BuildHistory, build_action, capture_build_state, diff_build_state
 from .schema import (
     AWAKE_REST_RECOVERY_TARGET,
     DEFAULT_ACTOR_PIXELS_16X24,
@@ -33,13 +34,18 @@ from .schema import (
     MAP_STYLES,
     MAX_BRIEF_CHARS,
     MAX_DETAIL_CHARS,
+    MAX_ELEVATION,
     MAX_SPACE_HEIGHT,
     MAX_SPACE_WIDTH,
+    MAX_SPACE_ZONES,
     MIN_SPACE_HEIGHT,
     MIN_SPACE_WIDTH,
+    SPACE_RELIEF_FIELDS,
     TILE_CATALOG,
     VALID_ACTOR_STATUSES,
+    VALID_CLIFF_STYLES,
     VALID_SPACE_KINDS,
+    VALID_STAIR_STYLES,
     _normalize_expression,
     _normalize_vitals,
     clamp_float,
@@ -59,7 +65,9 @@ from .schema import (
     normalize_footprint,
     normalize_palette,
     normalize_space,
+    normalize_space_cliff_styles,
     normalize_space_elevations,
+    normalize_space_stair_styles,
     normalize_space_stairs,
     normalize_space_tiles,
     normalize_sprite,
@@ -69,6 +77,13 @@ from .schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+class _UnspecifiedReliefStyle(str):
+    """An omitted brush material keeps the existing override."""
+
+
+_UNSPECIFIED_RELIEF_STYLE = _UnspecifiedReliefStyle("")
+
 
 _MODULATION_DOMAINS = frozenset({
     "rest", "food", "game", "reading", "social", "notice", "explore",
@@ -378,7 +393,10 @@ class WorldEngine:
         self._isolated_active_actors: dict[str, str] = {}
         self._defer_save_depth: int = 0
         self._save_pending: bool = False
+        self._build_history = BuildHistory()
+        self._build_events: list[dict[str, Any]] | None = None
 
+        self._stamps_path = self._data_root / "stamps.json"
         self._world_path = self._data_root / "world.json"
         self._blueprints_path = self._data_root / "blueprints.json"
         self._palettes_path = self._data_root / "palettes.json"
@@ -394,6 +412,7 @@ class WorldEngine:
         self._custom_palettes: dict[str, dict[str, Any]] = {}
         self._host_sprite_cache: dict[str, str] = {}
         self._world: dict[str, Any] = {}
+        self._stamps: dict[str, dict[str, Any]] = {}
         self._load_all()
 
     @property
@@ -449,6 +468,13 @@ class WorldEngine:
                     if isinstance(item, Mapping):
                         pal = normalize_palette(item, builtin=False)
                         self._custom_palettes[str(pid)] = pal
+
+            raw_stamps = _read_json_file(self._stamps_path, {})
+            if isinstance(raw_stamps, Mapping):
+                self._stamps = {
+                    str(stamp_id): self._normalize_build_stamp(stamp, str(stamp_id))
+                    for stamp_id, stamp in raw_stamps.items() if isinstance(stamp, Mapping)
+                }
 
             raw_world = _read_json_file(self._world_path, None)
             if isinstance(raw_world, Mapping) and isinstance(raw_world.get("spaces"), Mapping) and raw_world["spaces"]:
@@ -747,13 +773,19 @@ class WorldEngine:
             "space_id": str(space_id or self._world.get("active_space_id") or ""),
             "payload": dict(payload or {}),
         }
+        if self._build_events is not None:
+            self._build_events.append(event)
+        else:
+            self._write_event_locked(event)
+        return event
+
+    def _write_event_locked(self, event: Mapping[str, Any]) -> None:
         try:
             self._events_path.parent.mkdir(parents=True, exist_ok=True)
             with self._events_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event, ensure_ascii=False) + "\n")
         except OSError:
             logger.warning("nanami_world: 写入 events.jsonl 失败", exc_info=True)
-        return event
 
     def _push_diff_locked(self, space_id: str, text: str) -> None:
         cleaned = clip_text(text, 100, "")
@@ -1013,11 +1045,7 @@ class WorldEngine:
         elevs = space.get("elevations")
         if not isinstance(elevs, Mapping) or not elevs:
             return 0
-        try:
-            val = int(elevs.get(f"{int(x)},{int(y)}", 0) or 0)
-        except (TypeError, ValueError):
-            return 0
-        return max(0, min(2, val))
+        return clamp_int(elevs.get(f"{int(x)},{int(y)}"), 0, MAX_ELEVATION, 0)
 
     def is_stair_cell(self, space: Mapping[str, Any], x: int, y: int) -> bool:
         stairs = space.get("stairs")
@@ -1033,8 +1061,8 @@ class WorldEngine:
             return True
         k0 = f"{int(x0)},{int(y0)}"
         k1 = f"{int(x1)},{int(y1)}"
-        e0 = max(0, min(2, int(elevs.get(k0, 0) or 0)))
-        e1 = max(0, min(2, int(elevs.get(k1, 0) or 0)))
+        e0 = self.get_cell_elevation(space, x0, y0)
+        e1 = self.get_cell_elevation(space, x1, y1)
         if e0 == e1:
             return True
         if abs(e0 - e1) > 1:
@@ -1811,6 +1839,15 @@ class WorldEngine:
         return f"space:{space_id}", x, y, 0
 
     # ── 空间与蓝图管理 API ──────────────────────────────────────────────
+    def _available_space_id_locked(self, name: str) -> str:
+        base = slugify(name, prefix="room")
+        sid = base
+        suffix = 2
+        while sid in self._world["spaces"]:
+            sid = f"{base}_{suffix}"
+            suffix += 1
+        return sid
+
     def create_space(
         self,
         *,
@@ -1843,12 +1880,7 @@ class WorldEngine:
                     raise ValueError(f"空间已存在：{explicit_sid}")
                 sid = explicit_sid
             else:
-                base_id = slugify(clean_name, prefix="room")
-                sid = base_id
-                idx = 2
-                while sid in self._world["spaces"]:
-                    sid = f"{base_id}_{idx}"
-                    idx += 1
+                sid = self._available_space_id_locked(clean_name)
             if palette_id not in self.all_palettes():
                 palette_id = "warm_stardew"
             kind = str(space_kind or "room").strip().lower()
@@ -1982,6 +2014,7 @@ class WorldEngine:
                 pt = (ent.get("traits") or {}).get("portal")
                 if isinstance(pt, dict) and str(pt.get("target_space_id") or "") in delete_ids:
                     pt["target_space_id"] = ""
+                    pt.pop("paired_entity_id", None)
 
             for eid in removed_ids:
                 self._world["entities"].pop(eid, None)
@@ -2034,6 +2067,7 @@ class WorldEngine:
                 },
             )
             self._save_world_locked()
+            self._build_history.discard_spaces(delete_ids)
             return {
                 "deleted_space_id": sid,
                 "deleted_descendants": descendants,
@@ -2137,6 +2171,618 @@ class WorldEngine:
         from . import town_builder
         return town_builder.validate_town_layout(self, town_space_id)
 
+    # ── 建造事务与地形编辑 ──────────────────────────────────────────────
+    def _inbound_portal_spaces_locked(self, space_id: str) -> set[str]:
+        return {
+            ent["space_id"] for ent in self._world["entities"].values()
+            if (ent.get("traits", {}).get("portal") or {}).get("target_space_id") == space_id
+        }
+
+    @contextmanager
+    def _build_mutation_locked(
+        self, label: str, space_id: str, extra_spaces: set[str] | None = None,
+    ) -> Iterator[None]:
+        if self._build_events is not None:
+            yield
+            return
+        spaces = {space_id} | (extra_spaces or set())
+        before = capture_build_state(self._world, spaces)
+        old_pending = self._save_pending
+        old_sequence = self._world["next_seq"]
+        old_diffs = list(self._world["pending_diffs"])
+        self._build_events = []
+        self._defer_save_depth += 1
+        try:
+            yield
+            after = capture_build_state(self._world, spaces, set(before["actors"]))
+            edits = list(diff_build_state(before, after))
+            self._defer_save_depth -= 1
+            try:
+                if self._defer_save_depth == 0 and self._save_pending:
+                    self._save_world_locked()
+                    self._save_pending = False
+            finally:
+                self._defer_save_depth += 1
+        except BaseException:
+            current = capture_build_state(self._world, spaces, set(before["actors"]))
+            BuildEntry(label, space_id, spaces, list(diff_build_state(before, current))).apply(self._world, undo=True)
+            self._world["next_seq"] = old_sequence
+            self._world["pending_diffs"] = old_diffs
+            self._save_pending = old_pending
+            raise
+        else:
+            if edits:
+                touched = {space_id}
+                for edit in edits:
+                    category, key, *_ = edit.path
+                    if category == "spaces":
+                        touched.add(key)
+                    elif category in ("entities", "actors"):
+                        for state in (before, after):
+                            if key in state[category]:
+                                touched.add(state[category][key]["space_id"])
+                self._build_history.record(BuildEntry(label, space_id, touched, edits))
+            for event in self._build_events:
+                self._write_event_locked(event)
+        finally:
+            self._defer_save_depth -= 1
+            self._build_events = None
+
+    def _build_history_status_locked(self, sid: str) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for action, undo in (("undo", True), ("redo", False)):
+            entry = self._build_history.head(sid, undo=undo)
+            ready = entry is not None and entry.applicable(self._world, undo=undo)
+            result[f"can_{action}"] = ready
+            result[f"{action}_label"] = entry.label if ready else ""
+        return result
+
+    def _apply_build_history_locked(self, space_id: str, *, undo: bool) -> dict[str, Any]:
+        sid = str(space_id or self._world["active_space_id"]).strip()
+        entry = self._build_history.head(sid, undo=undo)
+        if entry is None or not entry.applicable(self._world, undo=undo):
+            raise ValueError("当前空间没有可撤销的建造操作。" if undo else "当前空间没有可重做的建造操作。")
+        active = self._world["active_space_id"]
+        previous = capture_build_state(self._world, entry.spaces)
+        entry.apply(self._world, undo=undo)
+        if active not in self._world["spaces"]:
+            self._world["active_space_id"] = entry.primary
+        try:
+            self._save_world_locked()
+        except BaseException:
+            current = capture_build_state(self._world, entry.spaces, set(previous["actors"]))
+            rollback = BuildEntry(entry.label, entry.primary, entry.spaces, list(diff_build_state(previous, current)))
+            rollback.apply(self._world, undo=True)
+            self._world["active_space_id"] = active
+            raise
+        self._build_history.advance(entry, undo=undo)
+        return {"space_id": sid if sid in self._world["spaces"] else entry.primary, "label": entry.label}
+
+    def undo_build(self, space_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._apply_build_history_locked(space_id, undo=True)
+
+    def redo_build(self, space_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._apply_build_history_locked(space_id, undo=False)
+
+    def _build_space_locked(self, space_id: str) -> dict[str, Any]:
+        sid = str(space_id or self._world["active_space_id"]).strip()
+        space = self._world["spaces"].get(sid)
+        if space is None:
+            raise ValueError(f"空间不存在：{sid}")
+        return space
+
+    def _relief_occupancy_locked(self, sid: str) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+        blocked, footprints = set(), set()
+        for ent in self._world["entities"].values():
+            if ent["space_id"] != sid or ent["z"] != 0:
+                continue
+            cells = self._entity_cells(ent)
+            if ent["solid"] or ent["placement"] == "floor":
+                blocked.update(cells)
+            if len(cells) > 1:
+                footprints.update(cells)
+        return blocked, footprints
+
+    @staticmethod
+    def _set_relief_cell(values: dict[str, Any], key: str, value: Any) -> bool:
+        if value:
+            if values.get(key) == value:
+                return False
+            values[key] = value
+            return True
+        return values.pop(key, None) is not None
+
+    @build_action("涂刷台地与石阶")
+    def paint_terrain_relief(
+        self, space_id: str, cells: Sequence[Mapping[str, Any]] | None = None, *,
+        mode: str = "raise", stair_orient: str = "ns", level: int | None = None,
+        cliff_style: str = _UNSPECIFIED_RELIEF_STYLE, stair_style: str = _UNSPECIFIED_RELIEF_STYLE,
+    ) -> dict[str, Any]:
+        with self._lock:
+            space = self._build_space_locked(space_id)
+            sid, w, h = space["space_id"], space["width"], space["height"]
+            if mode == "stair":
+                mode = f"stair_{stair_orient}"
+            stair_modes = {"stair_ns": "ns", "stair_ew": "ew", "stair_both": "both", "clear_stair": ""}
+            elevation_sets = {"set_0": 0, "set_1": 1, "set_2": 2}
+            if mode == "set_level":
+                target_level = clamp_int(level, 0, MAX_ELEVATION, -1)
+                if target_level < 0:
+                    raise ValueError("请选择台地高度。")
+                elevation_sets[mode] = target_level
+            if mode not in stair_modes and mode not in elevation_sets and mode not in ("raise", "lower", "set_cliff"):
+                raise ValueError(f"不支持的台地笔刷：{mode}")
+            cliff_material = None if cliff_style is _UNSPECIFIED_RELIEF_STYLE else str(cliff_style or "").strip().lower()
+            stair_material = None if stair_style is _UNSPECIFIED_RELIEF_STYLE else str(stair_style or "").strip().lower()
+            blocked, footprints = self._relief_occupancy_locked(sid)
+            points: dict[tuple[int, int], None] = {}
+            for cell in cells or ():
+                if isinstance(cell, Mapping):
+                    try:
+                        points[int(cell.get("x")), int(cell.get("y"))] = None
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+
+            elevations, stairs, cliffs, stair_materials = (space[field] for field in SPACE_RELIEF_FIELDS)
+            skipped: list[list[int]] = []
+            painted = 0
+            for x, y in points:
+                if (not (0 <= x < w and 0 <= y < h) or self.is_wall_cell(space, x, y)
+                        or self.get_cell_tile(space, x, y)["tile_id"] == "void"):
+                    skipped.append([x, y])
+                    continue
+                key = f"{x},{y}"
+                if mode in stair_modes:
+                    orient = stair_modes[mode]
+                    if orient and (x, y) in blocked:
+                        skipped.append([x, y])
+                        continue
+                    changed = self._set_relief_cell(stairs, key, orient)
+                    if not orient or stair_material in ("", "auto", *VALID_STAIR_STYLES):
+                        style = stair_material if orient and stair_material in VALID_STAIR_STYLES else ""
+                        changed |= self._set_relief_cell(stair_materials, key, style)
+                else:
+                    previous = self.get_cell_elevation(space, x, y)
+                    new_level = previous
+                    if mode == "raise":
+                        new_level = min(MAX_ELEVATION, previous + 1)
+                    elif mode == "lower":
+                        new_level = max(0, previous - 1)
+                    elif mode in elevation_sets:
+                        new_level = elevation_sets[mode]
+                    if ((mode == "set_cliff" and previous == 0)
+                            or (new_level != previous and (x, y) in footprints)):
+                        skipped.append([x, y])
+                        continue
+                    changed = self._set_relief_cell(elevations, key, new_level)
+                    if not new_level or cliff_material in ("", "auto", *VALID_CLIFF_STYLES):
+                        style = cliff_material if new_level and cliff_material in VALID_CLIFF_STYLES else ""
+                        changed |= self._set_relief_cell(cliffs, key, style)
+                painted += int(changed)
+            if painted:
+                self._save_world_locked()
+            return {"space_id": sid, "painted": painted, "skipped_cells": skipped}
+
+    @build_action("保存区域")
+    def upsert_space_zone(self, space_id: str, zone: Mapping[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            space = self._build_space_locked(space_id)
+            zones = list(space["zones"])
+            zid = str(zone.get("zone_id") or "").strip()
+            for index, existing in enumerate(zones):
+                if existing["zone_id"] == zid:
+                    zones[index] = {**existing, **zone, "zone_id": zid}
+                    break
+            else:
+                if len(zones) >= MAX_SPACE_ZONES:
+                    raise ValueError(f"每个空间最多可划定 {MAX_SPACE_ZONES} 个区域。")
+                index = len(zones)
+                if not zid:
+                    base = slugify(clip_text(zone.get("name"), 16, "区域"), prefix="zone")
+                    used = {z["zone_id"] for z in zones}
+                    zid = base
+                    suffix = 2
+                    while zid in used:
+                        zid = f"{base}_{suffix}"
+                        suffix += 1
+                zones.append({**zone, "zone_id": zid})
+            space["zones"] = normalize_zones(zones, space["width"], space["height"])
+            self._save_world_locked()
+            return {"space_id": space["space_id"], "zone": copy.deepcopy(space["zones"][index])}
+
+    @build_action("删除区域")
+    def delete_space_zone(self, space_id: str, zone_id: str) -> dict[str, Any]:
+        with self._lock:
+            space = self._build_space_locked(space_id)
+            zones = [zone for zone in space["zones"] if zone["zone_id"] != zone_id]
+            if len(zones) == len(space["zones"]):
+                raise ValueError(f"区域不存在：{zone_id}")
+            space["zones"] = normalize_zones(zones, space["width"], space["height"])
+            self._save_world_locked()
+            return {"space_id": space["space_id"], "zone_id": zone_id}
+
+    def _shift_space_contents_locked(self, sid: str, dx: int, dy: int, w: int, h: int) -> None:
+        space = self._world["spaces"][sid]
+        for ent in self._world["entities"].values():
+            if ent["space_id"] == sid:
+                ent["x"] += dx
+                ent["y"] += dy
+            portal = ent["traits"].get("portal")
+            if portal and portal.get("target_space_id") == sid:
+                portal["target_x"] = clamp_int(portal["target_x"] + dx, 0, w - 1, 0)
+                portal["target_y"] = clamp_int(portal["target_y"] + dy, 0, h - 1, 0)
+        for actor in self._world["actors"].values():
+            if actor["space_id"] == sid:
+                actor["x"] += dx
+                actor["y"] += dy
+        for area in (*space["zones"], *space["buildings"]):
+            area["x"] += dx
+            area["y"] += dy
+            if "door_x" in area:
+                area["door_x"] += dx
+                area["door_y"] += dy
+
+    @staticmethod
+    def _trim_axis(start: int, end: int, limit: int, minimum: int, margin: int) -> tuple[int, int]:
+        start, end = max(0, start - margin), min(limit, end + margin)
+        size = max(minimum, end - start)
+        start = max(0, min(limit - size, start - (size - (end - start)) // 2))
+        return start, size
+
+    @build_action("裁切外围虚空", inbound=True)
+    def trim_space_void(self, space_id: str, margin: int = 0) -> dict[str, Any]:
+        with self._lock:
+            space = self._build_space_locked(space_id)
+            sid, old_w, old_h = space["space_id"], space["width"], space["height"]
+            tiles = space["tiles"]
+            points = [
+                (x, y) for y in range(old_h) for x in range(old_w)
+                if tiles.get(f"{x},{y}") != "void"
+            ]
+            for ent in self._world["entities"].values():
+                if ent["space_id"] == sid:
+                    points.extend(self._entity_cells(ent) if ent["z"] >= 0 else [(ent["x"], ent["y"])])
+            points.extend((a["x"], a["y"]) for a in self._world["actors"].values() if a["space_id"] == sid)
+            for area in (*space["zones"], *space["buildings"]):
+                x, y = area["x"], area["y"]
+                points.extend(((x, y), (x + area["w"] - 1, y + area["h"] - 1)))
+                if "door_x" in area:
+                    points.append((area["door_x"], area["door_y"]))
+            points = [(x, y) for x, y in points if 0 <= x < old_w and 0 <= y < old_h]
+            xs, ys = zip(*(points or [(old_w // 2, old_h // 2)]))
+            pad = clamp_int(margin, 0, max(old_w, old_h), 0)
+            ox, w = self._trim_axis(min(xs), max(xs) + 1, old_w, MIN_SPACE_WIDTH, pad)
+            oy, h = self._trim_axis(min(ys), max(ys) + 1, old_h, MIN_SPACE_HEIGHT, pad)
+            trimmed = (w, h) != (old_w, old_h)
+            if trimmed:
+                for field in ("tiles", *SPACE_RELIEF_FIELDS):
+                    shifted = {}
+                    for key, value in space[field].items():
+                        x, y = map(int, key.split(","))
+                        if ox <= x < ox + w and oy <= y < oy + h:
+                            shifted[f"{x - ox},{y - oy}"] = value
+                    space[field] = shifted
+                implicit_walls = max(0, min(h, space["wall_rows"] - oy))
+                wall_rows = min(implicit_walls, max(1, h // 3))
+                for y in range(wall_rows, implicit_walls):
+                    for x in range(w):
+                        space["tiles"].setdefault(f"{x},{y}", "wood_wall")
+                self._shift_space_contents_locked(sid, -ox, -oy, w, h)
+                space.update(width=w, height=h, wall_rows=wall_rows)
+                self._save_world_locked()
+            return {"space_id": sid, "trimmed": trimmed, "width": w, "height": h, "offset": [ox, oy]}
+
+    def _portal_landing_locked(
+        self, space: Mapping[str, Any], portal: Mapping[str, Any], *, allow_actor: bool = False,
+    ) -> tuple[int, int] | None:
+        footprint = set(self._entity_cells(portal))
+        actors = {
+            (a["x"], a["y"]): aid for aid, a in self._world["actors"].items()
+            if a["space_id"] == space["space_id"]
+        } if allow_actor else {}
+        fallback = None
+        for x, y in sorted(footprint):
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nx, ny = x + dx, y + dy
+                if (nx, ny) in footprint or not self.can_step_elevation(space, x, y, nx, ny):
+                    continue
+                occupant = actors.get((nx, ny))
+                if self._is_floor_walkable_locked(space, nx, ny, ignore_actor_id=occupant):
+                    if not occupant:
+                        return nx, ny
+                    fallback = fallback or (nx, ny)
+        return fallback
+
+    def _portal_blueprint_locked(self, blueprint_id: str, sid: str) -> dict[str, Any] | None:
+        bp = self._lookup_blueprint_locked(blueprint_id, sid)
+        if bp is None:
+            fallback = {
+                "wood_door": "default_door", "interior_door": "default_door",
+                "staircase_up": "default_staircase", "staircase_down": "default_staircase",
+            }.get(blueprint_id, "")
+            bp = self._lookup_blueprint_locked(fallback, sid) if fallback else None
+        return bp if bp and "portal" in bp["traits"] else None
+
+    def _portal_placement_locked(self, bp: Mapping[str, Any], sid: str, x: int, y: int) -> tuple[str, int, int, int]:
+        placement = "floor" if "stair" in bp["tags"] else bp["placement"]
+        result = self._resolve_placement_locked(sid, x, y, bp["footprint"], placement, bp["solid"])
+        if result[3] != 0:
+            raise ValueError("请将门或楼梯放在地面或墙面。")
+        return result
+
+    def _find_return_portal_cell_locked(
+        self, space: Mapping[str, Any], bp: Mapping[str, Any], x: int, y: int,
+    ) -> tuple[tuple[str, int, int, int], tuple[int, int]]:
+        sid, w, h = space["space_id"], space["width"], space["height"]
+
+        def score(cell: tuple[int, int]) -> tuple[int, int, int, int]:
+            cx, cy = cell
+            return abs(cx - x) + abs(cy - y), int(self.is_wall_cell(space, cx, cy)), cy, cx
+
+        cells = sorted(((cx, cy) for cy in range(h) for cx in range(w)), key=score)
+        for cx, cy in cells:
+            if not self.get_cell_tile(space, cx, cy)["walkable"] and not self.is_wall_cell(space, cx, cy):
+                continue
+            try:
+                location = self._portal_placement_locked(bp, sid, cx, cy)
+            except ValueError:
+                continue
+            landing = self._portal_landing_locked(space, {**bp, "x": cx, "y": cy})
+            if landing is not None:
+                return location, landing
+        raise ValueError("目标空间没有可摆放回程门或楼梯的位置。")
+
+    def link_portal_bidirectional(
+        self, space_id: str = "", *, entity_id: str = "", blueprint_id: str = "", x: int = 0, y: int = 1,
+        mode: str = "existing", target_space_id: str = "", new_space_name: str = "",
+        width: int = 12, height: int = 9, palette_id: str = "", floor_index: int = 2,
+        target_x: int | None = None, target_y: int | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            entities, spaces = self._world["entities"], self._world["spaces"]
+            origin = entities.get(entity_id) if entity_id else None
+            if entity_id and (not origin or origin["z"] != 0 or (space_id and origin["space_id"] != space_id)
+                              or "portal" not in origin["traits"]):
+                raise ValueError("请选中当前空间内可连接的门或楼梯。")
+            source = self._build_space_locked(origin["space_id"] if origin else space_id)
+            sid = source["space_id"]
+            sx, sy = (origin["x"], origin["y"]) if origin else (int(x), int(y))
+            if mode not in ("existing", "new_room", "new_floor"):
+                raise ValueError(f"不支持的空间连接方式：{mode}")
+            group = source["building_group_id"] or sid
+            floor = clamp_int(floor_index, -2, 5, 2)
+            parent_sid = sid
+            floor_label = ""
+            if mode == "new_floor":
+                if source["space_kind"] not in ("room", "building") or floor in (0, source["floor_index"]):
+                    raise ValueError("请选择房间或建筑中与当前楼层不同的楼层。")
+                grouped = [sp for sp in spaces.values() if sp["building_group_id"] == group]
+                if any(sp["floor_index"] == floor for sp in grouped):
+                    raise ValueError("此楼层已经存在，请选择连接已有空间。")
+                parent_sid = next((sp["space_id"] for sp in grouped if sp["floor_index"] == 1), sid)
+                floor_label = f"B{-floor}" if floor < 0 else f"{floor}F"
+
+            create_target = mode != "existing"
+            name = clip_text(new_space_name, 16, (f"{source['name']} {floor_label}" if floor_label else "新房间"))
+            tid = self._available_space_id_locked(name) if create_target else str(target_space_id or "").strip()
+            if tid == sid or (not create_target and tid not in spaces):
+                raise ValueError("请选择另一个可连接的空间。")
+
+            default_bp = "default_staircase" if mode == "new_floor" else "default_door"
+            bp = self._portal_blueprint_locked(blueprint_id or default_bp, sid) if not origin else None
+            if not origin and bp is None:
+                raise ValueError("请选择带传送功能的门或楼梯蓝图。")
+            source_portal = origin if origin else {**bp, "x": sx, "y": sy}
+            source_landing = self._portal_landing_locked(source, source_portal, allow_actor=True)
+            if source_landing is None:
+                raise ValueError("来程门或楼梯旁需要留一格可通行的落脚点。")
+            source_location = self._portal_placement_locked(bp, sid, sx, sy) if bp else None
+            original_traits = source_portal["traits"]["portal"]
+            prior = entities.get(original_traits.get("paired_entity_id", "")) if origin else None
+            prior_traits = (prior or {}).get("traits", {}).get("portal", {})
+            if origin and prior_traits.get("paired_entity_id") != entity_id:
+                prior = None
+            affected = {tid} | ({prior["space_id"]} if prior else set())
+
+            with self._build_mutation_locked("连接双向门或楼层", sid, affected):
+                if create_target:
+                    pal = palette_id or source["palette_id"]
+                    target = normalize_space({
+                        "space_id": tid, "name": name, "width": width, "height": height,
+                        "palette_id": pal if pal in self.all_palettes() else source["palette_id"],
+                        "parent_space_id": parent_sid, "district": source["district"],
+                        "space_kind": "building" if floor_label else "room",
+                        "floor_index": floor if floor_label else 1, "floor_label": floor_label,
+                        "building_group_id": group if floor_label else "",
+                        "ambient_phrase": f"一间叫作「{name}」的小空间。",
+                    })
+                    spaces[tid] = target
+                    if floor_label:
+                        source.update(space_kind="building", building_group_id=group)
+                else:
+                    target = spaces[tid]
+                if ((self._is_isolated_persona_realm_locked(sid) or self._is_isolated_persona_realm_locked(tid))
+                        and self._realm_space_id_locked(sid) != self._realm_space_id_locked(tid)):
+                    raise ValueError("这扇门无法通往其他平行世界。")
+
+                return_ent = prior if prior and prior["space_id"] == tid else None
+                if return_ent is not None:
+                    landing = self._portal_landing_locked(target, return_ent, allow_actor=True)
+                    if landing is None:
+                        raise ValueError("回程门或楼梯旁需要留一格可通行的落脚点。")
+                else:
+                    fallback = "default_staircase" if "stair" in source_portal["tags"] else "default_door"
+                    return_bp = (
+                        self._portal_blueprint_locked(source_portal["blueprint_id"], tid)
+                        or self._portal_blueprint_locked(fallback, tid)
+                    )
+                    if return_bp is None:
+                        raise ValueError("找不到可用的回程门或楼梯蓝图。")
+                    location, landing = self._find_return_portal_cell_locked(
+                        target, return_bp, sx if target_x is None else int(target_x), sy if target_y is None else int(target_y),
+                    )
+                    return_ent = self._instantiate_blueprint_locked(return_bp, tid, *location)
+                    entities[return_ent["entity_id"]] = return_ent
+                if origin is None:
+                    origin = self._instantiate_blueprint_locked(bp, sid, *source_location)
+                    entities[origin["entity_id"]] = origin
+                if prior is not None and prior is not return_ent:
+                    prior_traits.pop("paired_entity_id", None)
+                    prior_traits["target_space_id"] = ""
+
+                for ent, peer, destination, (tx, ty) in (
+                    (origin, return_ent, tid, landing), (return_ent, origin, sid, source_landing),
+                ):
+                    ent["traits"]["portal"].update(
+                        target_space_id=destination, target_x=tx, target_y=ty, paired_entity_id=peer["entity_id"],
+                    )
+                self._append_event_locked(
+                    "portal_linked", space_id=sid,
+                    payload={"entity_id": origin["entity_id"], "target_space_id": tid, "return_entity_id": return_ent["entity_id"]},
+                )
+                self._save_world_locked()
+                return {
+                    "space_id": sid, "target_space_id": tid, "created_space": create_target,
+                    "entity_id": origin["entity_id"], "return_entity_id": return_ent["entity_id"],
+                }
+
+    @staticmethod
+    def _normalize_build_stamp(raw: Mapping[str, Any], stamp_id: str = "") -> dict[str, Any]:
+        w = clamp_int(raw.get("width", raw.get("w")), 1, MAX_SPACE_WIDTH, MAX_SPACE_WIDTH)
+        h = clamp_int(raw.get("height", raw.get("h")), 1, MAX_SPACE_HEIGHT, MAX_SPACE_HEIGHT)
+        tiles = normalize_space_tiles(raw.get("tiles"), w, h)
+        relief = {
+            "elevations": normalize_space_elevations(raw.get("elevations"), w, h),
+            "stairs": normalize_space_stairs(raw.get("stairs"), w, h),
+            "cliff_styles": normalize_space_cliff_styles(raw.get("cliff_styles"), w, h),
+            "stair_styles": normalize_space_stair_styles(raw.get("stair_styles"), w, h),
+        }
+        entries: list[dict[str, Any]] = []
+        raw_entities = raw.get("entities")
+        if isinstance(raw_entities, Sequence):
+            for item in raw_entities[:w * h * 2]:
+                if not isinstance(item, Mapping):
+                    continue
+                dx = clamp_int(item.get("x", item.get("dx")), -1, w, -1)
+                dy = clamp_int(item.get("y", item.get("dy")), -1, h, -1)
+                bid = str(item.get("blueprint_id") or "").strip()
+                if bid and 0 <= dx < w and 0 <= dy < h:
+                    entry = {"blueprint_id": bid, "x": dx, "y": dy, "footprint": normalize_footprint(item.get("footprint"))}
+                    if "z" in item:
+                        entry["z"] = clamp_int(item["z"], 0, 1, 0)
+                    entries.append(entry)
+        keys = set(tiles).union(*relief.values())
+        coordinates = [tuple(map(int, key.split(","))) for key in keys]
+        if "width" not in raw and "w" not in raw:
+            w = max([1, *(x + 1 for x, _ in coordinates), *(e["x"] + e["footprint"][0] for e in entries)])
+        if "height" not in raw and "h" not in raw:
+            h = max([1, *(y + 1 for _, y in coordinates), *(e["y"] + e["footprint"][1] for e in entries)])
+        return {
+            "stamp_id": stamp_id, "name": clip_text(raw.get("name"), 32, "未命名印章"),
+            "width": min(w, MAX_SPACE_WIDTH), "height": min(h, MAX_SPACE_HEIGHT),
+            "tiles": tiles, **relief, "entities": entries,
+        }
+
+    def save_build_stamp(self, raw_stamp: Mapping[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            stamp_id = str(raw_stamp.get("stamp_id") or "").strip() or f"stamp_{uuid4().hex[:12]}"
+            stamp = self._normalize_build_stamp(raw_stamp, stamp_id)
+            if not any(stamp[field] for field in ("tiles", *SPACE_RELIEF_FIELDS, "entities")):
+                raise ValueError("印章里没有可保存的地形或物品。")
+            updated = {**self._stamps, stamp_id: stamp}
+            _atomic_write_json(self._stamps_path, updated)
+            self._stamps = updated
+            return copy.deepcopy(stamp)
+
+    def delete_build_stamp(self, stamp_id: str) -> dict[str, Any]:
+        with self._lock:
+            if stamp_id not in self._stamps:
+                raise ValueError(f"印章不存在：{stamp_id}")
+            updated = {sid: stamp for sid, stamp in self._stamps.items() if sid != stamp_id}
+            _atomic_write_json(self._stamps_path, updated)
+            self._stamps = updated
+            return {"stamp_id": stamp_id}
+
+    @build_action("粘贴组合印章")
+    def paste_build_stamp(self, space_id: str, x: int, y: int, stamp: Mapping[str, Any] | str) -> dict[str, Any]:
+        with self._lock:
+            space = self._build_space_locked(space_id)
+            sid, w, h = space["space_id"], space["width"], space["height"]
+            if isinstance(stamp, str):
+                saved = self._stamps.get(stamp)
+                if saved is None:
+                    raise ValueError(f"印章不存在：{stamp}")
+                stamp = saved
+            stamp = self._normalize_build_stamp(stamp)
+            x, y = int(x), int(y)
+            actors = {(a["x"], a["y"]) for a in self._world["actors"].values() if a["space_id"] == sid}
+            occupied = {
+                point for ent in self._world["entities"].values() if ent["space_id"] == sid and ent["z"] >= 0
+                for point in self._entity_cells(ent)
+            }
+            blocked, footprints = self._relief_occupancy_locked(sid)
+            painted = 0
+            tiles = space["tiles"]
+            elevations, stairs, cliffs, stair_materials = (space[field] for field in SPACE_RELIEF_FIELDS)
+            stamp_tiles = stamp["tiles"]
+            stamp_levels, stamp_stairs, stamp_cliffs, stamp_stair_materials = (stamp[field] for field in SPACE_RELIEF_FIELDS)
+            for key in dict.fromkeys(key for field in ("tiles", *SPACE_RELIEF_FIELDS) for key in stamp[field]):
+                dx, dy = map(int, key.split(","))
+                cx, cy = x + dx, y + dy
+                if not (0 <= cx < w and 0 <= cy < h):
+                    continue
+                dest = f"{cx},{cy}"
+                point = (cx, cy)
+                tid = stamp_tiles.get(key)
+                if tid:
+                    tile = TILE_CATALOG[tid]
+                    if (not tile["walkable"] and point in actors) or (
+                        point in occupied and (tid == "void" or tile["is_wall"] != self.is_wall_cell(space, cx, cy)
+                                               or (not tile["walkable"] and not tile["is_wall"] and point in blocked))
+                    ):
+                        continue
+                    if tiles.get(dest) != tid:
+                        tiles[dest] = tid
+                        painted += 1
+                if self.is_wall_cell(space, cx, cy) or tiles.get(dest) == "void":
+                    if tid:
+                        for field in SPACE_RELIEF_FIELDS:
+                            space[field].pop(dest, None)
+                    continue
+                if point not in footprints and (key in stamp_levels or tid):
+                    self._set_relief_cell(elevations, dest, stamp_levels.get(key))
+                if tid or key in stamp_levels or key in stamp_cliffs:
+                    self._set_relief_cell(cliffs, dest, stamp_cliffs.get(key) if dest in elevations else "")
+                if key in stamp_stairs and point not in blocked:
+                    stairs[dest] = stamp_stairs[key]
+                elif tid:
+                    stairs.pop(dest, None)
+                if tid or key in stamp_stairs or key in stamp_stair_materials:
+                    self._set_relief_cell(stair_materials, dest, stamp_stair_materials.get(key) if dest in stairs else "")
+
+            placed = 0
+            skipped = 0
+            for entry in sorted(stamp["entities"], key=lambda item: item.get("z", 0)):
+                bp = self._lookup_blueprint_locked(entry["blueprint_id"], sid)
+                try:
+                    if not bp:
+                        raise ValueError("蓝图已不存在。")
+                    location = self._resolve_placement_locked(
+                        sid, x + entry["x"], y + entry["y"], bp["footprint"], bp["placement"], bp["solid"],
+                    )
+                    if "z" in entry and entry["z"] != location[3]:
+                        raise ValueError("该笔刷物品的摆放层不匹配。")
+                except ValueError:
+                    skipped += 1
+                    continue
+                ent = self._instantiate_blueprint_locked(bp, sid, *location)
+                self._world["entities"][ent["entity_id"]] = ent
+                placed += 1
+            self._save_world_locked()
+            return {"space_id": sid, "pasted_tiles": painted, "pasted_entities": placed, "skipped_entities": skipped}
+
     def _expand_space_locked(
         self,
         space_id: str,
@@ -2191,24 +2837,13 @@ class WorldEngine:
                 continue
             new_tiles[f"{sx + add_w},{sy + add_n}"] = tid
 
-        new_elevations: dict[str, int] = {}
-        for k, ev in (space.get("elevations") or {}).items():
-            try:
-                sx, sy = (int(p) for p in str(k).split(",", 1))
-                ev_i = int(ev)
-            except (TypeError, ValueError):
-                continue
-            if ev_i > 0:
-                new_elevations[f"{sx + add_w},{sy + add_n}"] = ev_i
-
-        new_stairs: dict[str, str] = {}
-        for k, orient in (space.get("stairs") or {}).items():
-            try:
-                sx, sy = (int(p) for p in str(k).split(",", 1))
-            except ValueError:
-                continue
-            if orient:
-                new_stairs[f"{sx + add_w},{sy + add_n}"] = str(orient)
+        if add_w or add_n:
+            for field in SPACE_RELIEF_FIELDS:
+                shifted = {}
+                for key, value in space[field].items():
+                    x, y = map(int, key.split(","))
+                    shifted[f"{x + add_w},{y + add_n}"] = value
+                space[field] = shifted
 
         new_w = old_w + add_w + add_e
         new_h = old_h + add_n + add_s
@@ -2223,25 +2858,12 @@ class WorldEngine:
                     if has_explicit_fill or yy < add_n:
                         new_tiles[f"{xx},{yy}"] = eff_fill
 
-        if add_w != 0 or add_n != 0:
-            for ent in self._world["entities"].values():
-                if ent.get("space_id") == sid:
-                    ent["x"] = int(ent.get("x") or 0) + add_w
-                    ent["y"] = int(ent.get("y") or 0) + add_n
-                pt = (ent.get("traits") or {}).get("portal")
-                if isinstance(pt, dict) and pt.get("target_space_id") == sid:
-                    pt["target_x"] = clamp_int(int(pt.get("target_x") or 0) + add_w, 0, new_w - 1, 0)
-                    pt["target_y"] = clamp_int(int(pt.get("target_y") or 0) + add_n, 0, new_h - 1, 0)
-            for act in self._world["actors"].values():
-                if act.get("space_id") == sid:
-                    act["x"] = int(act.get("x") or 0) + add_w
-                    act["y"] = int(act.get("y") or 0) + add_n
+        if add_w or add_n:
+            self._shift_space_contents_locked(sid, add_w, add_n, new_w, new_h)
 
         space["width"] = new_w
         space["height"] = new_h
         space["tiles"] = new_tiles
-        space["elevations"] = new_elevations
-        space["stairs"] = new_stairs
         if add_n > 0:
             space["wall_rows"] = 0
         self._append_event_locked(
@@ -2252,6 +2874,7 @@ class WorldEngine:
         self._push_diff_locked(sid, f"空间向外拓展了一片，现在是 {new_w}×{new_h} 格")
         return space, add_w, add_n
 
+    @build_action("扩展地图", inbound=True)
     def expand_space(
         self,
         space_id: str,
@@ -2271,7 +2894,7 @@ class WorldEngine:
         elevations: Mapping[str, int] | None = None,
         stairs: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """写入或更新空间的 2.5D 高低台地（elevations: 1|2）与台阶通道（stairs: ns|ew）。"""
+        """替换空间的台地高度与台阶方向，并保留仍有效的材质。"""
         with self._lock:
             sid = str(space_id or self._world["active_space_id"]).strip()
             space = self._world["spaces"].get(sid)
@@ -2281,8 +2904,12 @@ class WorldEngine:
             h = int(space["height"])
             if elevations is not None:
                 space["elevations"] = normalize_space_elevations(elevations, w, h)
+                space["cliff_styles"] = {key: style for key, style in space["cliff_styles"].items()
+                                         if key in space["elevations"]}
             if stairs is not None:
                 space["stairs"] = normalize_space_stairs(stairs, w, h)
+                space["stair_styles"] = {key: style for key, style in space["stair_styles"].items()
+                                         if key in space["stairs"]}
             self._save_world_locked()
             return {
                 "space_id": sid,
@@ -2290,6 +2917,7 @@ class WorldEngine:
                 "stair_cells": len(space.get("stairs") or {}),
             }
 
+    @build_action("涂刷地形", inbound=True)
     def paint_tiles(
         self,
         space_id: str,
@@ -2400,8 +3028,6 @@ class WorldEngine:
             h = int(space["height"])
             wall_rows = int(space.get("wall_rows") or 0)
             tiles = space.setdefault("tiles", {})
-            elevs = space.get("elevations")
-            stairs = space.get("stairs")
             changed = 0
             for tx, ty, tid in raw_ops:
                 if not (0 <= tx < w and 0 <= ty < h):
@@ -2428,10 +3054,8 @@ class WorldEngine:
                         if eid in self._world["entities"]:
                             res = self.remove_entity(eid)
                             removed_eids.extend(res.get("removed") or [])
-                    if isinstance(elevs, dict):
-                        elevs.pop(key, None)
-                    if isinstance(stairs, dict):
-                        stairs.pop(key, None)
+                    for field in SPACE_RELIEF_FIELDS:
+                        space[field].pop(key, None)
                     if tiles.get(key) != "void":
                         tiles[key] = "void"
                         changed += 1
@@ -6420,6 +7044,7 @@ class WorldEngine:
             "traces": [{"ts": time.time(), "text": "由你直接递来" if delivery_mode == "give" else "从素材蓝图生成"}],
         })
 
+    @build_action("放置家具", space_arg=1)
     def place_from_blueprint(
         self,
         blueprint_id: str,
@@ -6475,6 +7100,7 @@ class WorldEngine:
             self._save_world_locked()
             return copy.deepcopy(entity)
 
+    @build_action("移动物品", entity=True, inbound=True)
     def move_entity_ui(self, entity_id: str, x: int, y: int, target_parent_id: str = "") -> dict[str, Any]:
         with self._lock:
             ent = self._world["entities"].get(entity_id)
@@ -6498,10 +7124,19 @@ class WorldEngine:
                 target_parent_id=target_parent_id,
                 ignore_id=entity_id,
             )
+            peer = self._paired_portal_locked(entity_id, ent["traits"].get("portal", {}))
+            if peer and pz != 0:
+                raise ValueError("已连接的门或楼梯必须放在地面或墙面。")
             ent["parent_id"] = parent_id
             ent["x"] = px
             ent["y"] = py
             ent["z"] = pz
+
+            if peer and (px, py) != (old_x, old_y):
+                landing = self._portal_landing_locked(self._world["spaces"][sid], ent, allow_actor=True)
+                if landing is None:
+                    raise ValueError("移动后的入口旁需要留一格可通行的落脚点。")
+                peer.update(target_x=landing[0], target_y=landing[1])
 
             # 若移动的是承载面，同步带着其 z=1 子物品平移
             dx, dy = px - old_x, py - old_y
@@ -6521,6 +7156,18 @@ class WorldEngine:
             self._save_world_locked()
             return copy.deepcopy(ent)
 
+    def _paired_portal_locked(self, entity_id: str, portal: Mapping[str, Any]) -> dict[str, Any] | None:
+        peer = self._world["entities"].get(portal.get("paired_entity_id", ""))
+        peer_portal = (peer or {}).get("traits", {}).get("portal", {})
+        return peer_portal if peer_portal.get("paired_entity_id") == entity_id else None
+
+    def _disconnect_portal_peer_locked(self, entity_id: str, portal: Mapping[str, Any]) -> None:
+        peer = self._paired_portal_locked(entity_id, portal)
+        if peer:
+            peer.pop("paired_entity_id")
+            peer["target_space_id"] = ""
+
+    @build_action("收走物品", entity=True, inbound=True)
     def remove_entity(self, entity_id: str) -> dict[str, Any]:
         with self._lock:
             ent = self._world["entities"].get(entity_id)
@@ -6541,13 +7188,15 @@ class WorldEngine:
                 if ch.get("parent_id") == parent_tag:
                     to_remove.append(cid)
             for rid in to_remove:
-                self._world["entities"].pop(rid, None)
+                removed = self._world["entities"].pop(rid)
+                self._disconnect_portal_peer_locked(rid, removed["traits"].get("portal", {}))
             self._cancel_key_loans_locked(to_remove)
             self._push_diff_locked(sid, f"「{ent['name']}」被收走了")
             self._append_event_locked("entity_removed", space_id=sid, payload={"entity_id": entity_id, "name": ent["name"], "cascade": to_remove})
             self._save_world_locked()
             return {"removed": to_remove}
 
+    @build_action("编辑物品", entity=True, inbound=True)
     def update_entity_spec(
         self,
         entity_id: str,
@@ -6568,6 +7217,7 @@ class WorldEngine:
                 ent["brief"] = clip_text(brief, MAX_BRIEF_CHARS, ent["brief"])
             if detail is not None:
                 ent["detail"] = clip_text(detail, MAX_DETAIL_CHARS, ent["detail"])
+            previous_portal = dict(ent["traits"].get("portal", {}))
             if traits is not None:
                 ent["traits"] = normalize_traits(
                     traits,
@@ -6576,6 +7226,13 @@ class WorldEngine:
                 )
             if portal_target_space_id is not None and "portal" in ent["traits"]:
                 ent["traits"]["portal"]["target_space_id"] = str(portal_target_space_id).strip()
+            portal = ent["traits"].get("portal", {})
+            if previous_portal.get("paired_entity_id") and any(
+                portal.get(field) != previous_portal.get(field)
+                for field in ("target_space_id", "target_x", "target_y", "paired_entity_id")
+            ):
+                self._disconnect_portal_peer_locked(entity_id, previous_portal)
+                portal.pop("paired_entity_id", None)
             if "restable" in ent["traits"]:
                 ent["solid"] = False
             elif "portal" in ent["traits"]:
@@ -6591,8 +7248,10 @@ class WorldEngine:
                 raise ValueError(f"空间不存在：{sid}")
             removed = [eid for eid, ent in self._world["entities"].items()
                        if ent.get("space_id") == sid and not ent["parent_id"].startswith(("inventory:", "actor:"))]
+            affected = {sid} | self._inbound_portal_spaces_locked(sid)
             for eid in removed:
-                self._world["entities"].pop(eid, None)
+                ent = self._world["entities"].pop(eid)
+                self._disconnect_portal_peer_locked(eid, ent["traits"].get("portal", {}))
             self._cancel_key_loans_locked(removed)
             for act in self._world["actors"].values():
                 if act.get("space_id") == sid:
@@ -6600,6 +7259,7 @@ class WorldEngine:
                     act["posture"] = "standing"
             self._append_event_locked("space_cleared", space_id=sid, payload={"count": len(removed)})
             self._save_world_locked()
+            self._build_history.discard_spaces(affected)
             return {"space_id": sid, "removed_count": len(removed)}
 
     def apply_starter_pack(self, space_id: str = "") -> list[dict[str, Any]]:
@@ -7649,8 +8309,8 @@ class WorldEngine:
         self._clear_actor_rest_locked(actor)
         tx, ty = self._find_open_floor_cell_locked(
             target_space,
-            preferred_x=int(pt.get("target_x") or 5),
-            preferred_y=int(pt.get("target_y") or 2),
+            preferred_x=int(pt.get("target_x", 5)),
+            preferred_y=int(pt.get("target_y", 2)),
             ignore_actor_id=actor_id,
         )
         self._switch_actor_world_state_locked(actor, target_sid)
@@ -8531,6 +9191,8 @@ class WorldEngine:
                     for sp in self._world["spaces"].values()
                 ],
                 "space": space,
+                "build_history": self._build_history_status_locked(sid),
+                "stamps": copy.deepcopy(list(self._stamps.values())),
                 "parent_space": parent_space_summary,
                 "child_spaces": child_spaces,
                 "building_floors": building_floors,

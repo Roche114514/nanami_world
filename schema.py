@@ -39,6 +39,11 @@ MAX_SPACE_WIDTH = 128
 MIN_SPACE_WIDTH = 8
 MAX_SPACE_HEIGHT = 128
 MIN_SPACE_HEIGHT = 6
+MAX_SPACE_ZONES = 16
+MAX_ELEVATION = 16
+VALID_CLIFF_STYLES = ("earth", "stone", "wood", "brick", "sand", "waterfall")
+VALID_STAIR_STYLES = ("stone", "wood", "sand", "brick")
+SPACE_RELIEF_FIELDS = ("elevations", "stairs", "cliff_styles", "stair_styles")
 
 # 16 种 Minecraft 式地形与墙体方块定义（用于自由铺地、筑墙与地图生成）
 TILE_CATALOG: dict[str, dict[str, Any]] = {
@@ -593,6 +598,7 @@ def normalize_traits(
         pt = src["portal"]
         out["portal"] = {
             "target_space_id": str(pt.get("target_space_id") or "").strip(),
+            **({"paired_entity_id": str(pt["paired_entity_id"]).strip()} if pt.get("paired_entity_id") else {}),
             "target_x": clamp_int(pt.get("target_x"), 0, MAX_SPACE_WIDTH - 1, 5),
             "target_y": clamp_int(pt.get("target_y"), 0, MAX_SPACE_HEIGHT - 1, 2),
             "is_open": bool(pt.get("is_open", False)),
@@ -735,7 +741,7 @@ def normalize_space_tiles(raw: Any, width: int, height: int) -> dict[str, str]:
 
 
 def normalize_space_elevations(raw: Any, width: int, height: int) -> dict[str, int]:
-    """稀疏台地高度表：仅保存高度为 1 或 2 的格子，默认海拔 0 不落盘。"""
+    """稀疏台地高度表：默认海拔 0 不落盘。"""
     if not isinstance(raw, Mapping):
         return {}
     out: dict[str, int] = {}
@@ -747,14 +753,14 @@ def normalize_space_elevations(raw: Any, width: int, height: int) -> dict[str, i
         y = int(m.group(2))
         if not (0 <= x < width and 0 <= y < height):
             continue
-        elev = clamp_int(raw_v, 0, 2, 0)
+        elev = clamp_int(raw_v, 0, MAX_ELEVATION, 0)
         if elev > 0:
             out[f"{x},{y}"] = elev
     return out
 
 
 def normalize_space_stairs(raw: Any, width: int, height: int) -> dict[str, str]:
-    """稀疏台阶坡道表：值为 'ns'（南北向阶梯）或 'ew'（东西向阶梯）。"""
+    """稀疏台阶坡道表：南北向 ns、东西向 ew 或双向 both。"""
     if not isinstance(raw, Mapping):
         return {}
     out: dict[str, str] = {}
@@ -776,13 +782,37 @@ def normalize_space_stairs(raw: Any, width: int, height: int) -> dict[str, str]:
     return out
 
 
+def _normalize_space_styles(raw: Any, width: int, height: int, valid_styles: tuple[str, ...]) -> dict[str, str]:
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for raw_key, raw_style in raw.items():
+        style = str(raw_style or "").strip().lower()
+        if style not in valid_styles:
+            continue
+        match = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", str(raw_key or ""))
+        if match:
+            x, y = int(match[1]), int(match[2])
+            if 0 <= x < width and 0 <= y < height:
+                out[f"{x},{y}"] = style
+    return out
+
+
+def normalize_space_cliff_styles(raw: Any, width: int, height: int) -> dict[str, str]:
+    return _normalize_space_styles(raw, width, height, VALID_CLIFF_STYLES)
+
+
+def normalize_space_stair_styles(raw: Any, width: int, height: int) -> dict[str, str]:
+    return _normalize_space_styles(raw, width, height, VALID_STAIR_STYLES)
+
+
 def normalize_zones(raw: Any, width: int, height: int) -> list[dict[str, Any]]:
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return []
     max_w = max(1, int(width))
     max_h = max(1, int(height))
     out: list[dict[str, Any]] = []
-    for item in raw[:16]:
+    for item in raw[:MAX_SPACE_ZONES]:
         if not isinstance(item, Mapping):
             continue
         name = clip_text(item.get("name"), 16, "区域")
@@ -907,6 +937,8 @@ def normalize_space(raw: Mapping[str, Any]) -> dict[str, Any]:
         "tiles": normalize_space_tiles(raw.get("tiles"), width, height),
         "elevations": normalize_space_elevations(raw.get("elevations"), width, height),
         "stairs": normalize_space_stairs(raw.get("stairs"), width, height),
+        "cliff_styles": normalize_space_cliff_styles(raw.get("cliff_styles"), width, height),
+        "stair_styles": normalize_space_stair_styles(raw.get("stair_styles"), width, height),
         "zones": normalize_zones(raw.get("zones"), width, height),
         "buildings": normalize_buildings(raw.get("buildings"), width, height),
     }

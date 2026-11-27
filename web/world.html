@@ -79,6 +79,12 @@
     border: 2px solid var(--border); background: var(--panel); padding: 5px 8px;
     display: flex; flex-wrap: wrap; align-items: center; gap: 5px; flex: 0 0 auto;
   }
+  .build-bar .px-btn, .build-bar .px-sel { font-size: 11px; }
+  #world-canvas.build-pointer { cursor: crosshair; touch-action: none; }
+  .build-list-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 5px 0; }
+  .build-list-row > :first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .zone-colors { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+  .zone-swatch { width: 23px; height: 23px; border: 1px solid var(--border); cursor: pointer; }
   .tool-btn.active { border-color: var(--ok); background: #1d3326; color: #ccffe0; }
   .build-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
 
@@ -143,6 +149,7 @@
   }
   .hub-bldg-pill:hover { border-color: var(--accent); color: var(--accent); }
   #world-canvas {
+    box-sizing: content-box;
     border: 2px solid var(--border-hi);
     box-shadow: 0 0 0 4px #09080d;
     cursor: crosshair;
@@ -501,8 +508,8 @@
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto;
   }
 
-  /* ── 建造侧栏三合一子标签 ── */
-  .builder-subtabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  /* ── 建造侧栏 ── */
+  .builder-subtabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
   .bsub-tab {
     border: 2px solid var(--border); background: var(--panel-2); color: var(--muted);
     padding: 5px 4px; font-size: 11px; font-weight: 700; cursor: pointer; text-align: center;
@@ -510,6 +517,14 @@
   .bsub-tab:hover { border-color: var(--border-hi); color: var(--text); }
   .bsub-tab.active { border-color: var(--accent); background: #2d243b; color: var(--text); }
   .bsub-pane { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+
+  .material-tools, .material-options { display: grid; gap: 4px; }
+  .material-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .material-options { grid-template-columns: repeat(auto-fit, minmax(54px, 1fr)); }
+  .material-tools .px-btn { text-align: left; }
+  .material-tools .px-btn, .material-options .px-btn { padding: 4px 5px; font-size: 11px; }
+  .material-options .active { border-color: var(--ok); background: #1d3326; color: #ccffe0; }
+  .material-label { margin: 8px 0 4px; font-size: 11px; color: var(--muted); }
 
   /* ── 世界选择大厅 (World Hub) ── */
   .world-hub { display: flex; flex-direction: column; height: 100vh; width: 100vw; background: var(--bg); }
@@ -823,6 +838,10 @@
         <button class="px-btn tool-btn" data-tool="pickaxe" title="点按或拖拽拆除物品/墙体恢复地面">⛏ 镐子拆除</button>
         <button class="px-btn tool-btn" data-tool="erase_tile" title="点按或拖拽直接挖除地块为虚空（按住 Shift 拖拽可矩形挖空）">🕳 挖除地块</button>
         <span class="build-sep"></span>
+        <button class="px-btn" id="btn-build-undo" disabled>↩ 撤销</button>
+        <button class="px-btn" id="btn-build-redo" disabled>↪ 重做</button>
+        <button class="px-btn" id="btn-build-trim">✂ 裁切虚空</button>
+        <span class="build-sep"></span>
         <label class="trait-chip" title="铺设方块触及地图边缘时自动向外延展 4 格"><input type="checkbox" id="chk-auto-expand" checked> ⚡ 边缘扩图</label>
         <div class="spacer"></div>
         <span class="pill" id="space-size-pill">12×9</span>
@@ -930,13 +949,15 @@
         </div>
 
         <div class="builder-subtabs" id="builder-subtabs">
-          <button class="bsub-tab active" data-bsub="furniture">🪑 家具 (<span id="builtin-bp-count">28</span>)</button>
-          <button class="bsub-tab" data-bsub="tiles">🧱 方块 (<span id="tile-count">16</span>)</button>
-          <button class="bsub-tab" data-bsub="forge">✨ 造物 (<span id="custom-bp-count">0</span>)</button>
+          <button class="bsub-tab active" data-bsub="tiles">🧱 地形建筑</button>
+          <button class="bsub-tab" data-bsub="furniture">🪑 家具</button>
+          <button class="bsub-tab" data-bsub="forge">✨ 造物</button>
+          <button class="bsub-tab" data-bsub="stamps">📋 印章</button>
         </div>
 
-        <div class="bsub-pane" id="bsub-furniture">
+        <div class="bsub-pane hidden" id="bsub-furniture">
           <div class="sec-box">
+            <div class="sec-title"><span>家具蓝图</span><span id="builtin-bp-count"></span></div>
             <div class="cat-bar" id="bp-cat-bar">
               <button class="cat-chip active" data-cat="all">全部</button>
               <button class="cat-chip" data-cat="furniture">家具</button>
@@ -948,12 +969,69 @@
           </div>
         </div>
 
-        <div class="bsub-pane hidden" id="bsub-tiles">
+        <div class="bsub-pane hidden" id="bsub-stamps">
           <div class="sec-box">
-            <div class="sec-title"><span>🧱 MC 地形与墙体方块</span><span id="active-tile-label">暖木地板</span></div>
+            <div class="sec-title"><span id="stamp-active">拖拽框选地形与物品</span></div>
+            <div class="delivery-toggle">
+              <button class="px-btn tool-btn" id="btn-stamp-copy" data-tool="stamp_copy">📋 框选</button>
+              <button class="px-btn tool-btn" id="btn-stamp-use" data-tool="stamp_paste" disabled>用作笔刷</button>
+              <button class="px-btn" id="btn-stamp-save" disabled>保存</button>
+            </div>
+            <div id="stamp-list"></div>
+          </div>
+        </div>
+
+        <div class="bsub-pane" id="bsub-tiles">
+          <div class="sec-box">
+            <div class="sec-title"><span>地面与墙体方块</span><span id="active-tile-label"></span></div>
             <div class="tile-grid" id="tile-grid"></div>
-            <div style="margin-top:8px;font-size:11px;color:var(--muted);line-height:1.45;">
-              点选方块后，用上方「🧱 铺方块」「📐 矩形铺地」或「🏰 矩形围墙」在画布直接搭建。
+          </div>
+
+          <div class="sec-box">
+            <div class="sec-title"><span>高低台地与崖壁</span><span>最高 L16</span></div>
+            <div class="material-tools">
+              <button class="px-btn tool-btn" data-tool="raise">⛰ 抬高 +1</button>
+              <button class="px-btn tool-btn" data-tool="lower">⬇ 降低 -1</button>
+              <button class="px-btn tool-btn" data-tool="set_0">⌙ 归平 L0</button>
+              <button class="px-btn tool-btn" data-tool="set_cliff">🎨 仅换崖壁</button>
+            </div>
+            <div class="material-label" id="cliff-style-label">崖壁材质</div>
+            <div class="material-options" role="group" aria-labelledby="cliff-style-label">
+              <button class="px-btn" data-cliff-style="auto">自动</button>
+              <button class="px-btn" data-cliff-style="earth">草泥崖</button>
+              <button class="px-btn" data-cliff-style="stone">砌石崖</button>
+              <button class="px-btn" data-cliff-style="wood">木甲板</button>
+              <button class="px-btn" data-cliff-style="brick">红砖基</button>
+              <button class="px-btn" data-cliff-style="sand">砂岩坡</button>
+              <button class="px-btn" data-cliff-style="waterfall">瀑布</button>
+            </div>
+          </div>
+
+          <div class="sec-box">
+            <div class="sec-title"><span>立体台阶</span></div>
+            <div class="material-options" role="group" aria-label="台阶材质">
+              <button class="px-btn" data-stair-style="auto">自动</button>
+              <button class="px-btn" data-stair-style="stone">石阶</button>
+              <button class="px-btn" data-stair-style="wood">木阶</button>
+              <button class="px-btn" data-stair-style="sand">砂岩阶</button>
+              <button class="px-btn" data-stair-style="brick">红砖阶</button>
+            </div>
+            <div class="material-label" id="stair-orientation-label">方向</div>
+            <div class="material-options" role="group" aria-labelledby="stair-orientation-label">
+              <button class="px-btn" data-stair-mode="stair_ns">南北</button>
+              <button class="px-btn" data-stair-mode="stair_ew">东西</button>
+              <button class="px-btn" data-stair-mode="stair_both">双向</button>
+              <button class="px-btn" data-stair-mode="clear_stair">擦除</button>
+            </div>
+          </div>
+
+          <div class="sec-box">
+            <div class="sec-title"><span>门、楼梯与区域</span></div>
+            <div class="material-tools">
+              <button class="px-btn tool-btn" data-tool="portal" data-portal-blueprint="default_door">🚪 双向木门</button>
+              <button class="px-btn tool-btn" data-tool="portal" data-portal-blueprint="default_staircase">🪜 跨层楼梯</button>
+              <button class="px-btn tool-btn" data-tool="zone">🏷 划定区域</button>
+              <button class="px-btn" id="btn-zone-manager">📋 区域管理</button>
             </div>
           </div>
         </div>
@@ -969,7 +1047,7 @@
           </div>
 
           <div class="sec-box">
-            <div class="sec-title"><span>我的自定义蓝图</span><span>点选即放</span></div>
+            <div class="sec-title"><span>我的自定义蓝图</span><span id="custom-bp-count"></span></div>
             <div class="bp-grid" id="custom-bp-grid"></div>
           </div>
         </div>
@@ -1059,7 +1137,7 @@ const state = {
   snap: null,
   view: "hub",        // "hub" | "characters" | "world"
   uiMode: "play",     // "play" | "build" | "status"
-  builderSub: "furniture", // "furniture" | "tiles" | "forge"
+  builderSub: "tiles", // "furniture" | "tiles" | "forge" | "stamps"
   windowSpaceId: "",
   cmTab: "appearance", // "appearance" | "relations"
   cmActorId: "",
@@ -1079,6 +1157,12 @@ const state = {
   eyeMode: false,
   deliveryMode: "silent",
   tool: "select",
+  cliffStyle: "auto",
+  stairStyle: "auto",
+  stairMode: "stair_ns",
+  portalBlueprintId: "default_door",
+  activeStamp: null,
+  buildPending: false,
   selectedTileId: "tatami",
   bpCategory: "all",
   autoExpand: true,
@@ -1367,6 +1451,8 @@ function renderViewShell() {
   el("bsub-furniture").classList.toggle("hidden", state.builderSub !== "furniture");
   el("bsub-tiles").classList.toggle("hidden", state.builderSub !== "tiles");
   el("bsub-forge").classList.toggle("hidden", state.builderSub !== "forge");
+  el("bsub-stamps").classList.toggle("hidden", state.builderSub !== "stamps");
+  renderBuildControls();
 }
 
 function updateRoamPromptUi() {
@@ -1512,13 +1598,13 @@ function setUiMode(mode) {
     state.dockOpen = true;
   }
   if (state.uiMode !== "build") {
+    if (state.drag?.mode === "advanced_build") state.drag = null;
     state.selectedBlueprintId = "";
     state.tool = "select";
     const cancelBtn = el("btn-cancel-brush");
     if (cancelBtn) cancelBtn.classList.add("hidden");
     const hintEl = el("place-hint");
     if (hintEl) hintEl.textContent = "未选中放置笔刷";
-    document.querySelectorAll(".tool-btn[data-tool]").forEach((b) => b.classList.toggle("active", b.dataset.tool === "select"));
   }
   if (state.uiMode !== "status" && state.eyeMode) {
     state.eyeMode = false;
@@ -1531,7 +1617,7 @@ function setUiMode(mode) {
 }
 
 function setBuilderSub(sub) {
-  state.builderSub = (sub === "tiles" || sub === "forge") ? sub : "furniture";
+  state.builderSub = (["tiles", "forge", "stamps"].includes(sub)) ? sub : "furniture";
   renderViewShell();
 }
 
@@ -1590,22 +1676,7 @@ function setZoom(nextZoom) {
 }
 
 function scrollToCell(cx, cy, smooth = true) {
-  const wrap = el("stage-wrap");
-  if (!wrap) return;
-  const px = (Number(cx || 0) + 0.5) * TILE * state.zoom;
-  const py = (Number(cy || 0) + 0.5) * TILE * state.zoom;
-  const targetL = Math.max(0, px - wrap.clientWidth / 2);
-  const targetT = Math.max(0, py - wrap.clientHeight / 2);
-  if (!smooth) {
-    wrap.scrollLeft = targetL;
-    wrap.scrollTop = targetT;
-    return;
-  }
-  wrap.scrollTo({
-    left: targetL,
-    top: targetT,
-    behavior: "smooth",
-  });
+  smoothCenterOnCell(cx, cy, { deadzoneRatio: 0, smooth });
 }
 
 function runDoorTransition(portalEntityId, options = {}) {
@@ -1690,12 +1761,10 @@ function renderCameraControls(cinemaFocus = null) {
 
 function smoothCenterOnCell(cx, cy, { deadzoneRatio = 0.22, smooth = true } = {}) {
   const wrap = el("stage-wrap");
-  if (!wrap) return;
   const canvas = el("world-canvas");
-  const baseX = canvas ? canvas.offsetLeft : 0;
-  const baseY = canvas ? canvas.offsetTop : 0;
-  const px = baseX + (Number(cx || 0) + 0.5) * TILE * state.zoom;
-  const py = baseY + (Number(cy || 0) + 0.5) * TILE * state.zoom;
+  const space = state.snap?.space;
+  if (!wrap || !canvas || !space) return;
+  const { x: px, y: py } = canvasScrollPoint(canvas, space, Number(cx || 0), Number(cy || 0));
   const curCx = wrap.scrollLeft + wrap.clientWidth / 2;
   const curCy = wrap.scrollTop + wrap.clientHeight / 2;
   if (deadzoneRatio > 0
@@ -1805,6 +1874,10 @@ function applySnapshot(snap, terminal, chatHistory) {
   } else if (snap.night_skip && Number(snap.night_skip.seq || 0) > (state.lastNightSkipSeq | 0)) {
     state.lastNightSkipSeq = Number(snap.night_skip.seq);
   }
+  if (state.snap?.active_space_id !== snap.active_space_id) {
+    state.drag = null;
+    state.hoverCell = null;
+  }
   state.snap = snap;
   if (state.view === "world") {
     if (snap.isolated_persona) {
@@ -1843,6 +1916,7 @@ function applySnapshot(snap, terminal, chatHistory) {
   renderTownNavBar();
   renderTilePalette();
   renderAssetsPanel();
+  renderStampPanel();
   renderStatusPanel();
   renderInspector();
   renderDialogueDock();
@@ -1863,6 +1937,9 @@ function applySnapshot(snap, terminal, chatHistory) {
 
 function setBuilderTool(toolName) {
   state.tool = toolName || "select";
+  if (state.drag?.mode === "advanced_build") state.drag = null;
+  if (state.tool === "stamp_copy") setBuilderSub("stamps");
+  renderBuildControls();
   const cancelBtn = el("btn-cancel-brush");
   const hintEl = el("place-hint");
   if (state.tool !== "select" && state.selectedBlueprintId) {
@@ -1872,9 +1949,6 @@ function setBuilderTool(toolName) {
   } else if (state.tool === "select" && !state.selectedBlueprintId) {
     if (hintEl) hintEl.textContent = "未选中放置笔刷";
   }
-  document.querySelectorAll(".tool-btn[data-tool]").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tool === state.tool);
-  });
   renderViewport();
 }
 
@@ -3274,8 +3348,13 @@ const ELEV_LIFT_PX = 8;
 function cellElev(sp, x, y) {
   const elevs = sp && sp.elevations;
   if (!elevs) return 0;
-  const v = Number(elevs[Math.round(x) + "," + Math.round(y)] || 0);
-  return v > 0 ? Math.min(2, v) : 0;
+  return clampElevation(elevs[Math.round(x) + "," + Math.round(y)]);
+}
+
+const MAX_ELEVATION = 16;
+
+function clampElevation(value) {
+  return Math.max(0, Math.min(MAX_ELEVATION, Math.trunc(Number(value) || 0)));
 }
 
 function cellStair(sp, x, y) {
@@ -3315,6 +3394,259 @@ function sampleSmoothElev(sp, gx, gy) {
   const e01 = cellElev(sp, x0, y1);
   const e11 = cellElev(sp, x1, y1);
   return (e00 * (1 - fx) + e10 * fx) * (1 - fy) + (e01 * (1 - fx) + e11 * fx) * fy;
+}
+
+const reliefTopPadding = new WeakMap();
+
+function spaceTopPad(space) {
+  const elevations = space?.elevations;
+  if (!elevations) return 0;
+  if (!reliefTopPadding.has(elevations)) {
+    const maxElev = Object.values(elevations).reduce((max, value) => Math.max(max, clampElevation(value)), 0);
+    reliefTopPadding.set(elevations, maxElev * ELEV_LIFT_PX);
+  }
+  return reliefTopPadding.get(elevations);
+}
+
+function tileTopY(space, x, y) {
+  return y * TILE - cellElev(space, x, y) * ELEV_LIFT_PX;
+}
+
+function projectedCellAt(space, px, py, topPad = spaceTopPad(space)) {
+  const x = Math.max(0, Math.min(space.width - 1, Math.floor(px / TILE)));
+  const gridY = Math.floor((py - topPad) / TILE);
+  const frontRow = Math.min(space.height - 1, Math.floor(py / TILE));
+  for (let y = frontRow; y >= Math.max(0, gridY); y--) {
+    if (space.tiles?.[x + "," + y] === "void") continue;
+    const top = tileTopY(space, x, y) + topPad;
+    if (top <= py && py < top + TILE) return { x, y };
+  }
+  return { x, y: Math.max(0, Math.min(space.height - 1, gridY)) };
+}
+
+function canvasScrollPoint(canvas, space, x, y, lift = sampleSmoothElev(space, x, y) * ELEV_LIFT_PX) {
+  const scaleX = canvas.clientWidth / canvas.width || state.zoom;
+  const scaleY = canvas.clientHeight / canvas.height || state.zoom;
+  return {
+    x: canvas.offsetLeft + canvas.clientLeft + (x + 0.5) * TILE * scaleX,
+    y: canvas.offsetTop + canvas.clientTop + ((y + 0.5) * TILE + spaceTopPad(space) - lift) * scaleY,
+  };
+}
+
+const CLIFF_MATERIALS = {
+  earth: ["#8b5a3e", "#593829", "#b98255"],
+  stone: ["#777385", "#4b4657", "#a39bad"],
+  wood: ["#8b5b3d", "#523424", "#c99562"],
+  brick: ["#8c463b", "#6e332a", "#b5695d"],
+  sand: ["#c69562", "#9f6d49", "#edc492"],
+  waterfall: ["#4586a8", "#2b597f", "#b9efff"],
+};
+
+const STAIR_MATERIALS = {
+  stone: ["#b6b0a7", "#66616c", "#e3ddd2"],
+  wood: ["#b98553", "#69472f", "#e5b87f"],
+  sand: ["#c79a6a", "#906246", "#f5d4a4"],
+  brick: ["#a8594a", "#66332c", "#d68776"],
+};
+
+const WOOD_TOP_TILES = new Set(["wood_floor", "dark_wood", "tatami"]);
+const PAVED_TOP_TILES = new Set(["cobble", "stone_tile", "wood_floor", "sand", "tatami", "carpet_blue", "carpet_pink"]);
+
+function cliffStyleFor(space, key, tid) {
+  const override = space.cliff_styles?.[key];
+  if (override && Object.hasOwn(CLIFF_MATERIALS, override)) return override;
+  if (tid === "grass" || tid === "flower_grass") return "earth";
+  if (tid === "sand") return "sand";
+  if (WOOD_TOP_TILES.has(tid) || tid === "carpet_pink" || tid === "carpet_blue") return "wood";
+  if (tid === "water") return "waterfall";
+  return "stone";
+}
+
+function stairStyleFor(space, key, tid) {
+  const override = space.stair_styles?.[key];
+  if (override && Object.hasOwn(STAIR_MATERIALS, override)) return override;
+  if (WOOD_TOP_TILES.has(tid)) return "wood";
+  if (tid === "sand") return "sand";
+  if (tid === "brick_wall") return "brick";
+  return "stone";
+}
+
+function drawCliffFace(ctx, x, y, height, style, tile) {
+  const [base, shade, light] = CLIFF_MATERIALS[style];
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, TILE, height);
+  ctx.clip();
+  ctx.fillStyle = base;
+  ctx.fillRect(x, y, TILE, height);
+  if (style === "waterfall") {
+    for (let col = 0; col < TILE; col += 5) {
+      ctx.fillStyle = col % 3 === 0 ? "#72cfea" : "#3e9ac3";
+      ctx.fillRect(x + col, y, col % 2 === 0 ? 3 : 2, height);
+      for (let row = (col * 7) % 18; row < height; row += 18) {
+        ctx.fillStyle = col % 3 === 0 ? light : "#8edbf1";
+        ctx.fillRect(x + col + 1, y + row, 1, 3 + col % 4);
+      }
+    }
+    for (let col = 0; col < TILE; col += 6) {
+      ctx.fillStyle = col % 4 ? "#e1faff" : light;
+      ctx.fillRect(x + col, y, 4, 1 + (col % 5));
+      ctx.fillRect(x + col, y + height - 2 - (col % 4), 5, 3);
+    }
+  } else if (style === "wood") {
+    for (let col = 0; col < TILE; col += 12) {
+      ctx.fillStyle = shade;
+      ctx.fillRect(x + col, y, 3, height);
+      ctx.fillStyle = light;
+      ctx.fillRect(x + col + 3, y, 1, height);
+    }
+    for (let row = 5; row < height; row += 17) {
+      ctx.fillStyle = shade;
+      ctx.fillRect(x, y + row, TILE, 3);
+      ctx.fillStyle = light;
+      ctx.fillRect(x, y + row, TILE, 1);
+    }
+    const isCarpet = tile.tid === "carpet_pink" || tile.tid === "carpet_blue";
+    ctx.fillStyle = isCarpet ? tile.meta.main : light;
+    ctx.fillRect(x, y, TILE, isCarpet ? 3 : 2);
+  } else if (style === "earth" || style === "sand") {
+    for (let row = 5; row < height; row += 9) {
+      for (let col = 0; col < TILE; col += 8) {
+        const band = y + row + ((row + col + x) % 3);
+        ctx.fillStyle = shade;
+        ctx.fillRect(x + col, band, 8, 2);
+        ctx.fillStyle = light;
+        ctx.fillRect(x + col + (row % 3), band + 3, style === "sand" ? 7 : 3, 1);
+      }
+    }
+    if (style === "earth") {
+      ctx.fillStyle = tile.tid === "grass" || tile.tid === "flower_grass" ? tile.meta.main : "#567443";
+      for (let col = 0; col < TILE; col += 4) {
+        ctx.fillRect(x + col, y, 4, 2 + (x + col + (col >> 2)) % 5);
+      }
+    }
+  } else {
+    const course = style === "brick" ? 7 : 10;
+    const block = style === "brick" ? 12 : 16;
+    for (let row = 0; row < height; row += course) {
+      ctx.fillStyle = shade;
+      ctx.fillRect(x, y + row + course - 1, TILE, 1);
+      for (let col = -(row / course % 2) * (block / 2); col < TILE; col += block) {
+        ctx.fillStyle = shade;
+        ctx.fillRect(x + col, y + row, 1, course);
+        ctx.fillStyle = light;
+        ctx.fillRect(x + col + 1, y + row, block - 2, 1);
+      }
+    }
+  }
+  if (style !== "waterfall") {
+    ctx.fillStyle = "rgba(21, 16, 26, .27)";
+    ctx.fillRect(x, y + height - 2, TILE, 2);
+  }
+  ctx.restore();
+}
+
+function drawStairTreads(ctx, x, y, width, height, orientation, style) {
+  const [base, shade, light] = STAIR_MATERIALS[style];
+  const vertical = orientation === "ns";
+  const length = vertical ? height : width;
+  const count = Math.max(1, Math.floor(length / 6));
+  ctx.fillStyle = shade;
+  ctx.fillRect(x, y, width, height);
+  for (let i = 0; i < count; i++) {
+    const start = Math.floor(length * i / count);
+    const end = Math.floor(length * (i + 1) / count);
+    ctx.fillStyle = base;
+    if (vertical) ctx.fillRect(x + 2, y + start, width - 4, end - start - 1);
+    else ctx.fillRect(x + start, y + 2, end - start - 1, height - 4);
+    ctx.fillStyle = light;
+    if (vertical) ctx.fillRect(x + 2, y + start, width - 4, 1);
+    else ctx.fillRect(x + start, y + 2, 1, height - 4);
+  }
+}
+
+function reliefTile(space, x, y) {
+  if (x < 0 || y < 0 || x >= space.width || y >= space.height) return null;
+  const tile = resolveTileMeta(space, x, y);
+  return tile.tid === "void" ? null : { ...tile, x, y, level: cellElev(space, x, y), stair: cellStair(space, x, y) };
+}
+
+function stairBetween(space, tile, neighbor, orientation) {
+  if (!tile?.meta.walkable || !neighbor?.meta.walkable || Math.abs(tile.level - neighbor.level) !== 1) return "";
+  const source = [tile, neighbor].find(({ stair }) => stair === orientation || stair === "both");
+  return source ? stairStyleFor(space, source.x + "," + source.y, source.tid) : "";
+}
+
+function drawProjectedTerrain(ctx, space, palette) {
+  const wallRows = Number(space.wall_rows ?? 1);
+  const grid = Array.from({ length: space.height }, (_, y) =>
+    Array.from({ length: space.width }, (_, x) => reliefTile(space, x, y)));
+  // Draw the face and top together so the next row can cover either one.
+  for (let y = 0; y < space.height; y++) {
+    for (let x = 0; x < space.width; x++) {
+      const tile = grid[y][x];
+      if (!tile) continue;
+      const { tid, custom, level, stair } = tile;
+      const key = x + "," + y;
+      const px = x * TILE, py = y * TILE - level * ELEV_LIFT_PX;
+      const north = grid[y - 1]?.[x], south = grid[y + 1]?.[x];
+      const west = grid[y][x - 1], east = grid[y][x + 1];
+      const drop = level - (south?.level || 0);
+      const hasFace = drop > 0;
+      const faceHeight = hasFace ? drop * ELEV_LIFT_PX : (y + 1 < space.height && !south ? 6 : 0);
+      const cliffStyle = cliffStyleFor(space, key, tid);
+      const southStair = stairBetween(space, tile, south, "ns");
+      if (faceHeight) {
+        drawCliffFace(ctx, px, py + TILE, faceHeight, cliffStyle, tile);
+        if (southStair) drawStairTreads(ctx, px + 6, py + TILE, TILE - 12, faceHeight, "ns", southStair);
+      }
+      drawCellTile(ctx, custom ? tid : "", x, y, wallRows, px, py, palette, TILE);
+
+      if (tid === "water" || PAVED_TOP_TILES.has(tid)) {
+        const water = tid === "water";
+        const edged = (other) => water ? other && other.tid !== "water"
+          : other?.custom && other.tid !== tid && !PAVED_TOP_TILES.has(other.tid);
+        const edge = water ? 3 : 2;
+        ctx.fillStyle = water ? "rgba(218,246,255,.55)" : "rgba(24,20,28,.18)";
+        if (edged(north)) ctx.fillRect(px, py, TILE, edge);
+        if (edged(south)) ctx.fillRect(px, py + TILE - edge, TILE, edge);
+        if (edged(west)) ctx.fillRect(px, py, edge, TILE);
+        if (edged(east)) ctx.fillRect(px + TILE - edge, py, edge, TILE);
+      }
+      if (north && ((north.level > level && !stairBetween(space, north, tile, "ns"))
+                    || (space.space_kind !== "town" && north.meta.is_wall && !tile.meta.is_wall))) {
+        ctx.fillStyle = "rgba(18,12,24,.25)";
+        ctx.fillRect(px, py, TILE, 3);
+        ctx.fillStyle = "rgba(18,12,24,.12)";
+        ctx.fillRect(px, py + 3, TILE, 3);
+      }
+
+      if (level > 0) {
+        ctx.fillStyle = CLIFF_MATERIALS[cliffStyle][2];
+        if (north && level > north.level) ctx.fillRect(px, py, TILE, 2);
+        if (west && level > west.level) ctx.fillRect(px, py, 2, TILE);
+        if (east && level > east.level) ctx.fillRect(px + TILE - 2, py, 2, TILE);
+        if (hasFace) ctx.fillRect(px, py + TILE - 2, TILE, 2);
+      }
+      const stairStyle = stairStyleFor(space, key, tid);
+      if (stair === "ns" || stair === "both") drawStairTreads(ctx, px + 6, py, TILE - 12, TILE, "ns", stairStyle);
+      else {
+        const northStair = level > (north?.level || 0) && stairBetween(space, tile, north, "ns");
+        if (northStair) drawStairTreads(ctx, px + 6, py, TILE - 12, 14, "ns", northStair);
+        if (southStair && hasFace) drawStairTreads(ctx, px + 6, py + TILE - 14, TILE - 12, 14, "ns", southStair);
+      }
+      if (stair === "ew") drawStairTreads(ctx, px, py + 6, TILE, TILE - 12, "ew", stairStyle);
+      else {
+        const westStair = level > (west?.level || 0) && stairBetween(space, tile, west, "ew");
+        const eastStair = level > (east?.level || 0) && stairBetween(space, tile, east, "ew");
+        if (stair === "both" || westStair) drawStairTreads(ctx, px, py + 6, stair === "both" ? 6 : 14, TILE - 12, "ew", westStair || stairStyle);
+        if (stair === "both" || eastStair) {
+          const width = stair === "both" ? 6 : 14;
+          drawStairTreads(ctx, px + TILE - width, py + 6, width, TILE - 12, "ew", eastStair || stairStyle);
+        }
+      }
+    }
+  }
 }
 
 function drawIndoorWindowPane(octx, winX, winW, lighting, period, wCode, pal) {
@@ -3505,6 +3837,34 @@ function computeIndoorVisibilityMask(space, entities, actors) {
   return rv.alpha;
 }
 
+function drawProjectedOutline(ctx, space, x, y, w, h, inset) {
+  const edge = (cx, cy, dx1, dy1, dx2, dy2) => {
+    const px = cx * TILE, py = tileTopY(space, cx, cy);
+    ctx.moveTo(px + dx1, py + dy1);
+    ctx.lineTo(px + dx2, py + dy2);
+  };
+  ctx.beginPath();
+  for (let cx = x; cx < x + w; cx++) {
+    const left = cx === x ? inset : 0;
+    const right = cx === x + w - 1 ? TILE - inset : TILE;
+    edge(cx, y, left, inset, right, inset);
+    edge(cx, y + h - 1, left, TILE - inset, right, TILE - inset);
+  }
+  for (let cy = y; cy < y + h; cy++) {
+    const top = cy === y ? inset : 0;
+    const bottom = cy === y + h - 1 ? TILE - inset : TILE;
+    edge(x, cy, inset, top, inset, bottom);
+    edge(x + w - 1, cy, TILE - inset, top, TILE - inset, bottom);
+  }
+  ctx.stroke();
+}
+
+function markProjectedCell(ctx, space, x, y, fill = false) {
+  const px = x * TILE + 2, py = tileTopY(space, x, y) + 2;
+  if (fill) ctx.fillRect(px, py, TILE - 4, TILE - 4);
+  ctx.strokeRect(px, py, TILE - 4, TILE - 4);
+}
+
 function renderViewport() {
   const snap = state.snap;
   if (!snap) return;
@@ -3529,12 +3889,15 @@ function renderViewport() {
   const wallRows = space.wall_rows != null ? Number(space.wall_rows) : 1;
   const W = cols * TILE;
   const H = rows * TILE;
-  if (canvas.width !== W || canvas.height !== H) {
+  const topPad = spaceTopPad(space);
+  const canvasH = H + topPad;
+  const topEdge = -topPad;
+  if (canvas.width !== W || canvas.height !== canvasH) {
     canvas.width = W;
-    canvas.height = H;
+    canvas.height = canvasH;
   }
   canvas.style.width = Math.round(W * state.zoom) + "px";
-  canvas.style.height = Math.round(H * state.zoom) + "px";
+  canvas.style.height = Math.round(canvasH * state.zoom) + "px";
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
 
@@ -3552,262 +3915,28 @@ function renderViewport() {
     space.space_id, cols, rows, wallRows, space.space_kind || "room", Number(space.floor_index || 0),
     pal.palette_id || "", period, wCode,
     JSON.stringify(spaceTiles), JSON.stringify(spaceElevs), JSON.stringify(spaceStairs),
+    JSON.stringify(space.cliff_styles), JSON.stringify(space.stair_styles),
     JSON.stringify(zonesList), JSON.stringify(buildingsList),
   ].join("|");
   if (!state.terrainCache || state.terrainCache.key !== cacheKey || !state.terrainCache.canvas) {
     const off = document.createElement("canvas");
     off.width = W;
-    off.height = H;
+    off.height = canvasH;
     const octx = off.getContext("2d");
     octx.imageSmoothingEnabled = false;
-    const hasRelief = Object.keys(spaceElevs).length > 0;
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const px = x * TILE;
-        const py = y * TILE;
-        const rawTid = spaceTiles[x + "," + y] || "";
-        const ev = hasRelief ? cellElev(space, x, y) : 0;
-        drawCellTile(octx, rawTid, x, y, wallRows, px, py, pal, TILE);
-        if (ev > 0) {
-          const lift = ev * ELEV_LIFT_PX;
-          drawCellTile(octx, rawTid, x, y, wallRows, px, py - lift, pal, TILE);
-          octx.fillStyle = ev === 2 ? "rgba(255, 250, 224, 0.13)" : "rgba(255, 248, 220, 0.065)";
-          octx.fillRect(px, py - lift, TILE, TILE);
-        }
-      }
-    }
+    octx.translate(0, topPad);
+    drawProjectedTerrain(octx, space, pal);
 
-    // 地块边缘自然衔接（草坪叶缘 / 水岸白沫压边，消除生硬马赛克拼接感）
-    const pavedSet = new Set(["cobble", "stone_tile", "wood_floor", "sand", "tatami", "carpet_blue", "carpet_pink"]);
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const tid = spaceTiles[x + "," + y] || "";
-        if (tid === "void") continue;
-        const ev = hasRelief ? cellElev(space, x, y) : 0;
-        const py = y * TILE - ev * ELEV_LIFT_PX;
-        const px = x * TILE;
-        if (tid === "water") {
-          octx.fillStyle = "rgba(218, 246, 255, 0.55)";
-          if (y > 0 && (spaceTiles[x + "," + (y - 1)] || "") !== "water") octx.fillRect(px, py, TILE, 3);
-          if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") !== "water") octx.fillRect(px, py + TILE - 3, TILE, 3);
-          if (x > 0 && (spaceTiles[(x - 1) + "," + y] || "") !== "water") octx.fillRect(px, py, 3, TILE);
-          if (x + 1 < cols && (spaceTiles[(x + 1) + "," + y] || "") !== "water") octx.fillRect(px + TILE - 3, py, 3, TILE);
-        } else if (pavedSet.has(tid)) {
-          octx.fillStyle = "rgba(24, 20, 28, 0.18)";
-          const nTid = y > 0 ? (spaceTiles[x + "," + (y - 1)] || "") : tid;
-          const sTid = y + 1 < rows ? (spaceTiles[x + "," + (y + 1)] || "") : tid;
-          const wTid = x > 0 ? (spaceTiles[(x - 1) + "," + y] || "") : tid;
-          const eTid = x + 1 < cols ? (spaceTiles[(x + 1) + "," + y] || "") : tid;
-          if (nTid && nTid !== "void" && nTid !== tid && !pavedSet.has(nTid)) octx.fillRect(px, py, TILE, 2);
-          if (sTid && sTid !== "void" && sTid !== tid && !pavedSet.has(sTid)) octx.fillRect(px, py + TILE - 2, TILE, 2);
-          if (wTid && wTid !== "void" && wTid !== tid && !pavedSet.has(wTid)) octx.fillRect(px, py, 2, TILE);
-          if (eTid && eTid !== "void" && eTid !== tid && !pavedSet.has(eTid)) octx.fillRect(px + TILE - 2, py, 2, TILE);
-        }
-      }
-    }
-
-    // 浮空地块南向厚边（当下方是虚空时，为实心地块画出 6px 断面厚度）
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        if ((spaceTiles[x + "," + y] || "") === "void") continue;
-        if (hasRelief && cellElev(space, x, y) > 0) continue;
-        if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") === "void") {
-          const px = x * TILE;
-          const py = y * TILE;
-          octx.fillStyle = "#261f30";
-          octx.fillRect(px, py + TILE, TILE, 4);
-          octx.fillStyle = "#14101c";
-          octx.fillRect(px, py + TILE + 4, TILE, 2);
-        }
-      }
-    }
-
-    // 室内墙踢脚线与墙脚 AO 阴影（增强房间隔断纵深感）
-    if (space.space_kind !== "town") {
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          if (!resolveTileMeta(space, x, y).meta.is_wall) continue;
-          const px = x * TILE;
-          const py = y * TILE;
-          if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") !== "void" && !resolveTileMeta(space, x, y + 1).meta.is_wall) {
-            octx.fillStyle = "rgba(18, 12, 24, 0.52)";
-            octx.fillRect(px, py + TILE - 3, TILE, 3);
-            const ao = octx.createLinearGradient(0, py + TILE, 0, py + TILE + 10);
-            ao.addColorStop(0, "rgba(10, 8, 18, 0.30)");
-            ao.addColorStop(1, "rgba(10, 8, 18, 0)");
-            octx.fillStyle = ao;
-            octx.fillRect(px, py + TILE, TILE, 10);
-          }
-          if (y >= wallRows && x + 1 < cols && (spaceTiles[(x + 1) + "," + y] || "") !== "void" && !resolveTileMeta(space, x + 1, y).meta.is_wall) {
-            octx.fillStyle = "rgba(10, 8, 18, 0.16)";
-            octx.fillRect(px + TILE, py, 5, TILE);
-          }
-        }
-      }
-    }
-
-    // 2.5D 挡土石崖壁、顶沿护栏与立体石阶绘制
-    if (hasRelief) {
-      for (let y = 0; y < rows; y++) {
-        for (let x = 0; x < cols; x++) {
-          const ev = cellElev(space, x, y);
-          if (ev <= 0) continue;
-          const lift = ev * ELEV_LIFT_PX;
-          const px = x * TILE;
-          const py = y * TILE - lift;
-          const st = cellStair(space, x, y);
-
-          // 北向顶沿亮脊（当前格高于北邻格）
-          if (y > 0 && ev > cellElev(space, x, y - 1)) {
-            const stN = cellStair(space, x, y - 1);
-            const isStairN = st === "ns" || st === "both" || stN === "ns" || stN === "both";
-            if (!isStairN) {
-              octx.fillStyle = "#1f1924";
-              octx.fillRect(px, py, TILE, 2);
-              octx.fillStyle = "#e6dfd0";
-              octx.fillRect(px, py + 2, TILE, 3);
-            } else {
-              // 北向阶梯踏步
-              const steps = 5;
-              const stepH = Math.floor((TILE - 6) / steps);
-              for (let si = 0; si < steps; si++) {
-                const sy = py + 3 + si * stepH;
-                octx.fillStyle = "#dfd7c6";
-                octx.fillRect(px + 4, sy, TILE - 8, stepH - 2);
-                octx.fillStyle = "#5c5563";
-                octx.fillRect(px + 4, sy + stepH - 2, TILE - 8, 2);
-              }
-              octx.fillStyle = "#3b3542";
-              octx.fillRect(px + 1, py + 2, 3, TILE - 4);
-              octx.fillRect(px + TILE - 4, py + 2, 3, TILE - 4);
-            }
-          }
-
-          // 西向断崖边沿与落影
-          if (x > 0 && ev > cellElev(space, x - 1, y)) {
-            const stW = cellStair(space, x - 1, y);
-            const isStairW = st === "ew" || st === "both" || stW === "ew" || stW === "both";
-            if (!isStairW) {
-              octx.fillStyle = "rgba(12, 9, 18, 0.28)";
-              octx.fillRect(px - 5, py + 2, 5, TILE);
-              octx.fillStyle = "#1f1924";
-              octx.fillRect(px, py, 2, TILE);
-              octx.fillStyle = "#dbd3c3";
-              octx.fillRect(px + 2, py, 3, TILE);
-            } else {
-              const steps = 5;
-              const stepW = Math.floor((TILE - 6) / steps);
-              for (let si = 0; si < steps; si++) {
-                const sx = px + 3 + si * stepW;
-                octx.fillStyle = "#dfd7c6";
-                octx.fillRect(sx, py + 4, stepW - 2, TILE - 8);
-                octx.fillStyle = "#5c5563";
-                octx.fillRect(sx, py + 4, 2, TILE - 8);
-              }
-              octx.fillStyle = "#3b3542";
-              octx.fillRect(px + 2, py + 1, TILE - 4, 3);
-              octx.fillRect(px + 2, py + TILE - 4, TILE - 4, 3);
-            }
-          }
-
-          // 东向断崖边沿与落影
-          if (x + 1 < cols && ev > cellElev(space, x + 1, y)) {
-            const stE = cellStair(space, x + 1, y);
-            const isStairE = st === "ew" || st === "both" || stE === "ew" || stE === "both";
-            if (!isStairE) {
-              octx.fillStyle = "rgba(12, 9, 18, 0.32)";
-              octx.fillRect(px + TILE, py + 3, 6, TILE);
-              octx.fillStyle = "#c9c0af";
-              octx.fillRect(px + TILE - 5, py, 3, TILE);
-              octx.fillStyle = "#1f1924";
-              octx.fillRect(px + TILE - 2, py, 2, TILE);
-            } else {
-              const steps = 5;
-              const stepW = Math.floor((TILE - 6) / steps);
-              for (let si = 0; si < steps; si++) {
-                const sx = px + 3 + si * stepW;
-                octx.fillStyle = "#dfd7c6";
-                octx.fillRect(sx, py + 4, stepW - 2, TILE - 8);
-                octx.fillStyle = "#5c5563";
-                octx.fillRect(sx + stepW - 2, py + 4, 2, TILE - 8);
-              }
-              octx.fillStyle = "#3b3542";
-              octx.fillRect(px + 2, py + 1, TILE - 4, 3);
-              octx.fillRect(px + 2, py + TILE - 4, TILE - 4, 3);
-            }
-          }
-
-          // 南向正面 2.5D 砌石挡土崖壁 / 南向宽石阶（视觉立体感核心）
-          if (y + 1 < rows && ev > cellElev(space, x, y + 1)) {
-            const evS = cellElev(space, x, y + 1);
-            const dropLv = Math.max(1, ev - evS);
-            const cliffH = dropLv * ELEV_LIFT_PX + 8;
-            const rimY = py + TILE - 4;
-            const stS = cellStair(space, x, y + 1);
-            const isStairS = st === "ns" || st === "both" || stS === "ns" || stS === "both";
-            if (!isStairS) {
-              // 顶部石压条
-              octx.fillStyle = "#e6dfd0";
-              octx.fillRect(px, rimY, TILE, 3);
-              octx.fillStyle = "#1e1824";
-              octx.fillRect(px, rimY + 3, TILE, 2);
-              // 立面分层砌石
-              const faceY = rimY + 5;
-              octx.fillStyle = ev === 2 ? "#7a7482" : "#6b6673";
-              octx.fillRect(px, faceY, TILE, cliffH);
-              octx.fillStyle = "#4c4754";
-              octx.fillRect(px, faceY + Math.floor(cliffH * 0.52), TILE, Math.ceil(cliffH * 0.48));
-              // 石缝与错缝纹理
-              octx.fillStyle = "#2b2633";
-              const midRow = faceY + Math.floor(cliffH * 0.5);
-              octx.fillRect(px, midRow, TILE, 1);
-              octx.fillRect(px, faceY + cliffH - 2, TILE, 2);
-              for (let bxOff = ((x + y) % 2) * 8 + 8; bxOff < TILE - 4; bxOff += 16) {
-                octx.fillRect(px + bxOff, faceY, 1, midRow - faceY);
-              }
-              for (let bxOff = ((x + y + 1) % 2) * 8 + 12; bxOff < TILE - 4; bxOff += 16) {
-                octx.fillRect(px + bxOff, midRow + 1, 1, faceY + cliffH - midRow - 2);
-              }
-              // 崖脚投影
-              octx.fillStyle = "rgba(10, 8, 16, 0.34)";
-              octx.fillRect(px, faceY + cliffH, TILE, 5);
-            } else {
-              // 南向立体石阶（带左右护石耳墙）
-              const stairTop = py + 10;
-              const totalH = (TILE - 10) + dropLv * ELEV_LIFT_PX + 2;
-              const steps = 6;
-              const stepH = Math.max(4, Math.floor(totalH / steps));
-              octx.fillStyle = "rgba(10, 8, 16, 0.25)";
-              octx.fillRect(px + 2, stairTop + totalH, TILE - 4, 4);
-              for (let si = 0; si < steps; si++) {
-                const sy = stairTop + si * stepH;
-                octx.fillStyle = si % 2 === 0 ? "#e6dfd2" : "#dad1c1";
-                octx.fillRect(px + 4, sy, TILE - 8, Math.max(2, stepH - 2));
-                octx.fillStyle = "#595261";
-                octx.fillRect(px + 4, sy + Math.max(2, stepH - 2), TILE - 8, 2);
-              }
-              const leftAlsoStair = x > 0 && (cellStair(space, x - 1, y) === "ns" || cellStair(space, x - 1, y + 1) === "ns");
-              const rightAlsoStair = x + 1 < cols && (cellStair(space, x + 1, y) === "ns" || cellStair(space, x + 1, y + 1) === "ns");
-              octx.fillStyle = "#3c3645";
-              if (!leftAlsoStair) octx.fillRect(px + 1, stairTop - 2, 4, totalH + 2);
-              if (!rightAlsoStair) octx.fillRect(px + TILE - 5, stairTop - 2, 4, totalH + 2);
-            }
-          }
-        }
-      }
-    }
     // 区域软标（密闭隔间改为动态 Pass 4 随照明显示）
     for (const z of zonesList) {
       if (z.enclosed) continue;
-      const zx = Number(z.x || 0) * TILE;
-      const zy = Number(z.y || 0) * TILE;
-      const zw = Number(z.w || 1) * TILE;
-      const zh = Number(z.h || 1) * TILE;
+      const x = Number(z.x || 0), y = Number(z.y || 0);
+      const zx = x * TILE, zy = tileTopY(space, x, y);
       octx.save();
       octx.strokeStyle = (z.color || "#ffd166") + "44";
       octx.lineWidth = 2;
       octx.setLineDash([6, 4]);
-      octx.strokeRect(zx + 2, zy + 2, zw - 4, zh - 4);
+      drawProjectedOutline(octx, space, x, y, Number(z.w || 1), Number(z.h || 1), 2);
       octx.setLineDash([]);
       octx.font = "bold 10px monospace";
       const zLbl = "✦ " + String(z.name || "");
@@ -3857,9 +3986,8 @@ function renderViewport() {
     const warmWindow = lighting.period === "night" || lighting.period === "dusk";
     const isTownHub = space.space_kind === "town";
     for (const b of buildingsList) {
-      const bElev = cellElev(space, Number(b.x || 0), Number(b.y || 0));
       const bx = Number(b.x || 0) * TILE;
-      const by = Number(b.y || 0) * TILE - bElev * ELEV_LIFT_PX;
+      const by = tileTopY(space, Number(b.x || 0), Number(b.y || 0));
       const bw = Math.max(1, Number(b.w || 1)) * TILE;
       const bh = Math.max(1, Number(b.h || 1)) * TILE;
       const roofH = Math.max(TILE, Math.round(bh * 0.56));
@@ -3908,8 +4036,8 @@ function renderViewport() {
         ? Math.max(2, Math.min(W - sw - 2, bx + Math.round((bw - sw) / 2)))
         : Math.max(2, Math.min(W - sw - 2, Number(b.door_x || 0) * TILE + Math.round((TILE - sw) / 2)));
       const sy = isTownHub
-        ? Math.max(2, by + Math.round(roofH * 0.36) - 9)
-        : Math.max(2, Math.min(H - 20, Number(b.door_y || 0) * TILE - 20));
+        ? Math.max(topEdge + 2, by + Math.round(roofH * 0.36) - 9)
+        : Math.max(topEdge + 2, Math.min(H - 20, tileTopY(space, Number(b.door_x || 0), Number(b.door_y || 0)) - 20));
       octx.fillStyle = "rgba(18, 14, 24, 0.90)";
       octx.fillRect(sx, sy, sw, 18);
       octx.strokeStyle = "#ffd166";
@@ -3924,8 +4052,9 @@ function renderViewport() {
     state.terrainCache = { key: cacheKey, canvas: off, space, palette: pal, period, weatherCode: wCode };
   }
   ctx.fillStyle = "#0e0c14";
-  ctx.fillRect(0, 0, W, H);
-  ctx.drawImage(state.terrainCache.canvas, 0, 0);
+  ctx.fillRect(0, 0, W, canvasH);
+  ctx.save();
+  ctx.translate(0, topPad);
   if (state.uiMode === "build") {
     ctx.save();
     ctx.strokeStyle = "rgba(176, 152, 224, 0.16)";
@@ -3934,7 +4063,7 @@ function renderViewport() {
       for (let x = 0; x < cols; x++) {
         if ((spaceTiles[x + "," + y] || "") !== "void") continue;
         const vx = x * TILE;
-        const vy = y * TILE;
+        const vy = tileTopY(space, x, y);
         ctx.strokeRect(vx + 2.5, vy + 2.5, TILE - 5, TILE - 5);
         ctx.fillStyle = "rgba(176, 152, 224, 0.18)";
         ctx.fillRect(vx + TILE / 2 - 3, vy + TILE / 2, 6, 1);
@@ -3943,6 +4072,8 @@ function renderViewport() {
     }
     ctx.restore();
   }
+
+  ctx.drawImage(state.terrainCache.canvas, 0, topEdge);
 
   // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色（同步计算推门点亮遮罩）
   const visAlphaGrid = computeIndoorVisibilityMask(space, snap.entities || [], snap.actors || []);
@@ -3982,9 +4113,8 @@ function renderViewport() {
   for (const item of drawList) {
     if (item.kind === "entity") {
       const ent = item.ent;
-      const entElev = cellElev(space, ent.x, ent.y);
       const dx = ent.x * TILE;
-      const dy = ent.y * TILE - entElev * ELEV_LIFT_PX - (Number(ent.z) === 1 ? 12 : 0);
+      const dy = tileTopY(space, ent.x, ent.y) - (Number(ent.z) === 1 ? 12 : 0);
       const dw = item.fw * TILE;
       const dh = item.fh * TILE;
       // 地面/桌面小投影
@@ -4015,9 +4145,20 @@ function renderViewport() {
       const activeSp = act.active_sprite || {};
       const standeeImg = (!useDoll && activeSp.data_url) ? loadCachedImage(activeSp.data_url) : null;
       const useStandee = Boolean(standeeImg && standeeImg.complete && standeeImg.naturalWidth > 0);
-      const gx = useDoll ? st.cx : act.x;
-      const gy = useDoll ? st.cy : act.y;
+      const followPlayer = act.is_player && state.uiMode === "roam";
+      const gx = useDoll || followPlayer ? st.cx : act.x;
+      const gy = useDoll || followPlayer ? st.cy : act.y;
       const actLift = Math.round(sampleSmoothElev(space, gx, gy) * ELEV_LIFT_PX);
+      if (followPlayer && !state.drag) {
+        const wrap = el("stage-wrap");
+        if (wrap) {
+          const center = canvasScrollPoint(canvas, space, gx, gy, actLift);
+          const left = Math.max(0, Math.min(wrap.scrollWidth - wrap.clientWidth, center.x - wrap.clientWidth / 2));
+          const top = Math.max(0, Math.min(wrap.scrollHeight - wrap.clientHeight, center.y - wrap.clientHeight / 2));
+          wrap.scrollLeft += (left - wrap.scrollLeft) * 0.35;
+          wrap.scrollTop += (top - wrap.scrollTop) * 0.35;
+        }
+      }
       let dw = TILE;
       let dh = Math.round(TILE * 1.5);
       let dx = gx * TILE;
@@ -4077,20 +4218,6 @@ function renderViewport() {
             ? Math.round((seat.y + sfh) * TILE - dh - 2 - actLift)
             : Math.round((gy + 1) * TILE - dh + bob - actLift);
           if (act.is_player) {
-            if (state.uiMode === "roam" && !state.drag) {
-              const wrap = el("stage-wrap");
-              if (wrap) {
-                const zoom = state.zoom || 1;
-                const targetX = Math.max(0, (gx + 0.5) * TILE * zoom - wrap.clientWidth / 2);
-                const targetY = Math.max(0, ((gy + 0.5) * TILE - actLift) * zoom - wrap.clientHeight / 2);
-                const maxX = Math.max(0, wrap.scrollWidth - wrap.clientWidth);
-                const maxY = Math.max(0, wrap.scrollHeight - wrap.clientHeight);
-                const clampedX = Math.min(maxX, targetX);
-                const clampedY = Math.min(maxY, targetY);
-                wrap.scrollLeft += (clampedX - wrap.scrollLeft) * 0.35;
-                wrap.scrollTop += (clampedY - wrap.scrollTop) * 0.35;
-              }
-            }
             ctx.save();
             ctx.strokeStyle = "#7cd4ff";
             ctx.lineWidth = 2;
@@ -4133,7 +4260,7 @@ function renderViewport() {
       const labelCx = gx * TILE + TILE / 2;
       const labelW = Math.max(TILE - 4, 58);
       const labelX = Math.max(2, Math.min(W - labelW - 2, labelCx - labelW / 2));
-      const labelY = Math.max(16, dy - 14 - (dollIcon ? 18 : 0));
+      const labelY = Math.max(topEdge + 16, dy - 14 - (dollIcon ? 18 : 0));
       ctx.fillStyle = "rgba(12,10,16,0.85)";
       ctx.fillRect(labelX, labelY, labelW, 13);
       ctx.fillStyle = act.is_player ? "#7cd4ff" : (act.actor_id === snap.active_actor_id ? "#ff9dbb" : "#e2e6f0");
@@ -4149,23 +4276,23 @@ function renderViewport() {
       const thoughtTxt = mindHidden ? "" : String((act.autonomy && act.autonomy.last_thought) || "").trim();
       if (isIncap) {
         ctx.fillStyle = "#5a1820";
-        ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 13), 20, 13);
+        ctx.fillRect(labelX + labelW - 20, Math.max(topEdge + 2, labelY - 13), 20, 13);
         ctx.fillStyle = "#ff7878";
         ctx.font = "bold 10px monospace";
-        ctx.fillText("❗", labelX + labelW - 10, Math.max(8, labelY - 6.5));
+        ctx.fillText("❗", labelX + labelW - 10, Math.max(topEdge + 8, labelY - 6.5));
       } else if (act.posture === "resting") {
         if (!useDoll) {
           ctx.fillStyle = "#181d2e";
-          ctx.fillRect(labelX + labelW - 22, Math.max(2, labelY - 12), 22, 12);
+          ctx.fillRect(labelX + labelW - 22, Math.max(topEdge + 2, labelY - 12), 22, 12);
           ctx.fillStyle = "#88d4f5";
           ctx.font = "bold 10px monospace";
-          ctx.fillText("Zzz", labelX + labelW - 11, Math.max(8, labelY - 6));
+          ctx.fillText("Zzz", labelX + labelW - 11, Math.max(topEdge + 8, labelY - 6));
         }
       } else if (!mindHidden && act.vitals && act.vitals.disengaged) {
         ctx.fillStyle = "#2b1b24";
-        ctx.fillRect(labelX + labelW - 20, Math.max(2, labelY - 12), 20, 12);
+        ctx.fillRect(labelX + labelW - 20, Math.max(topEdge + 2, labelY - 12), 20, 12);
         ctx.fillStyle = "#ff9dbb";
-        ctx.fillText("...", labelX + labelW - 10, Math.max(8, labelY - 6));
+        ctx.fillText("...", labelX + labelW - 10, Math.max(topEdge + 8, labelY - 6));
       } else if (act.runtime_speech || thoughtTxt) {
         const words = act.runtime_speech || thoughtTxt;
         const rawStr = (act.runtime_speech ? "" : "💭 ") + (words.length > 26 ? (words.slice(0, 26) + "…") : words);
@@ -4174,7 +4301,7 @@ function renderViewport() {
         const bw = Math.min(186, Math.max(58, Math.max(...linesB.map((ln) => Math.ceil(ctx.measureText(ln).width))) + 14));
         const bh = linesB.length > 1 ? 26 : 16;
         const bx = Math.max(2, Math.min(W - bw - 2, labelCx - bw / 2));
-        const by = Math.max(2, labelY - bh - 5);
+        const by = Math.max(topEdge + 2, labelY - bh - 5);
         ctx.fillStyle = "rgba(252, 248, 240, 0.96)";
         ctx.fillRect(bx, by, bw, bh);
         ctx.strokeStyle = act.runtime_speech ? (sp.accent_color || "#ff8fb1") : "#3d354f";
@@ -4190,7 +4317,7 @@ function renderViewport() {
       if (state.uiMode === "roam" && state.playerPrompt && state.playerPrompt.kind === "actor" && state.playerPrompt.target_id === act.actor_id) {
         const pw = 64;
         const px0 = Math.max(2, Math.min(W - pw - 2, labelCx - pw / 2));
-        const py0 = Math.max(2, labelY - 18);
+        const py0 = Math.max(topEdge + 2, labelY - 18);
         ctx.fillStyle = "#1b2d3c";
         ctx.fillRect(px0, py0, pw, 14);
         ctx.strokeStyle = "#7cd4ff";
@@ -4202,10 +4329,10 @@ function renderViewport() {
       }
       if (act.holding_id) {
         ctx.fillStyle = "#ffd166";
-        ctx.fillRect(gx * TILE + TILE - 12, (gy + 1) * TILE - 14, 9, 9);
+        ctx.fillRect(gx * TILE + TILE - 12, (gy + 1) * TILE - actLift - 14, 9, 9);
         ctx.strokeStyle = "#141016";
         ctx.lineWidth = 1;
-        ctx.strokeRect(gx * TILE + TILE - 12, (gy + 1) * TILE - 14, 9, 9);
+        ctx.strokeRect(gx * TILE + TILE - 12, (gy + 1) * TILE - actLift - 14, 9, 9);
       }
     }
   }
@@ -4225,7 +4352,7 @@ function renderViewport() {
       if (wVis < 0.35) continue;
       const bx0 = x * TILE + 6;
       const bx1 = (x + 1) * TILE - 6;
-      const by0 = wallRows * TILE - 3;
+      const by0 = tileTopY(space, x, wallRows) - 3;
       const by1 = Math.min(H, by0 + TILE * 2.35);
       const shiftX = TILE * 0.7;
       const sGrad = ctx.createLinearGradient(bx0, by0, bx0 + shiftX, by1);
@@ -4254,7 +4381,7 @@ function renderViewport() {
       if (lVis < 0.35) continue;
       const [fw, fh] = ent.footprint || [1, 1];
       const lx = (ent.x + fw * 0.5) * TILE;
-      const ly = (ent.y + fh * 0.5) * TILE;
+      const ly = tileTopY(space, ent.x, ent.y) + fh * TILE * 0.5;
       const grad = ctx.createRadialGradient(lx, ly, 4, lx, ly, TILE * 2.1);
       grad.addColorStop(0, "rgba(255, 208, 132, " + (haloAlpha * lVis).toFixed(3) + ")");
       grad.addColorStop(1, "rgba(255, 208, 132, 0)");
@@ -4264,79 +4391,89 @@ function renderViewport() {
   }
   if (lighting.is_dark) {
     ctx.fillStyle = pal.room.night_mask || "rgba(14, 18, 42, 0.48)";
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(0, topEdge, W, canvasH);
   } else if (lighting.has_lamp_on) {
     for (const lp of lighting.lamp_positions || []) {
       const lVis = visAlphaGrid ? (visAlphaGrid[Math.max(0, Math.min(rows - 1, lp.y)) * cols + Math.max(0, Math.min(cols - 1, lp.x))] ?? 1) : 1;
       if (lVis < 0.35) continue;
       const cx = (lp.x + 0.5) * TILE;
-      const cy = (lp.y + 0.5) * TILE;
+      const cy = tileTopY(space, lp.x, lp.y) + TILE * 0.5;
       const grad = ctx.createRadialGradient(cx, cy, 8, cx, cy, TILE * 2.5);
       grad.addColorStop(0, pal.room.lamp_glow || "rgba(255, 214, 130, 0.36)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, W, H);
+      ctx.fillRect(0, topEdge, W, canvasH);
     }
   }
   if (visAlphaGrid) {
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         const v = visAlphaGrid[y * cols + x];
-        if (v < 0.99) {
+        if (v < 0.99 && spaceTiles[x + "," + y] !== "void") {
           ctx.fillStyle = "rgba(8, 7, 15, " + ((1 - v) * 0.80).toFixed(3) + ")";
-          ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+          ctx.fillRect(x * TILE, tileTopY(space, x, y), TILE, TILE);
         }
       }
     }
-    for (const z of zonesList) {
-      if (!z.enclosed) continue;
-      let bestVis = 0;
-      const zx0 = Math.max(0, Number(z.x || 0));
-      const zy0 = Math.max(0, Number(z.y || 0));
-      const zx1 = Math.min(cols, zx0 + Math.max(1, Number(z.w || 1)));
-      const zy1 = Math.min(rows, zy0 + Math.max(1, Number(z.h || 1)));
+  }
+  for (const z of zonesList) {
+    if (!z.enclosed) continue;
+    const zx0 = Math.max(0, Number(z.x || 0));
+    const zy0 = Math.max(0, Number(z.y || 0));
+    const zx1 = Math.min(cols, zx0 + Math.max(1, Number(z.w || 1)));
+    const zy1 = Math.min(rows, zy0 + Math.max(1, Number(z.h || 1)));
+    const build = state.uiMode === "build";
+    let bestVis = 1;
+    if (visAlphaGrid && !build) {
+      bestVis = 0;
       for (let y = zy0; y < zy1; y++) {
         for (let x = zx0; x < zx1; x++) {
-          const cv = visAlphaGrid[y * cols + x];
-          if (cv > bestVis) bestVis = cv;
+          bestVis = Math.max(bestVis, visAlphaGrid[y * cols + x]);
         }
       }
-      if (bestVis < 0.45) continue;
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, (bestVis - 0.30) / 0.70);
-      ctx.font = "bold 10px monospace";
-      const zLbl = "✦ " + String(z.name || "");
-      const zbw = Math.ceil(ctx.measureText(zLbl).width) + 10;
-      const px0 = zx0 * TILE + 4;
-      const py0 = zy0 * TILE + 4;
-      ctx.fillStyle = "rgba(12, 10, 18, 0.72)";
-      ctx.fillRect(px0, py0, zbw, 15);
-      ctx.fillStyle = z.color || "#ffd166";
-      ctx.textBaseline = "middle";
-      ctx.fillText(zLbl, px0 + 5, py0 + 7.5);
-      ctx.restore();
     }
+    if (bestVis < 0.45) continue;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, (bestVis - 0.30) / 0.70);
+    if (build) {
+      ctx.strokeStyle = (z.color || "#ffd166") + "88";
+      ctx.setLineDash([6, 4]);
+      drawProjectedOutline(ctx, space, zx0, zy0, zx1 - zx0, zy1 - zy0, 2);
+    }
+    ctx.font = "bold 10px monospace";
+    const label = "✦ " + String(z.name || "");
+    const px = zx0 * TILE + 4, py = tileTopY(space, zx0, zy0) + 4;
+    ctx.fillStyle = "rgba(12, 10, 18, 0.72)";
+    ctx.fillRect(px, py, Math.ceil(ctx.measureText(label).width) + 10, 15);
+    ctx.fillStyle = z.color || "#ffd166";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, px + 5, py + 7.5);
+    ctx.restore();
   }
   if (space.space_kind === "town") {
     if (wData.day_tint && period !== "night") {
       ctx.fillStyle = wData.day_tint;
-      ctx.fillRect(0, 0, W, H);
+      ctx.fillRect(0, topEdge, W, canvasH);
     }
     if (wCode === "rain" || wCode === "sakura" || wCode === "snow" || wCode === "cloudy") {
-      drawWeatherOverlay(ctx, W, H, wCode, Number(wData.intensity || 0.5), nowMs);
+      ctx.save();
+      ctx.translate(0, topEdge);
+      drawWeatherOverlay(ctx, W, canvasH, wCode, Number(wData.intensity || 0.5), nowMs);
+      ctx.restore();
     }
   }
 
   // 5. 放物预览、MC 搭建拖选框与反查高亮
-  if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe" || state.drag.mode === "erase_tile") && state.drag.cells) {
+  if (state.uiMode === "build" && ADVANCED_BUILD_TOOLS.has(state.tool)) {
+    drawAdvancedBuildPreview(ctx, snap);
+  } else if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe" || state.drag.mode === "erase_tile") && state.drag.cells) {
     const isPick = state.drag.mode === "pickaxe";
     const isErase = state.drag.mode === "erase_tile";
     ctx.fillStyle = isErase ? "rgba(186, 118, 255, 0.28)" : (isPick ? "rgba(240, 122, 122, 0.35)" : "rgba(124, 212, 255, 0.32)");
     ctx.strokeStyle = isErase ? "#c98cff" : (isPick ? "#f07a7a" : "#7cd4ff");
     ctx.lineWidth = 2;
     for (const c of state.drag.cells.values()) {
-      ctx.fillRect(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4);
-      ctx.strokeRect(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4);
+      markProjectedCell(ctx, space, c.x, c.y, true);
     }
   } else if (state.drag && state.drag.mode === "rect" && state.hoverCell) {
     const x0 = Math.min(state.drag.start.x, state.hoverCell.x);
@@ -4350,8 +4487,7 @@ function renderViewport() {
     for (let yy = y0; yy <= y1; yy++) {
       for (let xx = x0; xx <= x1; xx++) {
         if (state.drag.hollow && xx > x0 && xx < x1 && yy > y0 && yy < y1) continue;
-        ctx.fillRect(xx * TILE + 2, yy * TILE + 2, TILE - 4, TILE - 4);
-        ctx.strokeRect(xx * TILE + 2, yy * TILE + 2, TILE - 4, TILE - 4);
+        markProjectedCell(ctx, space, xx, yy, true);
       }
     }
   } else if (state.hoverCell && state.tool !== "select") {
@@ -4359,19 +4495,19 @@ function renderViewport() {
     const isErase = state.tool === "erase_tile";
     ctx.strokeStyle = isErase ? "#c98cff" : (isPick ? "#f07a7a" : "#7cd4ff");
     ctx.lineWidth = 2;
-    ctx.strokeRect(state.hoverCell.x * TILE + 2, state.hoverCell.y * TILE + 2, TILE - 4, TILE - 4);
+    markProjectedCell(ctx, space, state.hoverCell.x, state.hoverCell.y);
   } else if (state.hoverCell && state.selectedBlueprintId) {
     const bp = snap.blueprints.find((b) => b.blueprint_id === state.selectedBlueprintId);
     const fw = (bp && bp.footprint && bp.footprint[0]) || 1;
     const fh = (bp && bp.footprint && bp.footprint[1]) || 1;
     ctx.strokeStyle = "#78d69a";
     ctx.lineWidth = 2;
-    ctx.strokeRect(state.hoverCell.x * TILE + 2, state.hoverCell.y * TILE + 2, fw * TILE - 4, fh * TILE - 4);
+    drawProjectedOutline(ctx, space, state.hoverCell.x, state.hoverCell.y, fw, fh, 2);
   }
   if (state.highlightPos) {
     ctx.strokeStyle = "#ffd166";
     ctx.lineWidth = 3;
-    ctx.strokeRect(state.highlightPos.x * TILE + 2, state.highlightPos.y * TILE + 2, TILE - 4, TILE - 4);
+    markProjectedCell(ctx, space, state.highlightPos.x, state.highlightPos.y);
   }
   if (state.hoverCell && state.tool === "select" && !state.selectedBlueprintId) {
     const hoveredDoor = snap.entities.find((e) => {
@@ -4387,11 +4523,11 @@ function renderViewport() {
       ctx.save();
       ctx.strokeStyle = "#ffd166";
       ctx.lineWidth = 3;
-      ctx.strokeRect(hoveredDoor.x * TILE + 2, hoveredDoor.y * TILE + 2, TILE - 4, TILE - 4);
+      markProjectedCell(ctx, space, hoveredDoor.x, hoveredDoor.y);
       ctx.font = "bold 11px sans-serif";
       const tw = Math.ceil(ctx.measureText(tip).width) + 14;
       const tx = Math.max(4, Math.min(W - tw - 4, hoveredDoor.x * TILE + TILE / 2 - tw / 2));
-      const ty = Math.max(4, hoveredDoor.y * TILE - 24);
+      const ty = Math.max(topEdge + 4, tileTopY(space, hoveredDoor.x, hoveredDoor.y) - 24);
       ctx.fillStyle = "rgba(18, 14, 24, 0.94)";
       ctx.fillRect(tx, ty, tw, 19);
       ctx.strokeStyle = "#ffd166";
@@ -4404,6 +4540,7 @@ function renderViewport() {
       ctx.restore();
     }
   }
+  ctx.restore();
   if (!state.liveMiniAt || nowMs - state.liveMiniAt >= 160) {
     state.liveMiniAt = nowMs;
     renderTownMinimap();
@@ -4456,7 +4593,7 @@ function renderTownNavBar() {
   const hasChildren = Array.isArray(snap.child_spaces) && snap.child_spaces.length > 0;
   const buildingFloors = Array.isArray(snap.building_floors) ? snap.building_floors : [];
   const isMultiFloorBuilding = kind === "building" && buildingFloors.length > 1;
-  if (kind !== "town" && kind !== "building" && !hasChildren) {
+  if (kind !== "town" && kind !== "building" && !hasChildren && !snap.parent_space) {
     bar.classList.add("hidden");
     return;
   }
@@ -4506,7 +4643,7 @@ function renderTownNavBar() {
     crumb.className = "pill";
     crumb.style.color = "var(--accent-2)";
     const parentIcon = parent && parent.space_kind === "town" ? "🏘️ " : "🏛️ ";
-    crumb.textContent = parentIcon + (parent ? parent.name : "主厅") + " › " + (sp.name || "室内") + (sp.district ? (" · " + sp.district) : "");
+    crumb.textContent = parentIcon + (parent ? parent.name + " › " : "") + (sp.name || "室内") + (sp.district ? (" · " + sp.district) : "");
     bar.appendChild(crumb);
 
     if (snap.current_zone && snap.current_zone.name) {
@@ -4538,17 +4675,18 @@ function renderTownNavBar() {
       }
     }
 
-    const exitPortal = (parent && (snap.entities || []).find((e) => e.traits?.portal?.target_space_id === parent.space_id))
-      || (snap.entities || []).find((e) => e.traits?.portal?.target_space_id);
-    const btnBack = document.createElement("button");
-    btnBack.className = "px-btn primary";
-    btnBack.style.padding = "3px 9px";
-    btnBack.textContent = (parent && parent.space_kind === "town" ? "🚪 走出大门返回" : "🪜 返回") + (parent ? ("「" + parent.name + "」") : "街道");
-    btnBack.onclick = () => {
-      if (exitPortal) runDoorTransition(exitPortal.entity_id);
-      else if (parent && parent.space_id) enterWorld(parent.space_id);
-    };
-    bar.appendChild(btnBack);
+    if (parent) {
+      const exitPortal = snap.entities.find((ent) => ent.traits?.portal?.target_space_id === parent.space_id);
+      const btnBack = document.createElement("button");
+      btnBack.className = "px-btn primary";
+      btnBack.style.padding = "3px 9px";
+      btnBack.textContent = (parent.space_kind === "town" ? "🚪 走出大门返回" : "返回") + "「" + parent.name + "」";
+      btnBack.onclick = () => {
+        if (exitPortal) runDoorTransition(exitPortal.entity_id);
+        else enterWorld(parent.space_id);
+      };
+      bar.appendChild(btnBack);
+    }
   }
 
   const spacer = document.createElement("div");
@@ -4583,6 +4721,32 @@ function renderTownNavBar() {
   bar.appendChild(btnIn);
 }
 
+function minimapViewport(space, wrap, canvas) {
+  if (!wrap || !canvas?.clientWidth || !canvas.clientHeight) return null;
+  const sx = canvas.width / canvas.clientWidth;
+  const sy = canvas.height / canvas.clientHeight;
+  const left = (wrap.scrollLeft - canvas.offsetLeft - canvas.clientLeft) * sx;
+  const top = (wrap.scrollTop - canvas.offsetTop - canvas.clientTop) * sy - spaceTopPad(space);
+  const right = left + wrap.clientWidth * sx;
+  const bottom = top + wrap.clientHeight * sy;
+  const x0 = Math.max(0, Math.floor(left / TILE));
+  const x1 = Math.min(space.width, Math.ceil(right / TILE));
+  let y0 = space.height, y1 = 0;
+  const firstRow = Math.max(0, Math.floor(top / TILE));
+  const lastRow = Math.min(space.height, Math.ceil((bottom + spaceTopPad(space)) / TILE));
+  for (let y = firstRow; y < lastRow; y++) {
+    for (let x = x0; x < x1; x++) {
+      const tileY = tileTopY(space, x, y);
+      if (tileY < bottom && tileY + TILE > top) {
+        y0 = Math.min(y0, y);
+        y1 = y + 1;
+        break;
+      }
+    }
+  }
+  return x0 < x1 && y0 < y1 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+}
+
 function renderTownMinimap() {
   const box = el("town-minimap-box");
   const mm = el("town-minimap");
@@ -4604,32 +4768,26 @@ function renderTownMinimap() {
   const ctx = mm.getContext("2d");
   ctx.imageSmoothingEnabled = false;
   const tiles = sp.tiles || {};
-  const hasMinimapElev = Boolean(sp.elevations && Object.keys(sp.elevations).length > 0);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const tid = tiles[x + "," + y] || "";
-      if (tid === "void") {
-        ctx.fillStyle = "#0e0c14";
-        ctx.fillRect(x * scale, y * scale, scale, scale);
-        continue;
+      const key = x + "," + y;
+      const tid = tiles[key];
+      const px = x * scale, py = y * scale;
+      ctx.fillStyle = tid === "void" ? "#0e0c14" : (state.tileMap.get(tid)?.main || "#4e8c46");
+      ctx.fillRect(px, py, scale, scale);
+      if (tid === "void") continue;
+      const ev = cellElev(sp, x, y);
+      if (ev > 0) {
+        ctx.fillStyle = "rgba(255,255,255," + (0.6 * ev / MAX_ELEVATION) + ")";
+        ctx.fillRect(px, py, scale, scale);
       }
-      const meta = state.tileMap.get(tid);
-      ctx.fillStyle = (meta && meta.main) || "#4e8c46";
-      ctx.fillRect(x * scale, y * scale, scale, scale);
-      if (hasMinimapElev) {
-        const ev = cellElev(sp, x, y);
-        if (ev > 0) {
-          ctx.fillStyle = ev === 2 ? "rgba(255,255,255,0.24)" : "rgba(255,255,255,0.12)";
-          ctx.fillRect(x * scale, y * scale, scale, scale);
-        }
-        if (cellStair(sp, x, y)) {
-          ctx.fillStyle = "#ffe29a";
-          ctx.fillRect(x * scale, y * scale, scale, scale);
-        } else if (ev > 0) {
-          ctx.fillStyle = "#1c1624";
-          if (y + 1 < h && ev > cellElev(sp, x, y + 1)) ctx.fillRect(x * scale, (y + 1) * scale - 1, scale, 1);
-          if (x + 1 < w && ev > cellElev(sp, x + 1, y)) ctx.fillRect((x + 1) * scale - 1, y * scale, 1, scale);
-        }
+      if (cellStair(sp, x, y)) {
+        ctx.fillStyle = "#ffe29a";
+        ctx.fillRect(px + 1, py + 1, Math.max(1, scale - 2), Math.max(1, scale - 2));
+      } else if (ev > 0) {
+        ctx.fillStyle = "#1c1624";
+        if (y + 1 < h && ev > cellElev(sp, x, y + 1)) ctx.fillRect(px, py + scale - 1, scale, 1);
+        if (x + 1 < w && ev > cellElev(sp, x + 1, y)) ctx.fillRect(px + scale - 1, py, 1, scale);
       }
     }
   }
@@ -4644,16 +4802,11 @@ function renderTownMinimap() {
     ctx.fillStyle = act.actor_id === snap.active_actor_id ? "#ff9dbb" : "#7cd4ff";
     ctx.fillRect(Math.max(0, Number(act.x) * scale - 1), Math.max(0, Number(act.y) * scale - 1), scale + 2, scale + 2);
   }
-  const wrap = el("stage-wrap");
-  if (wrap && wrap.clientWidth > 0 && wrap.clientHeight > 0) {
-    const pxPerTile = TILE * state.zoom;
-    const vx = Math.max(0, (wrap.scrollLeft - 12) / pxPerTile) * scale;
-    const vy = Math.max(0, (wrap.scrollTop - 12) / pxPerTile) * scale;
-    const vw = Math.min(mm.width, (wrap.clientWidth / pxPerTile) * scale);
-    const vh = Math.min(mm.height, (wrap.clientHeight / pxPerTile) * scale);
+  const view = minimapViewport(sp, el("stage-wrap"), el("world-canvas"));
+  if (view) {
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(vx, vy, Math.max(6, vw), Math.max(6, vh));
+    ctx.strokeRect(view.x * scale, view.y * scale, view.w * scale, view.h * scale);
   }
   const zLbl = el("minimap-zone-lbl");
   if (zLbl) zLbl.textContent = (snap.current_zone && snap.current_zone.name) || sp.name || "小地图";
@@ -5008,7 +5161,6 @@ function renderTilePalette() {
   const grid = el("tile-grid");
   if (!grid || !snap) return;
   const tiles = (snap.tile_catalog || []).filter((t) => t.tile_id !== "void" && t.category !== "void");
-  el("tile-count").textContent = String(tiles.length);
   const curMeta = state.tileMap.get(state.selectedTileId);
   el("active-tile-label").textContent = curMeta ? curMeta.name : state.selectedTileId;
   grid.innerHTML = "";
@@ -5022,7 +5174,7 @@ function renderTilePalette() {
     btn.appendChild(sp);
     btn.onclick = () => {
       state.selectedTileId = t.tile_id;
-      if (state.tool === "select" || state.tool === "pickaxe" || state.tool === "erase_tile") setBuilderTool("paint_tile");
+      if (!["paint_tile", "rect_tile", "hollow_wall"].includes(state.tool)) setBuilderTool("paint_tile");
       renderTilePalette();
     };
     grid.appendChild(btn);
@@ -5624,7 +5776,7 @@ function renderInspector() {
       tr.portal.is_open ? "关门（恢复碰撞）" : "开门（变为无碰撞）",
       () => interactAndToast(ent.entity_id, tr.portal.is_open ? "close" : "open"),
     );
-    addAct("连接空间", () => openEntityEditModal(ent));
+    addAct("双向连接", () => openPortalLinkModal(null, ent));
   }
   // 放入当前空间内已打开的容器
   if (tr.portable) {
@@ -5638,7 +5790,7 @@ function renderInspector() {
     }
   }
   addAct("改描述", () => openEntityEditModal(ent));
-  addAct("收走", () => openConfirm("确定从空间收走「" + ent.name + "」吗？", () => runAction("remove_entity", { entity_id: ent.entity_id }).then(() => { state.selectedEntityId = ""; })), "danger");
+  addAct("收走", () => openConfirm("确定从空间收走「" + ent.name + "」吗？", () => runAction("remove_entity", { entity_id: ent.entity_id, space_id: ent.space_id }).then(() => { state.selectedEntityId = ""; })), "danger");
 }
 
 function interactAndToast(entityId, action, targetId = "") {
@@ -5653,14 +5805,9 @@ function interactAndToast(entityId, action, targetId = "") {
 function canvasCellFromEvent(ev) {
   const canvas = el("world-canvas");
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const px = (ev.clientX - rect.left) * scaleX;
-  const py = (ev.clientY - rect.top) * scaleY;
-  return {
-    x: Math.max(0, Math.min(state.snap.space.width - 1, Math.floor(px / TILE))),
-    y: Math.max(0, Math.min(state.snap.space.height - 1, Math.floor(py / TILE))),
-  };
+  const px = (ev.clientX - rect.left - canvas.clientLeft) * canvas.width / canvas.clientWidth;
+  const py = (ev.clientY - rect.top - canvas.clientTop) * canvas.height / canvas.clientHeight;
+  return projectedCellAt(state.snap.space, px, py);
 }
 
 function hitTestCanvas(cx, cy) {
@@ -5684,8 +5831,482 @@ function hitTestCanvas(cx, cy) {
   return null;
 }
 
+const RELIEF_TOOLS = new Set(["raise", "lower", "set_0", "set_cliff", "stair"]);
+const ADVANCED_BUILD_TOOLS = new Set([...RELIEF_TOOLS, "zone", "portal", "stamp_copy", "stamp_paste"]);
+
+function renderBuildControls() {
+  const history = state.snap?.build_history || {};
+  for (const [action, label] of [["undo", "撤销"], ["redo", "重做"]]) {
+    const button = el("btn-build-" + action);
+    const operation = history[action + "_label"];
+    button.disabled = state.buildPending || !history["can_" + action];
+    button.title = operation ? label + " · " + operation : label;
+  }
+  const active = state.view === "world" && state.uiMode === "build";
+  const press = (button, selected) => {
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  };
+  document.querySelectorAll(".tool-btn[data-tool]").forEach((button) => {
+    const { tool, portalBlueprint } = button.dataset;
+    press(button, tool === state.tool && (!portalBlueprint || portalBlueprint === state.portalBlueprintId));
+  });
+  document.querySelectorAll("[data-cliff-style]").forEach((button) => press(button, button.dataset.cliffStyle === state.cliffStyle));
+  document.querySelectorAll("[data-stair-style]").forEach((button) => press(button, button.dataset.stairStyle === state.stairStyle));
+  document.querySelectorAll("[data-stair-mode]").forEach((button) => {
+    press(button, state.tool === "stair" && button.dataset.stairMode === state.stairMode);
+  });
+  el("world-canvas").classList.toggle("build-pointer", active && ADVANCED_BUILD_TOOLS.has(state.tool));
+  el("btn-build-trim").disabled = state.buildPending || !state.snap;
+}
+
+async function runBuildAction(action, payload = {}) {
+  if (state.buildPending || !state.snap) throw new Error("请等当前建造操作完成。");
+  const sid = payload.space_id || state.snap.active_space_id;
+  state.buildPending = true;
+  state._interactGen = (state._interactGen | 0) + 1;
+  renderBuildControls();
+  try {
+    const res = await runAction(action, { ...payload, space_id: sid }, false);
+    if (res.snapshot && state.view === "world" && state.snap?.active_space_id === sid) {
+      applySnapshot(res.snapshot, res.terminal, res.chat_history);
+    }
+    return res;
+  } finally {
+    state.buildPending = false;
+    renderBuildControls();
+    renderViewport();
+  }
+}
+
+function runBuildHistory(action) {
+  if (el("btn-build-" + action).disabled) return;
+  runBuildAction(action + "_build")
+    .then(({ build }) => toast((action === "undo" ? "已撤销 · " : "已重做 · ") + build.label))
+    .catch((error) => toast(error.message, true));
+}
+
+function selectionRect(start, end) {
+  return {
+    x: Math.min(start.x, end.x), y: Math.min(start.y, end.y),
+    w: Math.abs(start.x - end.x) + 1, h: Math.abs(start.y - end.y) + 1,
+  };
+}
+
+function addReliefStrokeCells(drag, end) {
+  const start = drag.last;
+  const steps = Math.max(1, Math.abs(end.x - start.x), Math.abs(end.y - start.y));
+  for (let step = 0; step <= steps; step++) {
+    const x = Math.round(start.x + (end.x - start.x) * step / steps);
+    const y = Math.round(start.y + (end.y - start.y) * step / steps);
+    drag.cells.set(x + "," + y, { x, y });
+  }
+  drag.last = end;
+}
+
+function captureBuildStamp(snap, rect) {
+  const tiles = {}, elevations = {}, stairs = {}, cliff_styles = {}, stair_styles = {};
+  for (let y = 0; y < rect.h; y++) {
+    for (let x = 0; x < rect.w; x++) {
+      const px = rect.x + x, py = rect.y + y;
+      const key = x + "," + y, source = px + "," + py;
+      const { tid, custom } = resolveTileMeta(snap.space, px, py);
+      if (tid !== "void" || custom) tiles[key] = tid;
+      if (snap.space.elevations?.[source]) elevations[key] = snap.space.elevations[source];
+      if (snap.space.stairs?.[source]) stairs[key] = snap.space.stairs[source];
+      if (snap.space.cliff_styles?.[source]) cliff_styles[key] = snap.space.cliff_styles[source];
+      if (snap.space.stair_styles?.[source]) stair_styles[key] = snap.space.stair_styles[source];
+    }
+  }
+  const entities = snap.entities.flatMap((entity) => {
+    if (!entity.blueprint_id || (entity.z !== 0 && entity.z !== 1)) return [];
+    const [w, h] = entity.footprint || [1, 1];
+    const x = entity.x - rect.x, y = entity.y - rect.y;
+    if (x < 0 || y < 0 || x + w > rect.w || y + h > rect.h) return [];
+    return [{ x, y, blueprint_id: entity.blueprint_id, footprint: [w, h], z: entity.z }];
+  });
+  return { width: rect.w, height: rect.h, tiles, elevations, stairs, cliff_styles, stair_styles, entities };
+}
+
+function selectBuildStamp(stamp) {
+  state.activeStamp = stamp;
+  setBuilderTool("stamp_paste");
+  setBuilderSub("stamps");
+  renderStampPanel();
+}
+
+function renderStampPanel() {
+  const active = state.activeStamp;
+  el("stamp-active").textContent = active
+    ? (active.name || "剪贴板") + " · " + active.width + "×" + active.height + " · " + active.entities.length + " 件"
+    : "拖拽框选地形与物品";
+  el("btn-stamp-save").disabled = !active || Boolean(active.stamp_id);
+  el("btn-stamp-use").disabled = !active;
+  const list = el("stamp-list");
+  list.replaceChildren();
+  for (const stamp of state.snap?.stamps || []) {
+    const row = document.createElement("div");
+    row.className = "build-list-row";
+    const use = document.createElement("button");
+    use.className = "px-btn";
+    use.textContent = stamp.name + " · " + stamp.width + "×" + stamp.height;
+    use.onclick = () => selectBuildStamp(stamp);
+    const remove = document.createElement("button");
+    remove.className = "px-btn danger";
+    remove.textContent = "删除";
+    remove.onclick = () => openConfirm("删除印章「" + stamp.name + "」？", async () => {
+      await runBuildAction("delete_build_stamp", { stamp_id: stamp.stamp_id });
+      if (state.activeStamp?.stamp_id === stamp.stamp_id) {
+        state.activeStamp = null;
+        if (state.tool === "stamp_paste") setBuilderTool("stamp_copy");
+        renderStampPanel();
+      }
+      toast("已删除印章");
+    });
+    row.append(use, remove);
+    list.append(row);
+  }
+}
+
+function openSaveStampModal() {
+  const stamp = state.activeStamp;
+  if (!stamp) return;
+  showModal("保存组合印章",
+    '<div class="field"><label for="stamp-name">名称</label><input class="px-inp" id="stamp-name" maxlength="32"></div>',
+    [
+      { label: "取消", onClick: closeModal },
+      { label: "保存", cls: "primary", onClick: async (button) => {
+        const name = el("stamp-name").value.trim();
+        if (!name) return toast("请输入印章名称", true);
+        button.disabled = true;
+        try {
+          const res = await runBuildAction("save_build_stamp", { stamp: { ...stamp, name } });
+          closeModal();
+          selectBuildStamp(res.stamp);
+          toast("已保存印章");
+        } catch (error) {
+          button.disabled = false;
+          toast(error.message, true);
+        }
+      } },
+    ], true);
+  el("stamp-name").focus();
+}
+
+function openZoneEditor(zone, fromManager = false) {
+  const space = state.snap.space;
+  const presets = ["#ffd166", "#7cd4ff", "#78d69a", "#c98cff", "#f07a7a"];
+  const color = zone.color || presets[0];
+  const numberField = (field, label, max, min) => '<div class="field"><label for="zone-' + field + '">' + label
+    + '</label><input id="zone-' + field + '" class="px-inp" type="number" min="' + min + '" max="' + max + '" value="' + zone[field] + '"></div>';
+  const picker = presets.map((value) => '<button type="button" class="zone-swatch" data-color="' + value
+    + '" style="background:' + value + '" aria-label="' + value + '"></button>').join("");
+  showModal(zone.zone_id ? "编辑区域" : "划定区域",
+    '<div class="form-grid">'
+    + '<div class="field full"><label for="zone-name">名称</label><input class="px-inp" id="zone-name" maxlength="16" value="' + esc(zone.name) + '"></div>'
+    + numberField("x", "起点 X", space.width - 1, 0) + numberField("y", "起点 Y", space.height - 1, 0)
+    + numberField("w", "宽度", space.width, 1) + numberField("h", "高度", space.height, 1)
+    + '<div class="field full"><label for="zone-color">颜色</label><div class="zone-colors">' + picker
+    + '<input type="color" id="zone-color" value="' + esc(color) + '"></div></div>'
+    + '<div class="field full"><label for="zone-description">简短描述</label><textarea class="px-txt" id="zone-description" maxlength="60" rows="2">' + esc(zone.description) + '</textarea></div>'
+    + '<label class="trait-chip"><input id="zone-enclosed" type="checkbox"' + (zone.enclosed ? " checked" : "") + '> 封闭区域</label></div>',
+    [
+      { label: "取消", onClick: fromManager ? openZoneManager : closeModal },
+      { label: "保存区域", cls: "primary", onClick: async (button) => {
+        const name = el("zone-name").value.trim();
+        if (!name) return toast("请输入区域名称", true);
+        const [x, y, w, h] = ["x", "y", "w", "h"].map((field) => el("zone-" + field).valueAsNumber);
+        if (![x, y, w, h].every(Number.isInteger) || x < 0 || y < 0 || w < 1 || h < 1
+            || x + w > space.width || y + h > space.height) return toast("区域范围必须在地图内", true);
+        const payload = { ...zone, name, x, y, w, h, color: el("zone-color").value,
+          description: el("zone-description").value, enclosed: el("zone-enclosed").checked };
+        button.disabled = true;
+        try {
+          await runBuildAction("upsert_space_zone", { space_id: space.space_id, zone: payload });
+          if (fromManager) openZoneManager();
+          else closeModal();
+          toast("已保存区域");
+        } catch (error) {
+          button.disabled = false;
+          toast(error.message, true);
+        }
+      } },
+    ], true);
+  el("modal-body").querySelectorAll(".zone-swatch").forEach((button) => {
+    button.onclick = () => { el("zone-color").value = button.dataset.color; };
+  });
+  el("zone-name").focus();
+}
+
+function openZoneManager() {
+  const space = state.snap?.space;
+  if (!space) return;
+  const zones = space.zones || [];
+  const rows = zones.map((zone, index) => '<div class="build-list-row">'
+    + '<span> <span style="color:' + esc(zone.color) + '">●</span> ' + esc(zone.name)
+    + ' · ' + zone.w + '×' + zone.h + '</span>'
+    + '<button class="px-btn" data-zone-edit="' + index + '">编辑</button>'
+    + '<button class="px-btn danger" data-zone-delete="' + index + '">删除</button></div>').join("");
+  showModal("区域管理 · " + space.name, rows || '<div>拖拽「划定区域」工具可添加区域。</div>',
+    [{ label: "关闭", onClick: closeModal }], true);
+  el("modal-body").querySelectorAll("[data-zone-edit]").forEach((button) => {
+    button.onclick = () => openZoneEditor(zones[Number(button.dataset.zoneEdit)], true);
+  });
+  el("modal-body").querySelectorAll("[data-zone-delete]").forEach((button) => {
+    const zone = zones[Number(button.dataset.zoneDelete)];
+    button.onclick = () => openConfirm("删除区域「" + zone.name + "」？", async () => {
+      await runBuildAction("delete_space_zone", { space_id: space.space_id, zone_id: zone.zone_id });
+      openZoneManager();
+      toast("已删除区域");
+    });
+  });
+}
+
+function portalAtCell(snap, cell) {
+  return snap.entities.find((ent) => {
+    const [w, h] = ent.footprint || [1, 1];
+    return ent.z === 0 && ent.traits?.portal && cell.x >= ent.x && cell.x < ent.x + w
+      && cell.y >= ent.y && cell.y < ent.y + h;
+  });
+}
+
+function openPortalLinkModal(cell, entity) {
+  const snap = state.snap;
+  const space = snap.space;
+  const linked = entity?.traits.portal.target_space_id;
+  const options = snap.spaces.filter((target) => target.space_id !== space.space_id).map((target) =>
+    '<option value="' + esc(target.space_id) + '"' + (target.space_id === linked ? " selected" : "") + '>' + esc(target.name) + '</option>').join("");
+  const blueprints = snap.blueprints.filter((bp) => bp.traits?.portal).map((bp) =>
+    '<option value="' + esc(bp.blueprint_id) + '"' + (bp.blueprint_id === state.portalBlueprintId ? " selected" : "")
+    + '>' + esc(bp.name) + '</option>').join("");
+  const palettes = snap.palettes.map((palette) =>
+    '<option value="' + esc(palette.palette_id) + '"' + (palette.palette_id === space.palette_id ? " selected" : "")
+    + '>' + esc(palette.name) + '</option>').join("");
+  const used = new Set([space.floor_index, ...snap.building_floors.map((floor) => floor.floor_index)]);
+  const floorOptions = [-2, -1, 1, 2, 3, 4, 5].filter((floor) => !used.has(floor)).map((floor) =>
+    '<option value="' + floor + '"' + (floor === 2 ? " selected" : "") + '>' + (floor < 0 ? "B" + -floor : floor + "F") + '</option>').join("");
+  const allowFloor = ["room", "building"].includes(space.space_kind) && floorOptions;
+  showModal(entity ? "双向连接 · " + entity.name : "放置并连接门或楼梯",
+    '<div class="form-grid">'
+    + (entity ? "" : '<div class="field full"><label for="link-blueprint">门或楼梯</label><select class="px-sel" id="link-blueprint">' + blueprints + '</select></div>')
+    + '<div class="field full"><label for="link-mode">连接方式</label><select class="px-sel" id="link-mode">'
+    + '<option value="existing"' + (options ? "" : " disabled") + '>已有空间</option>'
+    + '<option value="new_room"' + (options ? "" : " selected") + '>新建房间</option>'
+    + (allowFloor ? '<option value="new_floor">新建楼层</option>' : '') + '</select></div>'
+    + '<div class="field full" id="link-existing"><label for="link-target">目标空间</label><select class="px-sel" id="link-target">' + options + '</select></div>'
+    + '<div class="field full" id="link-new-name"><label for="link-name">新空间名称（可选）</label><input class="px-inp" id="link-name" maxlength="16"></div>'
+    + '<div class="field" id="link-new-width"><label for="link-width">宽度</label><input class="px-inp" id="link-width" type="number" min="8" max="128" value="12"></div>'
+    + '<div class="field" id="link-new-height"><label for="link-height">高度</label><input class="px-inp" id="link-height" type="number" min="6" max="128" value="9"></div>'
+    + '<div class="field" id="link-new-palette"><label for="link-palette">调色板</label><select class="px-sel" id="link-palette">' + palettes + '</select></div>'
+    + '<div class="field" id="link-new-floor"><label for="link-floor">楼层</label><select class="px-sel" id="link-floor">' + floorOptions + '</select></div></div>',
+    [
+      { label: "取消", onClick: closeModal },
+      { label: "创建双向连接", cls: "primary", onClick: async (button) => {
+        const mode = el("link-mode").value;
+        const payload = { space_id: space.space_id, mode, ...(entity ? { entity_id: entity.entity_id }
+          : { ...cell, blueprint_id: el("link-blueprint").value }) };
+        if (mode === "existing") payload.target_space_id = el("link-target").value;
+        else Object.assign(payload, {
+          new_space_name: el("link-name").value, width: el("link-width").valueAsNumber || 12,
+          height: el("link-height").valueAsNumber || 9, palette_id: el("link-palette").value,
+          ...(mode === "new_floor" ? { floor_index: Number(el("link-floor").value) } : {}),
+        });
+        button.disabled = true;
+        try {
+          const { link } = await runBuildAction("link_portal_bidirectional", payload);
+          closeModal();
+          state.selectedEntityId = link.entity_id;
+          renderInspector();
+          toast("已设置双向连接和回程入口");
+        } catch (error) {
+          button.disabled = false;
+          toast(error.message, true);
+        }
+      } },
+    ], true);
+  const syncFields = () => {
+    const mode = el("link-mode").value;
+    el("link-existing").classList.toggle("hidden", mode !== "existing");
+    for (const id of ["name", "width", "height", "palette"]) {
+      el("link-new-" + id).classList.toggle("hidden", mode === "existing");
+    }
+    el("link-new-floor").classList.toggle("hidden", mode !== "new_floor");
+  };
+  el("link-mode").onchange = syncFields;
+  syncFields();
+}
+
+function setupAdvancedBuildCanvas(canvas) {
+  const active = () => state.view === "world" && state.uiMode === "build" && state.snap
+    && ADVANCED_BUILD_TOOLS.has(state.tool);
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (!active() || !ev.isPrimary || ev.button !== 0 || state.buildPending) return;
+    ev.preventDefault();
+    if (canvas.setPointerCapture) canvas.setPointerCapture(ev.pointerId);
+    const cell = canvasCellFromEvent(ev);
+    state.hoverCell = cell;
+    state.drag = { mode: "advanced_build", tool: state.tool, pointer: ev.pointerId,
+      sid: state.snap.active_space_id, start: cell, last: cell, cells: new Map(),
+      relief: state.tool === "stair" ? state.stairMode : state.tool,
+      cliffStyle: state.cliffStyle, stairStyle: state.stairStyle };
+    if (RELIEF_TOOLS.has(state.tool)) addReliefStrokeCells(state.drag, cell);
+    renderViewport();
+  });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (!active() || !ev.isPrimary || state.drag?.mode === "pan") return;
+    state.hoverCell = canvasCellFromEvent(ev);
+    const drag = state.drag;
+    if (drag?.pointer === ev.pointerId && RELIEF_TOOLS.has(drag.tool)) addReliefStrokeCells(drag, state.hoverCell);
+    renderViewport();
+  });
+  canvas.addEventListener("pointerleave", () => {
+    if (!active() || state.drag?.mode === "advanced_build") return;
+    state.hoverCell = null;
+    renderViewport();
+  });
+  const cancel = (ev) => {
+    if (state.drag?.mode !== "advanced_build" || state.drag.pointer !== ev.pointerId) return;
+    state.drag = null;
+    state.hoverCell = null;
+    renderViewport();
+  };
+  canvas.addEventListener("pointercancel", cancel);
+  canvas.addEventListener("lostpointercapture", cancel);
+  canvas.addEventListener("pointerup", (ev) => {
+    const drag = state.drag;
+    if (!active() || drag?.mode !== "advanced_build" || drag.pointer !== ev.pointerId) return;
+    state.drag = null;
+    if (drag.sid !== state.snap.active_space_id || drag.tool !== state.tool) return;
+    const cell = canvasCellFromEvent(ev);
+    const rect = selectionRect(drag.start, cell);
+    if (RELIEF_TOOLS.has(drag.tool)) {
+      addReliefStrokeCells(drag, cell);
+      runBuildAction("paint_terrain_relief", {
+        cells: [...drag.cells.values()], mode: drag.relief, cliff_style: drag.cliffStyle, stair_style: drag.stairStyle,
+      })
+        .then(({ relief }) => {
+          if (relief.skipped_cells.length) toast("已跳过 " + relief.skipped_cells.length + " 格不可涂刷的地形");
+        }).catch((error) => toast(error.message, true));
+    } else if (drag.tool === "zone") {
+      openZoneEditor(rect);
+    } else if (drag.tool === "portal" && rect.w === 1 && rect.h === 1) {
+      openPortalLinkModal(cell, portalAtCell(state.snap, cell));
+    } else if (drag.tool === "stamp_copy") {
+      selectBuildStamp(captureBuildStamp(state.snap, rect));
+      toast("已复制，点击画布粘贴");
+    } else if (drag.tool === "stamp_paste" && state.activeStamp && rect.w === 1 && rect.h === 1) {
+      runBuildAction("paste_build_stamp", { ...cell, stamp: state.activeStamp })
+        .then(({ paste }) => toast("已粘贴 " + paste.pasted_tiles + " 格地形、" + paste.pasted_entities
+          + " 件物品" + (paste.skipped_entities ? " · 跳过 " + paste.skipped_entities + " 件" : "")))
+        .catch((error) => toast(error.message, true));
+    }
+    renderViewport();
+  });
+}
+
+function drawAdvancedBuildPreview(ctx, snap) {
+  const { space, palette } = snap;
+  const tool = state.tool;
+  const hover = state.hoverCell;
+  const drag = state.drag?.mode === "advanced_build" ? state.drag : null;
+  const stairLabel = { ns: "↕", ew: "↔", both: "↕↔" };
+  const topPad = spaceTopPad(space);
+  const badge = (x, y, label, color, bottomLeft = false) => {
+    ctx.font = "bold 10px monospace";
+    const width = Math.ceil(ctx.measureText(label).width) + 6;
+    const px = x * TILE + (bottomLeft ? 3 : TILE - width - 3);
+    const py = tileTopY(space, x, y) + (bottomLeft ? TILE - 16 : 3);
+    const visible = projectedCellAt(space, px + width / 2, py + 6 + topPad, topPad);
+    if (visible.y !== y) return;
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(12,10,18,.71)";
+    ctx.fillRect(px, py, width, 13);
+    ctx.fillStyle = color;
+    ctx.textBaseline = "top";
+    ctx.fillText(label, px + 3, py + 1);
+  };
+  ctx.save();
+  ctx.lineWidth = 2;
+  if (RELIEF_TOOLS.has(tool)) {
+    for (const [key, level] of Object.entries(space.elevations || {})) {
+      const [x, y] = key.split(",").map(Number);
+      badge(x, y, "L" + level, level >= 8 ? "#ffd166" : "#dce8fc");
+    }
+    for (const [key, orient] of Object.entries(space.stairs || {})) {
+      const [x, y] = key.split(",").map(Number);
+      badge(x, y, stairLabel[orient] || stairLabel.ns, "#dce8fc", true);
+    }
+    const mode = drag?.relief || (tool === "stair" ? state.stairMode : tool);
+    const isStair = mode.startsWith("stair_");
+    const cliffStyle = drag?.cliffStyle || state.cliffStyle;
+    const stairStyle = drag?.stairStyle || state.stairStyle;
+    const cells = drag ? drag.cells.values() : (hover ? [hover] : []);
+    for (const { x, y } of cells) {
+      const { tid, meta } = resolveTileMeta(space, x, y);
+      const current = cellElev(space, x, y);
+      const next = { raise: Math.min(MAX_ELEVATION, current + 1), lower: Math.max(0, current - 1), set_0: 0 }[mode] ?? current;
+      const blocked = tid === "void" || meta.is_wall || (mode === "set_cliff" && current === 0) || snap.entities.some((ent) => {
+        const [w, h] = ent.footprint || [1, 1];
+        if (ent.z !== 0 || x < ent.x || y < ent.y || x >= ent.x + w || y >= ent.y + h) return false;
+        return isStair ? ent.solid || ent.placement === "floor" : next !== current && (w > 1 || h > 1);
+      });
+      ctx.fillStyle = blocked ? "rgba(240,122,122,.26)" : "rgba(124,212,255,.23)";
+      ctx.strokeStyle = blocked ? "#f07a7a" : "#7cd4ff";
+      markProjectedCell(ctx, space, x, y, true);
+      if (!blocked) {
+        const label = isStair ? stairLabel[mode.slice(6)] : (mode === "clear_stair" ? "×" : "L" + next);
+        const colors = isStair ? STAIR_MATERIALS[stairStyle] : CLIFF_MATERIALS[cliffStyle];
+        badge(x, y, label, colors?.[2] || "#b8eeff");
+      }
+    }
+  } else if (hover && tool === "stamp_paste" && state.activeStamp) {
+    const stamp = state.activeStamp;
+    ctx.globalAlpha = 0.56;
+    const keys = new Set(["tiles", "elevations", "stairs", "cliff_styles", "stair_styles"]
+      .flatMap((field) => Object.keys(stamp[field] || {})));
+    for (const key of keys) {
+      const [dx, dy] = key.split(",").map(Number);
+      const x = hover.x + dx, y = hover.y + dy;
+      if (x >= space.width || y >= space.height) continue;
+      const tile = state.tileMap.get(stamp.tiles[key]);
+      ctx.fillStyle = tile?.main || "#c98cff";
+      ctx.fillRect(x * TILE + 2, tileTopY(space, x, y) + 2, TILE - 4, TILE - 4);
+      if (stamp.elevations[key]) badge(x, y, "L" + stamp.elevations[key], CLIFF_MATERIALS[stamp.cliff_styles?.[key]]?.[2] || "#ffffff");
+      if (stamp.stairs[key]) badge(x, y, stairLabel[stamp.stairs[key]], STAIR_MATERIALS[stamp.stair_styles?.[key]]?.[2] || "#ffffff", true);
+    }
+    for (const ent of stamp.entities) {
+      const x = hover.x + ent.x, y = hover.y + ent.y;
+      const [w, h] = ent.footprint || [1, 1];
+      const bp = snap.blueprints.find((item) => item.blueprint_id === ent.blueprint_id);
+      if (bp?.sprite) {
+        const frames = bp.sprite.frames || {};
+        drawSprite(ctx, bp.sprite, frames.default || Object.values(frames)[0], palette,
+          x * TILE, tileTopY(space, x, y), w * TILE, h * TILE, bp.name, "#c98cff");
+      }
+      ctx.strokeStyle = x + w > space.width || y + h > space.height ? "#f07a7a" : "#efd9ff";
+      drawProjectedOutline(ctx, space, x, y, w, h, 3);
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = hover.x + stamp.width > space.width || hover.y + stamp.height > space.height ? "#f07a7a" : "#c98cff";
+    ctx.setLineDash([6, 4]);
+    drawProjectedOutline(ctx, space, hover.x, hover.y, stamp.width, stamp.height, 1);
+  } else if (hover) {
+    const rect = selectionRect(drag?.start || hover, hover);
+    ctx.strokeStyle = tool === "zone" ? "#ffd166" : "#c98cff";
+    ctx.fillStyle = tool === "zone" ? "rgba(255,209,102,.19)" : "rgba(186,118,255,.21)";
+    for (let y = rect.y; y < rect.y + rect.h; y++) {
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        ctx.fillRect(x * TILE + 2, tileTopY(space, x, y) + 2, TILE - 4, TILE - 4);
+      }
+    }
+    drawProjectedOutline(ctx, space, rect.x, rect.y, rect.w, rect.h, 2);
+  }
+  ctx.restore();
+}
+
 function setupCanvasEvents() {
   const canvas = el("world-canvas");
+  setupAdvancedBuildCanvas(canvas);
 
   const commitTileStroke = (drag) => {
     if (!state.snap || !drag) return;
@@ -5732,6 +6353,7 @@ function setupCanvasEvents() {
       }
       return;
     }
+    if (ADVANCED_BUILD_TOOLS.has(state.tool)) return;
     const prevHover = state.hoverCell;
     const cell = canvasCellFromEvent(ev);
     state.hoverCell = cell;
@@ -5788,7 +6410,7 @@ function setupCanvasEvents() {
       }
       return;
     }
-    if (isStoryWorld()) return;
+    if (isStoryWorld() || ADVANCED_BUILD_TOOLS.has(state.tool)) return;
     const cell = canvasCellFromEvent(ev);
     if (state.tool === "paint_tile") {
       state.drag = {
@@ -5839,7 +6461,7 @@ function setupCanvasEvents() {
   });
 
   canvas.addEventListener("mouseup", (ev) => {
-    if (!state.snap || !state.drag) return;
+    if (!state.snap || !state.drag || state.drag.mode === "advanced_build") return;
     const drag = state.drag;
     state.drag = null;
     if (drag.mode === "pan") {
@@ -6348,6 +6970,7 @@ function openEntityEditModal(ent) {
     + "</div>",
     [
       { label: "取消", onClick: closeModal },
+      ...(isPortal ? [{ label: "双向连接", onClick: () => openPortalLinkModal(null, ent) }] : []),
       {
         label: "保存修改",
         cls: "primary",
@@ -6358,7 +6981,9 @@ function openEntityEditModal(ent) {
             brief: el("ed-brief").value,
             detail: el("ed-detail").value,
           };
-          if (isPortal) payload.portal_target_space_id = el("ed-portal").value;
+          if (isPortal && el("ed-portal").value !== ent.traits.portal.target_space_id) {
+            payload.portal_target_space_id = el("ed-portal").value;
+          }
           if (container) payload.traits = { ...ent.traits, container: { ...container, owner_actor_id: el("ed-chest-owner").value } };
           runAction("update_entity_spec", payload).then(() => { closeModal(); toast("已更新物品规范"); }).catch((e) => toast(e.message, true));
         },
@@ -9489,15 +10114,7 @@ function focusActiveActor() {
   const act = state.snap.actors.find((a) => a.actor_id === targetId)
     || state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
   if (!act || act.space_id !== state.snap.active_space_id) return;
-  const wrap = el("stage-wrap");
-  if (!wrap) return;
-  const cx = (act.x + 0.5) * TILE * state.zoom;
-  const cy = (act.y + 0.5) * TILE * state.zoom;
-  wrap.scrollTo({
-    left: Math.max(0, cx - wrap.clientWidth / 2),
-    top: Math.max(0, cy - wrap.clientHeight / 2),
-    behavior: "smooth",
-  });
+  scrollToCell(act.x, act.y);
 }
 
 /* ── 绑定控件事件并启动 ── */
@@ -9805,14 +10422,8 @@ function init() {
       if (!rect.width || !rect.height) return;
       const fx = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       const fy = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-      const wrap = el("stage-wrap");
-      if (!wrap) return;
-      const fullW = state.snap.space.width * TILE * state.zoom;
-      const fullH = state.snap.space.height * TILE * state.zoom;
-      wrap.scrollTo({
-        left: Math.max(0, fx * fullW - wrap.clientWidth / 2),
-        top: Math.max(0, fy * fullH - wrap.clientHeight / 2),
-      });
+      const { width, height } = state.snap.space;
+      scrollToCell(Math.min(width - 1, Math.floor(fx * width)), Math.min(height - 1, Math.floor(fy * height)), false);
     };
     minimapCanvas.addEventListener("pointerdown", (ev) => { mmDragging = true; jumpFromMinimap(ev); });
     window.addEventListener("pointermove", (ev) => { if (mmDragging) jumpFromMinimap(ev); });
@@ -9973,7 +10584,48 @@ function openWeatherModal() {
   };
 
   document.querySelectorAll(".tool-btn[data-tool]").forEach((btn) => {
-    btn.onclick = () => setBuilderTool(btn.dataset.tool || "select");
+    btn.onclick = () => {
+      if (btn.dataset.portalBlueprint) state.portalBlueprintId = btn.dataset.portalBlueprint;
+      setBuilderTool(btn.dataset.tool);
+    };
+  });
+  document.querySelectorAll("[data-cliff-style]").forEach((btn) => {
+    btn.onclick = () => {
+      state.cliffStyle = btn.dataset.cliffStyle;
+      setBuilderTool(RELIEF_TOOLS.has(state.tool) && state.tool !== "stair" ? state.tool : "set_cliff");
+    };
+  });
+  document.querySelectorAll("[data-stair-style]").forEach((btn) => {
+    btn.onclick = () => {
+      state.stairStyle = btn.dataset.stairStyle;
+      if (state.stairMode === "clear_stair") state.stairMode = "stair_ns";
+      setBuilderTool("stair");
+    };
+  });
+  document.querySelectorAll("[data-stair-mode]").forEach((btn) => {
+    btn.onclick = () => {
+      state.stairMode = btn.dataset.stairMode;
+      setBuilderTool("stair");
+    };
+  });
+  el("btn-zone-manager").onclick = openZoneManager;
+  el("btn-stamp-use").onclick = () => { if (state.activeStamp) selectBuildStamp(state.activeStamp); };
+  el("btn-stamp-save").onclick = openSaveStampModal;
+  el("btn-build-undo").onclick = () => runBuildHistory("undo");
+  el("btn-build-redo").onclick = () => runBuildHistory("redo");
+  el("btn-build-trim").onclick = () => openConfirm("裁掉地图外围的虚空边缘？", async () => {
+    const { trim } = await runBuildAction("trim_space_void");
+    toast(trim.trimmed ? "已裁切至 " + trim.width + "×" + trim.height : "外围没有可裁切的虚空");
+  });
+  window.addEventListener("keydown", (ev) => {
+    if (state.view !== "world" || state.uiMode !== "build" || !(ev.ctrlKey || ev.metaKey) || ev.altKey
+        || !el("modal-mask").classList.contains("hidden")) return;
+    const focused = document.activeElement;
+    if (focused?.matches("input, textarea, select") || focused?.isContentEditable) return;
+    const key = ev.key.toLowerCase();
+    if (key !== "z" && key !== "y") return;
+    ev.preventDefault();
+    if (!ev.repeat) runBuildHistory(key === "y" || ev.shiftKey ? "redo" : "undo");
   });
   el("chk-auto-expand").addEventListener("change", (ev) => {
     state.autoExpand = Boolean(ev.target.checked);
@@ -10545,7 +11197,7 @@ function openWeatherModal() {
   setInterval(() => {
     if (state.view === "characters") return;
     if ((!el("modal-mask").classList.contains("hidden") && state.externalOverlayContext == null)
-        || state.drag || roamInteractBusy || state.inventoryBusy) return;
+        || state.drag || state.buildPending || roamInteractBusy || state.inventoryBusy) return;
     if (!isStoryWorld() && state.autoLife && state.view === "world" && state.liveActor) return;
     const view = state.view;
     const sid = (view === "world" && state.windowSpaceId) || "";

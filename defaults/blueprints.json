@@ -2186,5 +2186,62 @@
         ]
       }
     }
+  },
+  {
+    "blueprint_id": "default_staircase",
+    "name": "木楼梯",
+    "brief": "一段连接不同空间或楼层的木楼梯。",
+    "detail": "木踏板嵌着防滑铜条。绑定目标空间后即可上下楼。",
+    "tags": [
+      "portal",
+      "stair"
+    ],
+    "footprint": [
+      1,
+      1
+    ],
+    "placement": "floor",
+    "solid": false,
+    "builtin": true,
+    "traits": {
+      "portal": {
+        "target_space_id": "",
+        "target_x": 0,
+        "target_y": 0,
+        "is_open": true
+      }
+    },
+    "sprite": {
+      "mode": "pixel_grid",
+      "w": 16,
+      "h": 16,
+      "slot_colors": {
+        "o": "#21181b",
+        "1": "#8f5b38",
+        "2": "#bd8255",
+        "3": "#5c361e",
+        "a": "#f0c869"
+      },
+      "frames": {
+        "default": [
+          ".oooooooooooooo.",
+          ".o32222aa22223o.",
+          ".o311111111113o.",
+          ".o322222222223o.",
+          ".o311111111113o.",
+          ".o32222a2a2223o.",
+          ".o311111111113o.",
+          ".o322222222223o.",
+          ".o311111111113o.",
+          ".o322222222223o.",
+          ".o311111111113o.",
+          ".o322222222223o.",
+          ".o311111111113o.",
+          ".o311111111113o.",
+          ".oooooooooooooo.",
+          "................"
+        ]
+      }
+    }
   }
 ]

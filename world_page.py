@@ -316,7 +316,7 @@ def register_pages(
         bp_id = str(v.get("blueprint_id") or "")
         sid = str(v.get("space_id") or "")
         x = int(v.get("x") or 0)
-        y = int(v.get("y") or 1)
+        y = int(v["y"]) if v.get("y") not in (None, "") else 1
         mode = str(v.get("delivery_mode") or "silent")
         note = str(v.get("note_text") or "")
         portal_tgt = str(v.get("portal_target_space_id") or "")
@@ -353,14 +353,14 @@ def register_pages(
         ent = engine.move_entity_ui(
             str(v.get("entity_id") or ""),
             int(v.get("x") or 0),
-            int(v.get("y") or 1),
+            int(v["y"]) if v.get("y") not in (None, "") else 1,
             str(v.get("target_parent_id") or ""),
         )
         return _snap_ok({"entity": ent}, space_id=ent["space_id"])
 
     def _act_remove_entity(v: dict[str, Any]) -> dict[str, Any]:
         res = engine.remove_entity(str(v.get("entity_id") or ""))
-        return _snap_ok(res)
+        return _snap_ok(res, space_id=str(v.get("space_id") or ""))
 
     def _act_update_entity_spec(v: dict[str, Any]) -> dict[str, Any]:
         ent = engine.update_entity_spec(
@@ -1195,6 +1195,71 @@ def register_pages(
         )
         return _snap_ok({"painted": res}, space_id=res["space_id"])
 
+    def _act_paint_terrain_relief(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.paint_terrain_relief(
+            str(v.get("space_id") or ""),
+            v.get("cells") if isinstance(v.get("cells"), list) else None,
+            mode=str(v.get("mode") or "raise"),
+            stair_orient=str(v.get("stair_orient") or "ns"),
+            level=v.get("level"),
+            **{field: str(v[field] or "") for field in ("cliff_style", "stair_style") if field in v},
+        )
+        return _snap_ok({"relief": res}, space_id=res["space_id"])
+
+    def _act_undo_build(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.undo_build(str(v.get("space_id") or ""))
+        return _snap_ok({"build": res}, space_id=res["space_id"])
+
+    def _act_redo_build(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.redo_build(str(v.get("space_id") or ""))
+        return _snap_ok({"build": res}, space_id=res["space_id"])
+
+    def _act_upsert_space_zone(v: dict[str, Any]) -> dict[str, Any]:
+        zone = v.get("zone")
+        if not isinstance(zone, Mapping):
+            raise ValueError("请提供区域范围与设置。")
+        res = engine.upsert_space_zone(str(v.get("space_id") or ""), zone)
+        return _snap_ok(res, space_id=res["space_id"])
+
+    def _act_delete_space_zone(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.delete_space_zone(str(v.get("space_id") or ""), str(v.get("zone_id") or ""))
+        return _snap_ok(res, space_id=res["space_id"])
+
+    def _act_link_portal_bidirectional(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.link_portal_bidirectional(
+            str(v.get("space_id") or ""),
+            entity_id=str(v.get("entity_id") or ""), blueprint_id=str(v.get("blueprint_id") or ""),
+            x=int(v.get("x", 0)), y=int(v.get("y", 1)),
+            mode=str(v.get("mode") or "existing"), target_space_id=str(v.get("target_space_id") or ""),
+            new_space_name=str(v.get("new_space_name") or ""),
+            width=int(v.get("width") or 12), height=int(v.get("height") or 9),
+            palette_id=str(v.get("palette_id") or ""), floor_index=int(v.get("floor_index", 2)),
+            target_x=int(v["target_x"]) if v.get("target_x") is not None else None,
+            target_y=int(v["target_y"]) if v.get("target_y") is not None else None,
+        )
+        return _snap_ok({"link": res}, space_id=res["space_id"])
+
+    def _act_trim_space_void(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.trim_space_void(str(v.get("space_id") or ""), int(v.get("margin") or 0))
+        return _snap_ok({"trim": res}, space_id=res["space_id"])
+
+    def _act_save_build_stamp(v: dict[str, Any]) -> dict[str, Any]:
+        stamp = v.get("stamp")
+        if not isinstance(stamp, Mapping):
+            raise ValueError("请先框选需要保存的印章。")
+        return _snap_ok({"stamp": engine.save_build_stamp(stamp)}, space_id=str(v.get("space_id") or ""))
+
+    def _act_delete_build_stamp(v: dict[str, Any]) -> dict[str, Any]:
+        res = engine.delete_build_stamp(str(v.get("stamp_id") or ""))
+        return _snap_ok(res, space_id=str(v.get("space_id") or ""))
+
+    def _act_paste_build_stamp(v: dict[str, Any]) -> dict[str, Any]:
+        stamp = v.get("stamp") or v.get("stamp_id")
+        if not isinstance(stamp, (Mapping, str)):
+            raise ValueError("请先选择印章。")
+        res = engine.paste_build_stamp(str(v.get("space_id") or ""), int(v.get("x", 0)), int(v.get("y", 0)), stamp)
+        return _snap_ok({"paste": res}, space_id=res["space_id"])
+
     def _act_expand_space(v: dict[str, Any]) -> dict[str, Any]:
         sp = engine.expand_space(
             str(v.get("space_id") or ""),
@@ -1551,6 +1616,16 @@ def register_pages(
         ("set_actor_expression", "切换角色表情立绘", _act_set_actor_expression),
         ("get_actor_expressions", "获取角色全部立绘", _act_get_actor_expressions),
         ("paint_tiles", "搭建或拆除地形方块", _act_paint_tiles),
+        ("paint_terrain_relief", "涂刷台地与石阶", _act_paint_terrain_relief),
+        ("undo_build", "撤销建造", _act_undo_build),
+        ("redo_build", "重做建造", _act_redo_build),
+        ("upsert_space_zone", "保存区域", _act_upsert_space_zone),
+        ("delete_space_zone", "删除区域", _act_delete_space_zone),
+        ("link_portal_bidirectional", "连接双向门或楼层", _act_link_portal_bidirectional),
+        ("trim_space_void", "裁切外围虚空", _act_trim_space_void),
+        ("save_build_stamp", "保存组合印章", _act_save_build_stamp),
+        ("delete_build_stamp", "删除组合印章", _act_delete_build_stamp),
+        ("paste_build_stamp", "粘贴组合印章", _act_paste_build_stamp),
         ("expand_space", "无限拓展地图边界", _act_expand_space),
         ("generate_world_map", "LLM 生成像素地图", _act_generate_world_map),
         ("generate_town", "分层生成主题小镇", _act_generate_town),

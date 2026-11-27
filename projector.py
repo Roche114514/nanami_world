@@ -257,11 +257,14 @@ def project_terminal_data(
         if sched_ctx.get("prompt_line"):
             lines.append(f"- 节律与作息：{sched_ctx['prompt_line']}{home_txt}")
     parent_sp = snap.get("parent_space")
-    cur_zone = snap.get("current_zone")
+    cur_zone = engine.get_zone_at(space, int(actor["x"]), int(actor["y"]))
     if isinstance(parent_sp, dict) and parent_sp.get("name"):
         dist_txt = f" · {space['district']}" if space.get("district") else ""
-        lines.append(f"- 所属城镇：{parent_sp['name']}{dist_txt}（从出口大门可回到街道）")
-    elif isinstance(cur_zone, dict) and cur_zone.get("name"):
+        if parent_sp.get("space_kind") == "town":
+            lines.append(f"- 所属城镇：{parent_sp['name']}{dist_txt}（从出口大门可回到街道）")
+        else:
+            lines.append(f"- 上级空间：{parent_sp['name']}{dist_txt}")
+    if cur_zone and cur_zone.get("name"):
         z_desc = f"（{cur_zone['description']}）" if cur_zone.get("description") else ""
         lines.append(f"- 所在街区：{cur_zone['name']}{z_desc}")
     if terrain_names:
