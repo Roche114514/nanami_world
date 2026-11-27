@@ -6773,7 +6773,7 @@ class WorldEngine:
                 msg = self.execute_act(player_id, entity_id, action) if not container["is_open"] else ""
                 if container["is_open"] and not container["is_locked"]:
                     changed.append(entity_id)
-                    return {**result, "kind": "container", "entity_id": entity_id}
+                    return {**result, "kind": "container", "entity_id": entity_id, "action": action}
                 return {**result, "kind": "action", "message": msg}
             msg = self.execute_act(player_id, entity_id, action)
             for eid in (entity_id, previous_rest):

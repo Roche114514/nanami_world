@@ -116,10 +116,22 @@
   .stage-wrap {
     flex: 1 1 auto; min-width: 0; min-height: 0; display: flex;
     background: #0c0b10; border: 2px solid var(--border); position: relative; overflow: auto; padding: 12px;
-    transition: opacity 0.16s ease;
   }
   .stage-wrap.panning { cursor: grabbing; }
-  .stage-wrap.fading { opacity: 0.18; }
+  .stage-curtain, .location-card { position: absolute; pointer-events: none; }
+  .stage-curtain {
+    inset: 2px; z-index: 4; width: calc(100% - 4px); height: calc(100% - 4px);
+    image-rendering: pixelated; opacity: 0; background: #100d19;
+  }
+  .location-card {
+    z-index: 5; top: 13px; left: 13px; max-width: calc(100% - 26px);
+    padding: 7px 12px 8px; opacity: 0; color: #fff3dd; background: #20192a;
+    border: 2px solid #b88a61; box-shadow: inset 0 0 0 2px #382a41, 3px 3px #100d19;
+    font: bold 12px var(--px-font); overflow-wrap: anywhere;
+  }
+  .location-card strong { display: block; color: #ffe0ad; font-size: 14px; }
+  .location-card span { display: block; margin-top: 4px; color: #e2d4e3; }
+  .stage-viewport-frame:has(#world-canvas.hidden) :is(.stage-curtain, .location-card) { visibility: hidden; }
   .town-nav-bar {
     border: 2px solid var(--border); background: var(--panel); padding: 5px 8px;
     display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex: 0 0 auto; font-size: 11px;
@@ -868,6 +880,8 @@
             <canvas id="world-canvas" width="576" height="432"></canvas>
             <div id="terminal-view" class="hidden"></div>
           </div>
+          <canvas class="stage-curtain" id="stage-curtain" aria-hidden="true"></canvas>
+          <div class="location-card" id="location-card" aria-live="polite"><strong></strong><span></span></div>
           <div class="town-minimap-box hidden" id="town-minimap-box">
             <div class="town-minimap-title"><span id="minimap-zone-lbl">小地图</span><span id="minimap-pos-lbl"></span></div>
             <canvas id="town-minimap" width="120" height="90"></canvas>
@@ -1173,7 +1187,6 @@ const state = {
   greetingActorId: "",
   soundEnabled: localStorage.getItem("nanami_world_sound") !== "0",
   rainSoundEnabled: localStorage.getItem("nanami_world_rain_sound") !== "0",
-  _weatherRafPhase: 0,
   playerId: "player_avatar",
   playerPrompt: { kind: "", target_id: "", name: "", label: "" },
   playerInventory: null,
@@ -1215,124 +1228,874 @@ const state = {
 const el = (id) => document.getElementById(id);
 let roamInteractBusy = false;
 let roamSyncInFlight = null;
+let ambientSkyMoving = false;
 
 const SoundFX = (() => {
-  let ctx = null;
-  let lastStepAt = 0;
-  let lastTalkAt = 0;
-  let rainBuf = null;
-  let rainSrc = null;
-  let rainFilter = null;
-  let rainGain = null;
-  const ensure = () => {
-    if (!state.soundEnabled) return null;
-    try {
-      if (!ctx) {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return null;
+  let ctx, master, noise, scene;
+  let unlocked = false, audible = false, suspendedPage = false;
+  let idleTimer = 0;
+  let lastStepAt = -Infinity, lastTalkAt = -Infinity;
+  const melody = [261.63, 329.63, 392, 440, 392, 329.63, 293.66, 329.63,
+    261.63, 293.66, 392, 523.25, 440, 392, 329.63, 293.66];
+
+  function ensure() {
+    if (!unlocked || !state.soundEnabled || document.hidden || suspendedPage) return null;
+    if (!ctx) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return null;
+      try {
         ctx = new AudioCtx();
-      }
-      if (ctx.state === "suspended") void ctx.resume();
-      return ctx;
-    } catch {
-      return null;
+        master = ctx.createGain();
+        master.connect(ctx.destination);
+        noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+        const samples = noise.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+      } catch { return null; }
     }
-  };
-  const stopRain = () => {
-    try {
-      if (rainGain && ctx) rainGain.gain.setTargetAtTime(0, ctx.currentTime, 0.06);
-      if (rainSrc) {
-        const old = rainSrc;
-        rainSrc = null;
-        setTimeout(() => { try { old.stop(); old.disconnect(); } catch {} }, 180);
-      }
-    } catch {}
-  };
-  const tone = (freq, dur, type = "square", vol = 0.05, slideTo = 0, delay = 0) => {
-    const c = ensure();
-    if (!c) return;
-    const t0 = c.currentTime + delay;
-    const osc = c.createOscillator();
-    const gain = c.createGain();
+    clearTimeout(idleTimer);
+    if (!audible) {
+      audible = true;
+      master.gain.setTargetAtTime(1, ctx.currentTime, 0.045);
+      if (ctx.state === "suspended") void ctx.resume().catch(() => {});
+    }
+    return ctx;
+  }
+
+  function voice(source, duration, volume, delay = 0, dest = master, filter = null) {
+    const start = ctx.currentTime + delay;
+    const envelope = ctx.createGain();
+    envelope.gain.setValueAtTime(0.0001, start);
+    envelope.gain.exponentialRampToValueAtTime(volume, start + Math.min(0.012, duration / 3));
+    envelope.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    if (filter) {
+      source.connect(filter);
+      filter.connect(envelope);
+    } else source.connect(envelope);
+    envelope.connect(dest);
+    source.onended = () => { source.disconnect(); filter?.disconnect(); envelope.disconnect(); };
+    source.start(start);
+    source.stop(start + duration + 0.01);
+  }
+
+  function note(freq, duration, type = "triangle", volume = 0.025, end = freq, delay = 0, dest = null) {
+    if (!dest && !ensure()) return;
+    const osc = ctx.createOscillator();
     osc.type = type;
-    osc.frequency.setValueAtTime(freq, t0);
-    if (slideTo > 0) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
-    gain.gain.setValueAtTime(vol, t0);
-    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-    osc.connect(gain);
-    gain.connect(c.destination);
-    osc.start(t0);
-    osc.stop(t0 + dur + 0.01);
-  };
+    osc.frequency.setValueAtTime(freq, ctx.currentTime + delay);
+    if (end !== freq) osc.frequency.exponentialRampToValueAtTime(end, ctx.currentTime + delay + duration);
+    voice(osc, duration, volume, delay, dest || master);
+  }
+
+  function brush(freq, duration, volume, delay = 0, dest = null) {
+    if (!dest && !ensure()) return;
+    const src = ctx.createBufferSource();
+    src.buffer = noise;
+    const filter = ctx.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.value = freq;
+    voice(src, duration, volume, delay, dest || master, filter);
+  }
+
+  function release(channel) {
+    channel.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.045);
+    if (channel.source) {
+      const src = channel.source;
+      src.onended = () => { src.disconnect(); channel.filter.disconnect(); channel.gain.disconnect(); };
+      src.stop(ctx.currentTime + 0.23);
+      // A suspended audio clock may never reach the scheduled stop.
+      setTimeout(() => { try { src.stop(); src.onended?.(); } catch {} }, 300);
+    } else {
+      setTimeout(() => { channel.filter?.disconnect(); channel.gain.disconnect(); }, 250);
+    }
+  }
+
+  function stopScene() {
+    if (!scene) return;
+    for (const channel of scene.channels.values()) release(channel);
+    scene = null;
+  }
+
+  function silence() {
+    stopScene();
+    if (!master || !audible) return;
+    audible = false;
+    master.gain.setTargetAtTime(0, ctx.currentTime, 0.045);
+    idleTimer = setTimeout(() => {
+      if (!audible && ctx.state === "running") void ctx.suspend().catch(() => {});
+    }, 750);
+  }
+
+  function channel(name, level, type, freq, loop = false) {
+    let bus = scene.channels.get(name);
+    if (!bus && level <= 0) return null;
+    if (!bus) {
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+      gain.connect(master);
+      const filter = ctx.createBiquadFilter();
+      filter.type = type;
+      filter.frequency.value = freq;
+      filter.connect(gain);
+      bus = { gain, filter, source: null, next: 0, index: 0, level: -1, freq };
+      if (loop) {
+        const source = ctx.createBufferSource();
+        source.buffer = noise;
+        source.loop = true;
+        source.connect(filter);
+        source.start();
+        bus.source = source;
+      }
+      scene.channels.set(name, bus);
+    }
+    if (bus.level !== level) {
+      bus.level = level;
+      bus.gain.gain.setTargetAtTime(level, ctx.currentTime, 0.10);
+    }
+    if (freq !== bus.freq) {
+      bus.freq = freq;
+      bus.filter.frequency.setTargetAtTime(freq, ctx.currentTime, 0.10);
+    }
+    if (!level && bus.source) {
+      release(bus);
+      scene.channels.delete(name);
+    }
+    return bus;
+  }
+
+  function pulse(name, level, freq, interval, play) {
+    const bus = channel(name, level, "lowpass", freq);
+    if (!level || !bus || ctx.currentTime < bus.next) return;
+    bus.next = ctx.currentTime + interval;
+    play(bus.filter, bus.index++);
+  }
+
+  function syncSpace(snap, local = {}) {
+    if (state.view !== "world" || !snap?.space || !ensure()) { silence(); return; }
+    const { space } = snap;
+    if (scene?.sid !== space.space_id) {
+      stopScene();
+      scene = { sid: space.space_id, channels: new Map() };
+    }
+    const code = snap.weather?.current || "clear";
+    const outdoor = space.space_kind === "town";
+    const night = snap.lighting?.period === "night";
+    const clear = code === "clear" || code === "sakura";
+    channel("rain", code === "rain" && state.rainSoundEnabled ? (outdoor ? 0.012 : 0.005) : 0,
+      "lowpass", outdoor ? 850 : 420, true);
+    channel("wind", code === "snow" ? (outdoor ? 0.006 : 0.0012)
+      : (clear && !night && outdoor ? 0.004 : 0), "bandpass", code === "snow" ? 320 : 560, true);
+    channel("water", 0.009 * (local.water || 0), "lowpass", 980, true);
+    pulse("bird", outdoor && clear && !night ? 0.18 : 0, 2200, 9 + Math.random() * 12, (dest, i) => {
+      if (!i) return;
+      note(1340, 0.12, "sine", 0.018, 1680, 0, dest);
+      note(1610, 0.10, "sine", 0.015, 1230, 0.14, dest);
+    });
+    pulse("insects", night && (clear || code === "cloudy") ? (outdoor ? 0.16 : 0.025) : 0,
+      1800, 1.2 + Math.random() * 2, (dest) => {
+        for (let i = 0; i < 3; i++) note(1250, 0.07, "sine", 0.022, 1400, i * 0.11, dest);
+      });
+    pulse("clock", 0.22 * (local.clock || 0), 1400, 1,
+      (dest) => brush(1200, 0.035, 0.024, 0, dest));
+    pulse("fire", 0.32 * (local.fire || 0), 1400, 0.28 + Math.random() * 0.75,
+      (dest) => brush(510 + Math.random() * 680, 0.055 + Math.random() * 0.05, 0.045, 0, dest));
+    pulse("record", 0.38 * (local.record || 0), 930, 0.44, (dest, i) => {
+      note(melody[i % melody.length], 0.52, "triangle", 0.037, melody[i % melody.length], 0, dest);
+      if (i % 4 === 0) note(i % 8 === 0 ? 130.81 : 196, 0.56, "triangle", 0.018,
+        i % 8 === 0 ? 130.81 : 196, 0, dest);
+    });
+  }
+
   return {
+    unlock() { unlocked = true; ensure(); },
+    stopScene,
+    silence,
+    syncSpace,
+    pageHidden(value) { suspendedPage = value; if (value) silence(); },
     footstep(tileId) {
       const now = performance.now();
       if (now - lastStepAt < 85) return;
       lastStepAt = now;
-      if (tileId === "grass" || tileId === "meadow" || tileId === "flower_grass") {
-        tone(190, 0.045, "triangle", 0.035, 110);
-      } else if (tileId === "stone_tile" || tileId === "cobble" || tileId === "brick_path") {
-        tone(320, 0.035, "square", 0.025, 180);
-      } else if (tileId === "water" || tileId === "pond") {
-        tone(260, 0.06, "sine", 0.04, 150);
-      } else {
-        tone(145, 0.04, "triangle", 0.04, 95);
-      }
+      const tones = {
+        grass: [190, 110], meadow: [180, 105], flower_grass: [190, 110],
+        stone_tile: [320, 180], cobble: [310, 175], brick_path: [300, 170],
+        water: [260, 150], pond: [260, 150],
+      };
+      const [start, end] = tones[tileId] || [145, 95];
+      note(start, 0.048, "triangle", 0.028, end);
     },
     door() {
-      tone(220, 0.07, "square", 0.045, 330, 0);
-      tone(392, 0.09, "square", 0.045, 523, 0.06);
+      brush(420, 0.15, 0.028);
+      note(144, 0.14, "triangle", 0.035, 85, 0.055);
     },
-    action() {
-      tone(440, 0.05, "square", 0.04, 660, 0);
-      tone(660, 0.07, "triangle", 0.04, 880, 0.05);
+    consume() {
+      note(410, 0.14, "sine", 0.032, 220);
+      note(310, 0.10, "sine", 0.023, 185, 0.09);
+    },
+    switchToggle(isOn) {
+      const freq = isOn ? 680 : 370;
+      note(freq, 0.055, "triangle", 0.036, freq * 0.75);
+      note(isOn ? 910 : 245, 0.055, "triangle", 0.023, isOn ? 770 : 208, 0.045);
+    },
+    container(isOpen) {
+      brush(470, 0.105, 0.033);
+      note(isOpen ? 210 : 145, 0.10, "triangle", 0.032, isOpen ? 330 : 84, 0.035);
+    },
+    unlockLock() {
+      note(1010, 0.09, "triangle", 0.029, 810);
+      note(634, 0.11, "triangle", 0.023, 490, 0.055);
+    },
+    write() { brush(1240, 0.09, 0.022); brush(1560, 0.13, 0.022, 0.07); },
+    read() { brush(1140, 0.17, 0.035); brush(740, 0.10, 0.017, 0.07); },
+    pickup() { note(320, 0.10, "triangle", 0.031, 570); },
+    place() { note(218, 0.11, "triangle", 0.039, 108); },
+    gift() {
+      [392, 493.88, 587.33].forEach((f, i) => note(f, 0.28, "triangle", 0.023, f, i * 0.07));
     },
     talk(seedStr = "") {
       const now = performance.now();
       if (now - lastTalkAt < 180) return;
       lastTalkAt = now;
       const base = 420 + ((String(seedStr).charCodeAt(0) || 0) % 5) * 45;
-      tone(base, 0.045, "square", 0.03, base * 1.12, 0);
-      tone(base * 1.18, 0.04, "square", 0.025, base * 1.25, 0.045);
-    },
-    syncWeather(code, isOutdoor) {
-      if (code !== "rain" || !state.soundEnabled || !state.rainSoundEnabled) {
-        stopRain();
-        return;
-      }
-      const c = ensure();
-      if (!c) return;
-      try {
-        if (!rainBuf) {
-          const len = Math.floor(c.sampleRate * 2);
-          rainBuf = c.createBuffer(1, len, c.sampleRate);
-          const data = rainBuf.getChannelData(0);
-          let last = 0;
-          for (let i = 0; i < len; i++) {
-            const w = Math.random() * 2 - 1;
-            last = (last + 0.04 * w) / 1.04;
-            data[i] = last * 2.2;
-          }
-        }
-        if (!rainSrc) {
-          rainSrc = c.createBufferSource();
-          rainSrc.buffer = rainBuf;
-          rainSrc.loop = true;
-          rainFilter = c.createBiquadFilter();
-          rainFilter.type = "lowpass";
-          rainGain = c.createGain();
-          rainGain.gain.setValueAtTime(0, c.currentTime);
-          rainSrc.connect(rainFilter);
-          rainFilter.connect(rainGain);
-          rainGain.connect(c.destination);
-          rainSrc.start();
-        }
-        rainFilter.frequency.setTargetAtTime(isOutdoor ? 850 : 420, c.currentTime, 0.12);
-        rainGain.gain.setTargetAtTime(isOutdoor ? 0.012 : 0.005, c.currentTime, 0.12);
-      } catch {}
+      note(base, 0.055, "triangle", 0.033, base * 1.12);
+      note(base * 1.18, 0.06, "triangle", 0.028, base * 1.25, 0.045);
     },
   };
 })();
+
+const TransitionFX = (() => {
+  const duration = 240;
+  let fade, reveal, until = 0;
+  const reduced = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function change(previous, next) {
+    const from = previous?.space?.space_id, to = next.space?.space_id;
+    if (!to || from === to) return;
+    SoundFX.stopScene();
+    if (state.view !== "world" || state.eyeMode || state.uiMode === "build" || document.hidden) return;
+    const shade = el("stage-curtain"), map = el("world-canvas");
+    const card = el("location-card");
+    fade?.cancel();
+    reveal?.cancel();
+    if (from && !map.classList.contains("hidden") && !reduced()) {
+      const bounds = shade.getBoundingClientRect(), rect = map.getBoundingClientRect();
+      shade.width = Math.max(1, Math.round(bounds.width));
+      shade.height = Math.max(1, Math.round(bounds.height));
+      const layer = shade.getContext("2d");
+      layer.imageSmoothingEnabled = false;
+      layer.fillStyle = "#100d19";
+      layer.fillRect(0, 0, shade.width, shade.height);
+      layer.drawImage(map, rect.left - bounds.left, rect.top - bounds.top, rect.width, rect.height);
+      // The outgoing frame stays on the curtain while the new snapshot lands.
+      fade = shade.animate([
+        { opacity: 1, filter: "brightness(1)" },
+        { opacity: 1, filter: "brightness(0.08)", offset: 0.42 },
+        { opacity: 0, filter: "brightness(0.08)" },
+      ], { duration, easing: "ease-in-out" });
+      until = performance.now() + duration;
+    }
+    const { space, weather, lighting } = next;
+    const floor = Number(space.floor_index);
+    const floorName = space.space_kind === "town" || space.floor_index == null || !Number.isFinite(floor)
+      ? "" : (floor < 0 ? "B" + Math.abs(floor) : Math.max(1, floor) + "F");
+    card.firstElementChild.textContent = [space.name, floorName].filter(Boolean).join(" · ");
+    card.lastElementChild.textContent = (weather?.icon || "☀") + " " + (weather?.label || "晴朗")
+      + "  " + (lighting?.clock || "12:00");
+    reveal = card.animate([
+      { opacity: 0, transform: "translateY(-4px)" }, { opacity: 1, transform: "translateY(0)", offset: 0.08 },
+      { opacity: 1, transform: "translateY(0)", offset: 0.91 }, { opacity: 0, transform: "translateY(0)" },
+    ], { duration: 2600, delay: from && !reduced() ? 95 : 0, easing: "linear" });
+  }
+
+  return { change, active: (now) => now < until };
+})();
+
+const EmoteFX = (() => {
+  const icons = {
+    alert: ["..11..", "..11..", "..11..", "..11..", "......", "..11.."],
+    question: [".111..", "11.11.", "...11.", "..11..", "......", "..11.."],
+    heart: [".1..1.", "111111", "111111", ".1111.", "..11.."],
+    note: ["...111", "...1.1", "...1..", "...1..", ".111..", ".111.."],
+    steam_warm: [".1..1.", "1..1..", ".1..1.", ".1..1.", "......", "111111"],
+    drop: ["..11..", "..11..", ".1111.", "111111", "111111", ".1111."],
+    spark: ["..11..", "..11..", "111111", "111111", "..11..", "..11.."],
+  };
+  const colors = {
+    alert: "#d49437", question: "#76619b", heart: "#c55779",
+    note: "#6960a3", steam_warm: "#ba7147", drop: "#477fa3", spark: "#eec478",
+  };
+  const frames = new Map();
+  let sid = "", active = false;
+
+  function begin(spaceId) {
+    if (sid !== spaceId) { frames.clear(); sid = spaceId; }
+    active = false;
+  }
+
+  function icon(ctx, kind, x, y, scale = 2) {
+    ctx.fillStyle = colors[kind];
+    icons[kind].forEach((row, dy) => {
+      for (let dx = 0; dx < row.length; dx++) {
+        if (row[dx] === "1") ctx.fillRect(x + dx * scale, y + dy * scale, scale, scale);
+      }
+    });
+  }
+
+  function draw(ctx, snap, actor, entities, vis, x, y, now) {
+    const previous = frames.get(actor.actor_id);
+    const live = actor.runtime_activity;
+    const last = actor.last_act || {};
+    const expression = actor.expression || {};
+    const wet = snap.space.space_kind === "town" && snap.weather?.current === "rain";
+    const engaging = live?.phase === "engaging" ? live.verb + "|" + (live.entity_id || "") : "";
+    const allowed = vis >= 0.35 && !["missing", "incapacitated"].includes(actor.actor_status);
+    const row = { seq: last.seq, engaged: engaging, posture: actor.posture, wet,
+      expression: expression.tag, visible: allowed, until: previous?.until || 0, next: previous?.next || 0,
+      kind: previous?.kind };
+    frames.set(actor.actor_id, row);
+    if (!allowed) { row.until = 0; return; }
+
+    if (previous?.visible && now >= row.next) {
+      const didAct = last.seq > (previous.seq || 0);
+      const recent = !last.ts || Date.now() / 1000 - last.ts < 12;
+      const target = entities.get(didAct ? last.entity_id : live?.entity_id);
+      const began = engaging && engaging !== previous.engaged;
+      // Engaging can describe a planned action. In opaque views require the public,
+      // completed action or a change anyone could observe (posture or weather).
+      const publicOnly = snap.opaque_minds && !actor.is_player;
+      const verb = didAct && recent ? last.verb : (!publicOnly && began ? live.verb : "");
+      const domain = target?.traits?.activity?.domain || target?.effects?.domain;
+      const hot = ["hot", "warm"].includes(target?.traits?.thermal?.temp);
+      const hobby = domain === "hobby" && (target?.tags?.some((tag) => /art|draw|paint/.test(tag))
+        || /art|draw|paint/.test(target?.blueprint_id || ""));
+      const entertainment = hobby || ["music", "game", "gaming", "art", "drawing", "painting"].includes(domain);
+      const byPublicObject = target?.z >= 0 || target?.parent_id === "actor:" + actor.actor_id;
+      const social = !publicOnly && row.expression !== previous.expression
+        && /开心|愉快|高兴|欣喜|喜悦|温柔|满足|微笑|雀跃|甜蜜/.test(row.expression || "");
+      let kind = "";
+      if (!previous.wet && wet) kind = "drop";
+      else if (previous.posture === "resting" && row.posture !== "resting") kind = "steam_warm";
+      else if (verb === "consume" && (!publicOnly || byPublicObject)) kind = hot ? "steam_warm" : "heart";
+      else if ((verb === "interact" || verb === "write" && hobby)
+          && (!publicOnly || byPublicObject) && entertainment) kind = "note";
+      else if (social) kind = "heart";
+      if (kind) Object.assign(row, { kind, until: now + 1250, next: now + 3700 });
+    }
+    if (now >= row.until) return;
+    active = true;
+    const age = 1250 - (row.until - now);
+    const pop = Math.min(1, age / 140);
+    const left = Math.round(x - 10), top = Math.round(y - 21 + 6 * (1 - pop) - 3 * Math.sin(pop * Math.PI));
+    ctx.save();
+    ctx.globalAlpha = Math.min(pop, (row.until - now) / 280, 1);
+    ctx.fillStyle = "#302439";
+    ctx.fillRect(left + 2, top, 16, 19);
+    ctx.fillRect(left, top + 2, 20, 15);
+    ctx.fillRect(left + 9, top + 18, 4, 4);
+    ctx.fillStyle = "#fdf1dc";
+    ctx.fillRect(left + 2, top + 2, 16, 15);
+    ctx.fillRect(left + 9, top + 16, 3, 4);
+    icon(ctx, row.kind, left + 4, top + 4);
+    ctx.restore();
+  }
+
+  function trigger(actor, kind, now) {
+    const row = frames.get(actor?.actor_id);
+    if (!row?.visible || row.next > now) return;
+    Object.assign(row, { kind, until: now + 1250, next: now + 3700 });
+    active = true;
+  }
+
+  return { begin, draw, icon, trigger, active: () => active };
+})();
+
+const AmbientFX = (() => {
+  const movingWeather = new Set(["rain", "snow", "sakura"]);
+  const fireKinds = ["campfire", "stove", "fireplace"];
+  const hours = [0, 4, 6.5, 10, 16, 18.5, 21, 24];
+  // RGB and opacity for the ambient wash followed by the window shaft.
+  const tones = [
+    [20, 25, 66, .48, 151, 182, 255, .10],
+    [31, 30, 70, .42, 147, 175, 250, .10],
+    [255, 199, 137, .17, 255, 208, 151, .18],
+    [255, 250, 223, .02, 255, 248, 205, .13],
+    [255, 236, 205, .04, 255, 233, 183, .13],
+    [245, 134, 83, .24, 255, 166, 107, .19],
+    [20, 25, 66, .48, 151, 182, 255, .10],
+    [20, 25, 66, .48, 151, 182, 255, .10],
+  ];
+  const periodHour = { dawn: 6.5, day: 12, dusk: 18.5, night: 0 };
+  const grassTypes = new Set(["grass", "flower_grass", "meadow"]);
+  const lamps = new Map();
+  let sid = "", lastFrame = 0, tint, active = false, wetSteps = 0, wetUntil = 0, stepSide = 1;
+  let marks = [], effects = [], audio = {}, audioIndex = null, audioEntities = null;
+  let worldEntities, landscape, grassView;
+
+  const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
+  const fract = (f) => f - Math.floor(f);
+  const rgba = ([r, g, b], a) => "rgba(" + (r | 0) + "," + (g | 0) + "," + (b | 0) + "," + clamp(a, 0, 1) + ")";
+  const matches = (ent, type) => ent.blueprint_id === type || ent.blueprint_id === "default_" + type
+    || ent.tags?.includes(type);
+  const burning = (ent) => ent.traits?.switchable?.is_on !== false
+    && (fireKinds.some((kind) => matches(ent, kind))
+      || (ent.traits?.thermal && ent.traits?.switchable?.is_on && ent.traits.thermal.temp === "hot"
+        && !ent.traits?.consumable));
+  const lit = (ent) => ent.traits?.switchable?.is_on !== false
+    && (ent.traits?.switchable?.provides_light || ["lamp", "light_source", "street_lamp"].some((kind) => matches(ent, kind)));
+  const visibleAt = (grid, sp, x, y) => grid?.[clamp(Math.round(y), 0, sp.height - 1) * sp.width
+    + clamp(Math.round(x), 0, sp.width - 1)] ?? 1;
+
+  function art() {
+    return { rows: [], windows: [], grass: [], hasWater: false };
+  }
+
+  function capture(assets, grid, x, y, px, py, cliffHeight, southStair) {
+    const tile = grid[y][x];
+    const water = tile.tid === "water";
+    if (grassTypes.has(tile.tid) && !tile.meta.is_wall) (assets.grass[y] ||= []).push({ x, y, px, py });
+    if (!water && !cliffHeight) return;
+    // Subtract foreground cells painted later in this column, including elevated platforms.
+    let parts = [[py, py + TILE + cliffHeight]];
+    for (let ny = y + 1; ny < grid.length && ny * TILE - MAX_ELEVATION * ELEV_LIFT_PX < py + TILE + cliffHeight; ny++) {
+      const foreground = grid[ny][x];
+      if (!foreground) continue;
+      const top = ny * TILE - foreground.level * ELEV_LIFT_PX;
+      const next = grid[ny + 1]?.[x];
+      const bottom = top + TILE + Math.max(0, foreground.level - (next?.level || 0)) * ELEV_LIFT_PX;
+      parts = parts.flatMap(([a, b]) => (b <= top || a >= bottom)
+        ? [[a, b]] : [[a, Math.min(b, top)], [Math.max(a, bottom), b]].filter(([lo, hi]) => lo < hi));
+    }
+    (assets.rows[y] ||= []).push({ x, y, px, py, water, cliffHeight, southStair, parts });
+    assets.hasWater = true;
+  }
+
+  function addWindow(assets, start, span) {
+    for (let i = 0; i < span; i++) {
+      const x = start + i, px = x * TILE;
+      const left = px + (i === 0 ? 8 : 2);
+      const right = px + TILE - (i === span - 1 ? 8 : 2);
+      if (span === 1) {
+        assets.windows.push({ x, panes: [[left, 8, 15, 12], [px + 25, 8, 15, 12],
+          [left, 22, 15, 16], [px + 25, 22, 15, 16]] });
+      } else {
+        assets.windows.push({ x, panes: [[left, 8, right - left, TILE - 18]] });
+      }
+    }
+  }
+
+  function sampleTone(lighting) {
+    const supplied = lighting.hour_float;
+    const period = periodHour[lighting.period] ?? 12;
+    const hour = supplied != null && Number.isFinite(Number(supplied))
+      && (!lighting.light_mode || lighting.light_mode === "auto") ? ((Number(supplied) % 24) + 24) % 24 : period;
+    const upper = hours.findIndex((h) => h > hour);
+    const f = (hour - hours[upper - 1]) / (hours[upper] - hours[upper - 1]);
+    return tones[upper].map((end, i) => tones[upper - 1][i] + (end - tones[upper - 1][i]) * f);
+  }
+
+  function begin(snap, now) {
+    const changed = sid !== snap.space.space_id;
+    if (changed) {
+      sid = snap.space.space_id;
+      lamps.clear();
+      marks = [];
+      effects = effects.filter((fx) => fx.sid === sid);
+      tint = null;
+      grassView = null;
+    }
+    const dt = Math.min(1000, Math.max(0, now - lastFrame));
+    lastFrame = now;
+    active = false;
+    const goal = sampleTone(snap.lighting || {});
+    const factor = 1 - Math.exp(-dt / 175);
+    tint = tint ? tint.map((v, i) => {
+      const close = Math.abs(goal[i] - v) < (i % 4 === 3 ? 0.001 : 0.75);
+      if (!close) active = true;
+      return close ? goal[i] : v + (goal[i] - v) * factor;
+    }) : goal;
+    if (worldEntities !== snap.entities || changed) {
+      worldEntities = snap.entities;
+      landscape = (worldEntities || []).filter((e) => e.space_id === sid && e.z >= 0
+        && (lit(e) || burning(e) || matches(e, "wall_clock") || matches(e, "gramophone")));
+      audioEntities = null;
+    }
+    const lampsOn = new Set();
+    for (const e of landscape) {
+      if (!lit(e) && !burning(e)) continue;
+      lampsOn.add(e.entity_id);
+      if (!lamps.has(e.entity_id)) lamps.set(e.entity_id, { ent: e, strength: changed ? 1 : 0 });
+      else lamps.get(e.entity_id).ent = e;
+    }
+    for (const [id, lamp] of lamps) {
+      const target = lampsOn.has(id) ? 1 : 0;
+      const difference = target - lamp.strength;
+      lamp.strength = Math.abs(difference) < .01 ? target : lamp.strength + difference * (1 - Math.exp(-dt / 68));
+      if (!target && lamp.strength === 0) lamps.delete(id);
+      else if (lamp.strength !== target) active = true;
+    }
+    EmoteFX.begin(sid);
+  }
+
+  function viewport(space) {
+    const wrap = el("stage-wrap"), canvas = el("world-canvas");
+    const sx = canvas.width / (canvas.clientWidth || canvas.width);
+    const sy = canvas.height / (canvas.clientHeight || canvas.height);
+    const x = (wrap.scrollLeft - canvas.offsetLeft - canvas.clientLeft) * sx;
+    const y = (wrap.scrollTop - canvas.offsetTop - canvas.clientTop) * sy - spaceTopPad(space);
+    return { x, y, w: wrap.clientWidth * sx, h: wrap.clientHeight * sy };
+  }
+
+  function terrain(ctx, snap, assets, grid, now) {
+    const sp = snap.space;
+    const { x, y, w, h } = viewport(sp);
+    const minRow = Math.max(0, Math.floor(y / TILE) - 1);
+    const maxRow = Math.min(sp.height - 1, Math.ceil((y + h + MAX_ELEVATION * ELEV_LIFT_PX) / TILE));
+    for (let j = minRow; assets.hasWater && j <= maxRow; j++) {
+      for (const cell of assets.rows[j] || []) {
+        if (cell.px + TILE < x || cell.px > x + w || !cell.parts.length) continue;
+        const vis = visibleAt(grid, sp, cell.x, cell.y);
+        if (vis < .35) continue;
+        active = true;
+        ctx.save();
+        ctx.beginPath();
+        for (const [top, bottom] of cell.parts) ctx.rect(cell.px, top, TILE, bottom - top);
+        ctx.clip();
+        const seed = cell.x * 19 + j * 37;
+        if (cell.water) {
+          for (let i = 0; i < 2; i++) {
+            const phase = fract(now / 1850 + (seed + i * 17) / 41);
+            const xx = cell.px + 3 + Math.round(phase * 29);
+            const yy = cell.py + 8 + (seed + i * 17) % 30;
+            ctx.fillStyle = "rgba(207,246,255," + (.28 * Math.sin(phase * Math.PI) * vis) + ")";
+            ctx.fillRect(xx, yy, 9, 2);
+            ctx.fillRect(xx + 3, yy + 4, 4, 1);
+          }
+        }
+        if (cell.cliffHeight) {
+          for (let i = 0; i < 5; i++) {
+            if (cell.southStair && i > 0 && i < 4) continue;
+            const phase = ((now * (.055 + i * .006) + seed + i * 13) % cell.cliffHeight);
+            const yy = cell.py + TILE + Math.floor(phase);
+            ctx.fillStyle = "rgba(201,246,255," + (.43 * vis) + ")";
+            ctx.fillRect(cell.px + 3 + i * 10, yy, 2, Math.min(7, cell.cliffHeight - phase));
+          }
+        }
+        ctx.restore();
+      }
+    }
+    const weather = snap.weather?.current;
+    if (movingWeather.has(weather)) {
+      for (const win of assets.windows) {
+        const vis = visibleAt(grid, sp, win.x, Math.min(sp.height - 1, Number(sp.wall_rows ?? 1)));
+        if (vis < .35 || win.x * TILE + TILE < x || win.x * TILE > x + w || y > TILE) continue;
+        active = true;
+        for (const [px, py, pw, ph] of win.panes) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(px, py, pw, ph);
+          ctx.clip();
+          ctx.globalAlpha = vis * .83;
+          const drops = weather === "rain";
+          ctx.fillStyle = drops ? "#b9d9ef" : (weather === "snow" ? "#e9f6ff" : "#ffbad2");
+          for (let i = 0; i < (drops ? 4 : 3); i++) {
+            const t = now + win.x * 179 + i * 383;
+            const yy = Math.round((t * (drops ? .19 : .035)) % (ph + 10)) - 7;
+            const xx = Math.floor((i * 23 + win.x * 3 + (drops ? pw - yy / 3 : 8 + Math.sin(t / 340) * 7)) % pw);
+            if (drops) for (let n = 0; n < 4; n++) ctx.fillRect(px + xx - n, py + yy + n * 2, 1, 2);
+            else {
+              ctx.fillRect(px + xx, py + yy, weather === "snow" ? 2 : 3, 2);
+              if (weather === "sakura") ctx.fillRect(px + xx + 1, py + yy + 2, 1, 1);
+            }
+          }
+          ctx.restore();
+        }
+      }
+    }
+
+    marks = marks.filter((m) => now - m.at < 1400);
+    for (const m of marks) {
+      const vis = visibleAt(grid, sp, m.x, m.y);
+      if (vis < .35) continue;
+      active = true;
+      const fade = (1 - (now - m.at) / 1400) * vis;
+      ctx.fillStyle = "rgba(102,156,193," + fade * .36 + ")";
+      ctx.fillRect(m.px - 3, m.py - 2, 6, 4);
+      ctx.fillStyle = "rgba(203,234,249," + fade * .42 + ")";
+      ctx.fillRect(m.px - 2, m.py - 2, 4, 1);
+      ctx.fillRect(m.px - 1, m.py + 2, 3, 1);
+    }
+  }
+
+  function footprint(snap, x, y, dir, now) {
+    const rainy = snap.space.space_kind === "town" && snap.weather?.current === "rain";
+    stepSide *= -1;
+    if (rainy) trackRain(now);
+    else if (wetSteps > 0 && now < wetUntil) wetSteps--;
+    else return;
+    markFoot(snap.space, x, y, dir, stepSide, now);
+  }
+
+  function trackRain(now) { wetSteps = 3; wetUntil = now + 3500; }
+
+  function markFoot(sp, x, y, dir, stepSide, now) {
+    const sideX = dir === "up" || dir === "down" ? stepSide * 5 : 0;
+    const sideY = dir === "left" || dir === "right" ? stepSide * 3 : 0;
+    marks.push({ x, y, px: x * TILE + TILE / 2 + sideX, py: tileTopY(sp, x, y) + TILE - 8 + sideY, at: now });
+    if (marks.length > 24) marks.shift();
+  }
+
+  function actorFootprint(snap, actor, motion, now) {
+    const x = Math.round(motion.cx), y = Math.round(motion.cy);
+    const floor = motion.footCell;
+    motion.footCell = x + "," + y;
+    if (floor && floor !== motion.footCell && motion.moving && !actor.is_player
+        && snap.space.space_kind === "town" && snap.weather?.current === "rain") {
+      markFoot(snap.space, x, y, motion.dir, (x + y) % 2 ? 1 : -1, now);
+    }
+  }
+
+  function steam(ctx, ent, x, y, now, vis) {
+    const temp = ent?.traits?.thermal?.temp;
+    if (vis < .35 || (temp !== "hot" && temp !== "warm")) return;
+    active = true;
+    const hot = temp === "hot";
+    for (let i = 0; i < (hot ? 3 : 2); i++) {
+      const phase = fract(now / (hot ? 1550 : 2250) + i / (hot ? 3 : 2) + x / 297);
+      const px = Math.round(x + (i - 1) * 5 + Math.sin(phase * 6.28) * 3);
+      const py = Math.round(y - phase * (hot ? 23 : 15));
+      ctx.fillStyle = "rgba(248,239,222," + (Math.sin(phase * Math.PI) * (hot ? .56 : .26) * vis) + ")";
+      ctx.fillRect(px, py, 3 - (i % 2), 2);
+      ctx.fillRect(px + 1, py - 2, 1, 1);
+    }
+  }
+
+  function entity(ctx, ent, x, y, vis, now) {
+    if (vis < .35) return;
+    if (!burning(ent)) {
+      steam(ctx, ent, x, y, now, vis);
+      return;
+    }
+    active = true;
+    for (let i = 0; i < 3; i++) {
+      const p = fract(now / 990 + i / 3 + x / 613);
+      ctx.fillStyle = rgba(i === 1 ? [255, 166, 96] : [255, 222, 148], (1 - p) * .84 * vis);
+      ctx.fillRect(Math.round(x - 6 + i * 6 + Math.sin(p * 7 + i) * 2), Math.round(y + 8 - p * 21), 2, 2);
+    }
+  }
+
+  function lighting(ctx, snap, assets, grid, width, height, top, now) {
+    const space = snap.space, outdoor = space.space_kind === "town";
+    const weather = snap.weather?.current;
+    const night = snap.lighting?.period === "night";
+    const shaft = tint.slice(4);
+    if (weather !== "rain" && !outdoor) {
+      for (const win of assets.windows) {
+        const x = win.x, row = Math.min(space.height - 1, Number(space.wall_rows ?? 1));
+        const vis = visibleAt(grid, space, x, row);
+        if (vis < .35) continue;
+        const x0 = x * TILE + 7, y0 = tileTopY(space, x, row) - 3;
+        const x1 = x0 + TILE * .7, y1 = Math.min(height + top, y0 + TILE * 2.35);
+        const grad = ctx.createLinearGradient(x0, y0, x1, y1);
+        grad.addColorStop(0, rgba(shaft, shaft[3] * vis));
+        grad.addColorStop(1, rgba(shaft, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0); ctx.lineTo(x0 + TILE - 14, y0);
+        ctx.lineTo(x1 + TILE - 14, y1); ctx.lineTo(x1, y1);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+    let strongest = 0;
+    for (const { ent, strength } of lamps.values()) {
+      strongest = Math.max(strongest, strength * visibleAt(grid, space, ent.x, ent.y));
+    }
+    ctx.fillStyle = rgba(tint, tint[3] * (outdoor ? 1 : 1 - strongest * .42));
+    ctx.fillRect(0, top, width, height);
+    for (const { ent, strength } of lamps.values()) {
+      const [fw, fh] = ent.footprint || [1, 1];
+      const vis = visibleAt(grid, space, ent.x, ent.y + fh - 1);
+      if (vis < .35 || !strength) continue;
+      const fire = burning(ent);
+      const lx = (ent.x + fw / 2) * TILE;
+      const ly = tileTopY(space, ent.x, ent.y) + fh * TILE * .52;
+      const radius = TILE * (fire ? 2.08 : 2.5);
+      const pulse = fire ? .94 + .06 * Math.sin(now / 368 + ent.x) : 1;
+      const grad = ctx.createRadialGradient(lx, ly, 5, lx, ly, radius);
+      const color = fire ? [255, 181, 109] : [255, 218, 148];
+      grad.addColorStop(0, rgba(color, strength * pulse * vis * (.10 + tint[3] * .58)));
+      grad.addColorStop(1, rgba(color, 0));
+      ctx.fillStyle = grad;
+      ctx.fillRect(lx - radius, ly - radius, radius * 2, radius * 2);
+      if (night && (fire || matches(ent, "street_lamp"))) {
+        active = true;
+        for (let i = 0; i < 3; i++) {
+          const t = now / (660 + 165 * i) + i * 2.3;
+          ctx.fillStyle = rgba([252, 240, 165], (.21 + .16 * Math.sin(t * 2.2)) * strength * vis);
+          ctx.fillRect(Math.round(lx + Math.cos(t) * (14 + i * 6)), Math.round(ly - 9 + Math.sin(t) * 12), 2, 2);
+        }
+      }
+    }
+
+    if (outdoor && !night && (weather === "clear" || weather === "sakura")) {
+      const view = viewport(space);
+      const x0 = Math.floor(view.x / TILE), x1 = Math.ceil((view.x + view.w) / TILE);
+      const y0 = Math.floor(view.y / TILE), y1 = Math.ceil((view.y + view.h) / TILE);
+      const key = [x0, x1, y0, y1].join(",");
+      if (grassView?.key !== key || grassView.assets !== assets) {
+        const nearby = [];
+        for (let j = Math.max(0, y0 - 1); j <= Math.min(space.height - 1, y1 + 3); j++) {
+          for (const g of assets.grass[j] || []) {
+            if (g.x < x0 || g.x >= x1 || g.py + TILE < view.y || g.py > view.y + view.h) continue;
+            const covered = (space.buildings || []).some((b) =>
+              g.x >= b.x && g.x < b.x + b.w && g.y >= b.y && g.y < b.y + b.h);
+            if (!covered) nearby.push(g);
+          }
+        }
+        const count = Math.min(4, nearby.length);
+        grassView = { key, assets, motes: Array.from({ length: count }, (_, i) =>
+          nearby[Math.floor((i + .5) * nearby.length / count)]) };
+      }
+      for (const [i, g] of grassView.motes.entries()) {
+        const t = now / (720 + i * 163) + i * 1.6;
+        const xx = Math.round(g.px + TILE / 2 + Math.sin(t) * 13), yy = Math.round(g.py + 18 + Math.cos(t * .7) * 9);
+        ctx.fillStyle = rgba(i % 2 ? [255, 231, 191] : [254, 248, 175], .31 + .19 * Math.sin(t * 1.5));
+        ctx.fillRect(xx - 2, yy, 2, 2);
+        ctx.fillRect(xx + 1, yy - (Math.sin(t * 6) > 0 ? 1 : 0), 2, 2);
+        active = true;
+      }
+    }
+  }
+
+  function feedback(space, target, kind = "spark") {
+    if (!space || !target || !Number.isFinite(target.x) || !Number.isFinite(target.y)) return;
+    effects.push({ sid: space.space_id, x: target.x, y: target.y, fw: target.footprint?.[0] || 1,
+      z: target.z, kind, at: null });
+    if (effects.length > 12) effects.shift();
+    active = true;
+  }
+
+  function drawFeedback(ctx, sp, grid, now) {
+    if (!el("modal-mask").classList.contains("hidden")) return;
+    effects = effects.filter((e) => e.at == null || now - e.at < 620);
+    for (const e of effects) {
+      if (e.sid !== sp.space_id || visibleAt(grid, sp, e.x, e.y) < .35) {
+        e.at ??= now;
+        continue;
+      }
+      e.at ??= now;
+      const p = (now - e.at) / 620;
+      const x = Math.round((e.x + e.fw / 2) * TILE);
+      const y = Math.round(tileTopY(sp, e.x, e.y) - (e.z === 1 ? 12 : 0) - 4 - p * 16);
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, p * 9 + .35, (1 - p) * 2.5);
+      EmoteFX.icon(ctx, e.kind, x - 5, y, 2);
+      ctx.fillStyle = "#fff1bd";
+      ctx.fillRect(x - 9, y + 2, 2, 2);
+      ctx.fillRect(x + 10, y + 8, 2, 2);
+      ctx.restore();
+      active = true;
+    }
+  }
+
+  function listen(snap, assets, grid) {
+    if (!snap?.space || snap.space.space_id !== sid || !assets) return null;
+    const sp = snap.space;
+    const local = state.uiMode === "roam" && ROAM_POS.active && ROAM_POS.sid === sid;
+    const aid = state.uiMode === "roam" ? state.playerId
+      : (state.cameraMode === "cinema" ? state.cinemaTargetActorId : state.followActorId) || snap.active_actor_id;
+    const actor = snap.actors.find((a) => a.actor_id === aid && a.space_id === sid);
+    const useActor = state.uiMode === "roam" || state.cameraMode !== "free" || state.eyeMode;
+    const view = viewport(sp);
+    const point = projectedCellAt(sp, view.x + view.w / 2, view.y + view.h / 2 + spaceTopPad(sp));
+    let x = point.x, y = point.y;
+    if (local) { x = ROAM_POS.x; y = ROAM_POS.y; }
+    else if (actor && useActor) {
+      const anim = PD_ANIM.get(actor.actor_id);
+      x = anim?.sid === sid ? anim.cx : actor.x;
+      y = anim?.sid === sid ? anim.cy : actor.y;
+    }
+    if (audioEntities === worldEntities && audioIndex?.assets === assets && audioIndex.grid === grid
+        && Math.abs(x - audioIndex.x) + Math.abs(y - audioIndex.y) < .16 && !state.roomVis.animating) return audio;
+    const att = (px, py, range) => {
+      const dist = Math.hypot(px - x, py - y);
+      const isolation = visibleAt(grid, sp, px, py) < .35 ? .08 : 1;
+      return Math.max(0, 1 - dist / range) ** 1.7 * isolation;
+    };
+    audio = { fire: 0, record: 0, clock: 0, water: 0 };
+    for (const ent of landscape || []) {
+      const [fw, fh] = ent.footprint || [1, 1];
+      const px = ent.x + (fw - 1) / 2, py = ent.y + (fh - 1) / 2;
+      if (burning(ent) && (matches(ent, "campfire") || matches(ent, "fireplace"))) audio.fire = Math.max(audio.fire, att(px, py, 6));
+      if (ent.traits?.switchable?.is_on && matches(ent, "gramophone")) audio.record = Math.max(audio.record, att(px, py, 7.5));
+      if (sp.space_kind !== "town" && matches(ent, "wall_clock")) audio.clock = Math.max(audio.clock, att(px, py, 8));
+    }
+    for (let j = Math.max(0, Math.floor(y) - 8); assets.hasWater && j <= Math.min(sp.height - 1, Math.ceil(y) + 8); j++) {
+      for (const cell of assets.rows[j] || []) {
+        if (Math.abs(cell.x - x) > 8) continue;
+        audio.water = Math.max(audio.water, att(cell.x, cell.y, cell.cliffHeight ? 8 : 5));
+      }
+    }
+    audioEntities = worldEntities;
+    audioIndex = { assets, x, y, grid };
+    return audio;
+  }
+
+  return { art, capture, addWindow, begin, terrain, footprint, trackRain, actorFootprint, steam, entity, lighting, feedback, drawFeedback,
+    listen, visibleAt, active: () => active || EmoteFX.active() };
+})();
+
+const PlayerFeedback = (() => {
+  function action(space, verb, before, after, player) {
+    if (!before) return;
+    const old = before.traits || {}, next = after?.traits || {};
+    let kind = "spark";
+    if (verb === "consume" && old.consumable
+        && (!after || next.consumable?.uses_left < old.consumable.uses_left)) {
+      SoundFX.consume();
+      kind = ["hot", "warm"].includes(old.thermal?.temp) ? "steam_warm" : "heart";
+    } else if (old.switchable && next.switchable && old.switchable.is_on !== next.switchable.is_on) {
+      SoundFX.switchToggle(next.switchable.is_on);
+    } else if (old.container?.is_locked && next.container && !next.container.is_locked) {
+      SoundFX.unlockLock();
+    } else if (old.container && next.container && old.container.is_open !== next.container.is_open) {
+      SoundFX.container(next.container.is_open);
+    } else if (old.portal && next.portal && old.portal.is_open !== next.portal.is_open) {
+      SoundFX.door();
+    } else if (verb === "take" && before.z >= 0 && (!after || after.z < 0)) {
+      SoundFX.pickup();
+    } else if (verb === "place" && after?.z >= 0 && before.z < 0) {
+      SoundFX.place();
+    } else if (verb === "read") {
+      SoundFX.read();
+    } else if (verb === "write" && next.inscribable?.entries?.at(-1)?.ts !== old.inscribable?.entries?.at(-1)?.ts) {
+      SoundFX.write();
+    } else return;
+    AmbientFX.feedback(space, after?.z >= 0 ? after : (before.z >= 0 ? before : player), kind);
+  }
+
+  function inventory(space, operation, verb, before, after, player, recipient, gift) {
+    if (operation === "use") return action(space, verb, before, after, player);
+    if (gift?.status === "accepted" || gift?.status === "offered") {
+      SoundFX.gift();
+      AmbientFX.feedback(space, recipient || player, "heart");
+    } else if (gift?.status === "declined") {
+      EmoteFX.trigger(player, "question", performance.now());
+    } else if (["pickup", "claim", "withdraw", "stow"].includes(operation)) {
+      SoundFX.pickup();
+      AmbientFX.feedback(space, before?.z >= 0 ? before : player);
+    } else if (operation === "place" || operation === "deposit") {
+      SoundFX.place();
+      AmbientFX.feedback(space, after?.z >= 0 ? after : player);
+    }
+  }
+
+  return { action, inventory };
+})();
+
+function syncWorldAudio() {
+  const snap = state.snap, cache = state.terrainCache;
+  SoundFX.syncSpace(snap, cache.space?.space_id === snap?.space?.space_id
+    ? AmbientFX.listen(snap, cache.ambientArt, cache.visibility) || {} : {});
+}
 
 function tokenFromUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -1402,10 +2165,10 @@ function renderViewShell() {
     document.title = state.snap.space.name + " · 七海千秋";
   } else if (inChars) {
     document.title = "角色管理 · 七海千秋";
-    SoundFX.syncWeather("clear", false);
+    SoundFX.silence();
   } else {
     document.title = "世界大厅 · 七海千秋";
-    SoundFX.syncWeather("clear", false);
+    SoundFX.silence();
   }
 
   const story = isStoryWorld();
@@ -1690,8 +2453,7 @@ function runDoorTransition(portalEntityId, options = {}) {
   if (options.userInitiated !== false && state.cameraMode && state.cameraMode !== "free" && state.uiMode !== "roam") {
     if (typeof setCameraMode === "function") setCameraMode("free", { userInitiated: true, silent: false });
   }
-  const wrap = el("stage-wrap");
-  if (wrap) wrap.classList.add("fading");
+  const from = state.snap?.space?.space_id;
   runAction("enter_portal", {
     entity_id: portalEntityId,
     actor_id: actorId,
@@ -1699,12 +2461,10 @@ function runDoorTransition(portalEntityId, options = {}) {
   }).then((res) => {
     state.selectedEntityId = "";
     state.selectedBlueprintId = "";
+    if (state.snap?.space?.space_id !== from && !observeOnly) SoundFX.door();
     if (res.feedback) toast(res.feedback);
     if (!observeOnly || state.cameraMode === "follow") setTimeout(() => focusActiveActor(), 80);
-  }).catch((e) => toast(e.message, true))
-    .finally(() => {
-      if (wrap) setTimeout(() => wrap.classList.remove("fading"), 90);
-    });
+  }).catch((e) => toast(e.message, true));
 }
 
 function openDefaultTown(replace) {
@@ -1878,6 +2638,7 @@ function applySnapshot(snap, terminal, chatHistory) {
     state.drag = null;
     state.hoverCell = null;
   }
+  TransitionFX.change(state.snap, snap);
   state.snap = snap;
   if (state.view === "world") {
     if (snap.isolated_persona) {
@@ -3074,10 +3835,6 @@ function pdPoseForVerb(verb) {
   if (v === "interact" || v === "read" || v === "write") return "hold";
   return "reach";
 }
-function pdIconForVerb(verb) {
-  const map = { consume: "🍴", interact: "🎮", read: "📖", write: "✎", turn_on: "💡", turn_off: "💡", open: "🗝", close: "🗝", take: "✋", put: "✋", enter: "🚪" };
-  return map[String(verb || "")] || "";
-}
 function pdDirFromDelta(dx, dy, fb) {
   if (!dx && !dy) return fb;
   if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? "right" : "left";
@@ -3263,22 +4020,6 @@ function pdDrawZzz(ctx, cx, topY, now) {
     ctx.strokeText(i === 2 ? "Z" : "z", tx, ty);
     ctx.fillText(i === 2 ? "Z" : "z", tx, ty);
   }
-  ctx.restore();
-}
-
-function pdDrawIcon(ctx, cx, topY, icon) {
-  if (!icon) return;
-  ctx.save();
-  ctx.fillStyle = "rgba(255,255,255,0.95)";
-  ctx.strokeStyle = "#1d1722";
-  ctx.lineWidth = 2;
-  ctx.fillRect(cx - 9, topY - 20, 18, 16);
-  ctx.strokeRect(cx - 9, topY - 20, 18, 16);
-  ctx.font = "11px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#1d1722";
-  ctx.fillText(icon, cx, topY - 11);
   ctx.restore();
 }
 
@@ -3577,7 +4318,7 @@ function stairBetween(space, tile, neighbor, orientation) {
   return source ? stairStyleFor(space, source.x + "," + source.y, source.tid) : "";
 }
 
-function drawProjectedTerrain(ctx, space, palette) {
+function drawProjectedTerrain(ctx, space, palette, ambientArt) {
   const wallRows = Number(space.wall_rows ?? 1);
   const grid = Array.from({ length: space.height }, (_, y) =>
     Array.from({ length: space.width }, (_, x) => reliefTile(space, x, y)));
@@ -3596,6 +4337,7 @@ function drawProjectedTerrain(ctx, space, palette) {
       const faceHeight = hasFace ? drop * ELEV_LIFT_PX : (y + 1 < space.height && !south ? 6 : 0);
       const cliffStyle = cliffStyleFor(space, key, tid);
       const southStair = stairBetween(space, tile, south, "ns");
+      AmbientFX.capture(ambientArt, grid, x, y, px, py, cliffStyle === "waterfall" ? faceHeight : 0, southStair);
       if (faceHeight) {
         drawCliffFace(ctx, px, py + TILE, faceHeight, cliffStyle, tile);
         if (southStair) drawStairTreads(ctx, px + 6, py + TILE, TILE - 12, faceHeight, "ns", southStair);
@@ -3649,7 +4391,7 @@ function drawProjectedTerrain(ctx, space, palette) {
   }
 }
 
-function drawIndoorWindowPane(octx, winX, winW, lighting, period, wCode, pal) {
+function drawIndoorWindowPane(octx, winX, winW, period, wCode, pal) {
   const skyMap = { dawn: "#e89f8e", day: "#89cff0", dusk: "#c97968", night: "#1c2447" };
   let winSky = skyMap[period] || "#89cff0";
   if (period !== "night") {
@@ -3672,26 +4414,6 @@ function drawIndoorWindowPane(octx, winX, winW, lighting, period, wCode, pal) {
     octx.fillRect(winX + 14, 13, Math.min(18, Math.max(8, winW - 28)), 5);
     if (winW >= TILE * 2) octx.fillRect(winX + TILE + 6, 17, 14, 4);
   }
-  if (wCode === "rain") {
-    octx.strokeStyle = "rgba(190, 224, 255, 0.75)";
-    octx.lineWidth = 1.2;
-    for (let rx = winX + 12; rx < winX + winW - 10; rx += 12) {
-      octx.beginPath();
-      octx.moveTo(rx, 11);
-      octx.lineTo(rx - 4, 24);
-      octx.stroke();
-    }
-  } else if (wCode === "snow") {
-    octx.fillStyle = "#eef6ff";
-    for (let sx = winX + 14; sx < winX + winW - 12; sx += 18) {
-      octx.fillRect(sx, 13 + ((sx >> 2) % 10), 2, 2);
-    }
-  } else if (wCode === "sakura") {
-    octx.fillStyle = "#ffb6cf";
-    for (let sx = winX + 16; sx < winX + winW - 12; sx += 20) {
-      octx.fillRect(sx, 14 + ((sx >> 2) % 9), 3, 2);
-    }
-  }
   octx.fillStyle = frameCol;
   const colsSpan = Math.max(1, Math.round(winW / TILE));
   if (colsSpan === 1) {
@@ -3705,7 +4427,10 @@ function drawIndoorWindowPane(octx, winX, winW, lighting, period, wCode, pal) {
 }
 
 function computeIndoorVisibilityMask(space, entities, actors) {
-  if (!space || space.space_kind === "town") return null;
+  if (!space || space.space_kind === "town") {
+    state.roomVis.animating = false;
+    return null;
+  }
   const sid = space.space_id;
   const cols = Number(space.width || 0);
   const rows = Number(space.height || 0);
@@ -3730,15 +4455,9 @@ function computeIndoorVisibilityMask(space, entities, actors) {
       }
     }
   }
-  if (!hasInteriorDoors) return null;
-
-  const blocked = new Uint8Array(total);
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      if (resolveTileMeta(space, x, y).meta.is_wall || closedDoors.has(x + "," + y)) {
-        blocked[y * cols + x] = 1;
-      }
-    }
+  if (!hasInteriorDoors) {
+    state.roomVis.animating = false;
+    return null;
   }
 
   let seedPt = null;
@@ -3774,12 +4493,30 @@ function computeIndoorVisibilityMask(space, entities, actors) {
   }
   if (!seedPt) return null;
 
+  const s0x = Math.max(0, Math.min(cols - 1, seedPt[0]));
+  const s0y = Math.max(0, Math.min(rows - 1, seedPt[1]));
+  const seed = s0y * cols + s0x;
+  const terrain = state.terrainCache.canvas;
+  const doorKey = [...closedDoors].sort().join("|");
+  const cached = state.roomVis;
+  if (cached.terrain === terrain && cached.doorKey === doorKey
+      && (cached.seed === seed || cached.visitedFloor[seed] && !cached.blocked[seed])) {
+    return fadeIndoorVisibility(cached);
+  }
+
+  const blocked = new Uint8Array(total);
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      if (resolveTileMeta(space, x, y).meta.is_wall || closedDoors.has(x + "," + y)) {
+        blocked[y * cols + x] = 1;
+      }
+    }
+  }
+
   const target = new Float32Array(total);
   const visitedFloor = new Uint8Array(total);
   const qx = [];
   const qy = [];
-  const s0x = Math.max(0, Math.min(cols - 1, seedPt[0]));
-  const s0y = Math.max(0, Math.min(rows - 1, seedPt[1]));
   if (blocked[s0y * cols + s0x]) {
     for (const [ox, oy] of [[0, -1], [0, 1], [-1, 0], [1, 0]]) {
       const nx = s0x + ox, ny = s0y + oy;
@@ -3818,13 +4555,18 @@ function computeIndoorVisibilityMask(space, entities, actors) {
     }
   }
 
-  const rv = state.roomVis;
-  if (!rv || rv.sid !== sid || rv.w !== cols || rv.h !== rows || !rv.alpha || rv.alpha.length !== total) {
-    state.roomVis = { sid, w: cols, h: rows, alpha: new Float32Array(target), animating: false };
-    return state.roomVis.alpha;
-  }
+  const last = state.roomVis;
+  const alpha = last.sid === sid && last.w === cols && last.h === rows && last.alpha
+    ? last.alpha : new Float32Array(target);
+  state.roomVis = { sid, w: cols, h: rows, alpha, terrain, doorKey, seed, visitedFloor, blocked, target, animating: true };
+  return fadeIndoorVisibility(state.roomVis);
+}
+
+function fadeIndoorVisibility(rv) {
+  if (!rv.animating) return rv.alpha;
+  const { target } = rv;
   let moving = false;
-  for (let i = 0; i < total; i++) {
+  for (let i = 0; i < target.length; i++) {
     const diff = target[i] - rv.alpha[i];
     if (Math.abs(diff) < 0.02) {
       rv.alpha[i] = target[i];
@@ -3865,9 +4607,53 @@ function markProjectedCell(ctx, space, x, y, fill = false) {
   ctx.strokeRect(px, py, TILE - 4, TILE - 4);
 }
 
+function actorBubbleY(act, labelY, topEdge) {
+  // Speech and prompts keep the space immediately above the nameplate.
+  const hasText = act.runtime_speech || (!(state.snap.opaque_minds && !act.is_player) && act.autonomy?.last_thought);
+  const hasPrompt = state.uiMode === "roam" && state.playerPrompt?.target_id === act.actor_id;
+  return Math.max(topEdge + 22, labelY - (hasText ? 33 : (hasPrompt ? 18 : 2)));
+}
+
+const HELD_ITEM_OFFSETS = { left: [-1, .51], right: [1, .51], up: [-.86, .43], down: [.78, .62] };
+
+function drawHeldItem(ctx, item, palette, cx, top, bodyWidth, bodyHeight, direction, vis, now) {
+  const [side, height] = HELD_ITEM_OFFSETS[direction] || HELD_ITEM_OFFSETS.down;
+  const x = Math.round(cx + Math.min(25, bodyWidth * .36) * side - 7);
+  const y = Math.round(top + bodyHeight * height - 7);
+  const sprite = item ? itemSprite(item) : null;
+  const pixels = item ? chooseEntityFrame(item) : null;
+  const img = sprite?.mode === "image" ? loadCachedImage(sprite.image_data_url) : null;
+  ctx.save();
+  ctx.globalAlpha = vis;
+  if (img?.complete && img.naturalWidth > 0) {
+    const ratio = Math.min(14 / img.naturalWidth, 14 / img.naturalHeight);
+    const w = Math.max(1, Math.round(img.naturalWidth * ratio));
+    const h = Math.max(1, Math.round(img.naturalHeight * ratio));
+    ctx.shadowColor = "#171223";
+    ctx.shadowOffsetY = 1;
+    ctx.drawImage(img, x + Math.round((14 - w) / 2), y + Math.round((14 - h) / 2), w, h);
+  } else if (Array.isArray(pixels) && pixels.some((row) => /[^.]/.test(row)) && sprite?.mode !== "token") {
+    ctx.shadowColor = "#171223";
+    ctx.shadowOffsetX = 1;
+    ctx.shadowOffsetY = 1;
+    drawSprite(ctx, sprite, pixels, palette, x, y, 14, 14, item.name, palette.terminal.accent);
+  } else {
+    ctx.fillStyle = "#312233";
+    ctx.fillRect(x + 3, y + 3, 8, 9);
+    ctx.fillRect(x + 1, y + 6, 12, 6);
+    ctx.fillStyle = "#e5bd85";
+    ctx.fillRect(x + 3, y + 6, 8, 4);
+    ctx.fillRect(x + 5, y + 4, 4, 2);
+    ctx.fillStyle = "#a27357";
+    ctx.fillRect(x + 5, y + 6, 4, 1);
+  }
+  ctx.restore();
+  AmbientFX.steam(ctx, item, x + 7, y + 2, now, vis);
+}
+
 function renderViewport() {
   const snap = state.snap;
-  if (!snap) return;
+  if (!snap || document.hidden) return;
   const canvas = el("world-canvas");
   const term = el("terminal-view");
 
@@ -3925,7 +4711,8 @@ function renderViewport() {
     const octx = off.getContext("2d");
     octx.imageSmoothingEnabled = false;
     octx.translate(0, topPad);
-    drawProjectedTerrain(octx, space, pal);
+    const ambientArt = AmbientFX.art();
+    drawProjectedTerrain(octx, space, pal, ambientArt);
 
     // 区域软标（密闭隔间改为动态 Pass 4 随照明显示）
     for (const z of zonesList) {
@@ -3970,14 +4757,16 @@ function renderViewport() {
 
         if (glassRuns.length > 0) {
           for (const [rx0, span] of glassRuns) {
-            drawIndoorWindowPane(octx, rx0 * TILE, span * TILE, lighting, period, wCode, pal);
+            drawIndoorWindowPane(octx, rx0 * TILE, span * TILE, period, wCode, pal);
+            AmbientFX.addWindow(ambientArt, rx0, span);
           }
         } else {
           const winCellX = Math.max(1, Math.min(cols - 3, Math.floor(cols / 2) - 1));
           const winTileA = resolveTileMeta(space, winCellX, 0);
           const winTileB = resolveTileMeta(space, winCellX + 1, 0);
           if (winTileA.meta.is_wall && winTileB.meta.is_wall) {
-            drawIndoorWindowPane(octx, winCellX * TILE, TILE * 2, lighting, period, wCode, pal);
+            drawIndoorWindowPane(octx, winCellX * TILE, TILE * 2, period, wCode, pal);
+            AmbientFX.addWindow(ambientArt, winCellX, 2);
           }
         }
       }
@@ -4049,8 +4838,10 @@ function renderViewport() {
       octx.fillText(signText, sx + sw / 2, sy + 9);
       octx.restore();
     }
-    state.terrainCache = { key: cacheKey, canvas: off, space, palette: pal, period, weatherCode: wCode };
+    state.terrainCache = { key: cacheKey, canvas: off, ambientArt };
   }
+  const art = state.terrainCache.ambientArt;
+  Object.assign(state.terrainCache, { space, palette: pal, period, weatherCode: wCode });
   ctx.fillStyle = "#0e0c14";
   ctx.fillRect(0, 0, W, canvasH);
   ctx.save();
@@ -4077,6 +4868,11 @@ function renderViewport() {
 
   // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色（同步计算推门点亮遮罩）
   const visAlphaGrid = computeIndoorVisibilityMask(space, snap.entities || [], snap.actors || []);
+  state.terrainCache.visibility = visAlphaGrid;
+  const nowMs = performance.now();
+  ambientSkyMoving = false;
+  AmbientFX.begin(snap, nowMs);
+  AmbientFX.terrain(ctx, snap, art, visAlphaGrid, nowMs);
   const drawList = [];
   for (const ent of snap.entities) {
     if (Number(ent.z) < 0) continue;
@@ -4085,7 +4881,6 @@ function renderViewport() {
     const yBottom = ent.y + fh + (Number(ent.z) === 1 ? 0.25 : 0);
     drawList.push({ kind: "entity", yBottom, ent, fw, fh });
   }
-  const nowMs = performance.now();
   const entById = new Map(snap.entities.map((e) => [e.entity_id, e]));
   let loopMoving = false;
   let loopResting = false;
@@ -4093,6 +4888,7 @@ function renderViewport() {
     if (act.space_id !== space.space_id || act.actor_status === "missing") continue;
     const useDoll = act.map_style !== "portrait" && !!act.appearance;
     const st = pdStep(act, nowMs);
+    AmbientFX.actorFootprint(snap, act, st, nowMs);
     let yBottom = st.cy + 1 + 0.12;
     if (st.moving || st.pose || st.pendingPose) loopMoving = true;
     if (useDoll) {
@@ -4108,6 +4904,7 @@ function renderViewport() {
     drawList.push({ kind: "actor", yBottom, act, st, useDoll });
   }
   PD_LOOP = { moving: loopMoving, resting: loopResting };
+  const emotes = [];
   drawList.sort((a, b) => a.yBottom - b.yBottom);
 
   for (const item of drawList) {
@@ -4122,6 +4919,8 @@ function renderViewport() {
       ctx.fillRect(dx + 6, dy + dh - 6, dw - 12, 4);
       const frame = chooseEntityFrame(ent);
       drawSprite(ctx, ent.sprite || {}, frame, pal, dx, dy, dw, dh, ent.name, pal.terminal.accent);
+      AmbientFX.entity(ctx, ent, dx + dw / 2, dy + Math.min(dh * .38, TILE * .54),
+        AmbientFX.visibleAt(visAlphaGrid, space, ent.x, ent.y + item.fh - 1), nowMs);
       if (ent.entity_id === state.selectedEntityId) {
         ctx.strokeStyle = "#78d69a";
         ctx.lineWidth = 2;
@@ -4163,7 +4962,6 @@ function renderViewport() {
       let dh = Math.round(TILE * 1.5);
       let dx = gx * TILE;
       let dy = (gy + 1) * TILE - dh - actLift;
-      let dollIcon = "";
       const drawBody = (fn) => {
         if (!isIncap) {
           fn();
@@ -4229,7 +5027,6 @@ function renderViewport() {
           ctx.fillStyle = "rgba(0,0,0,0.28)";
           ctx.fillRect(Math.round(gx * TILE + 8), Math.round((gy + 1) * TILE - 6 - actLift), TILE - 16, 5);
           drawBody(() => ctx.drawImage(cv, dx, dy, dw, dh));
-          if (liveVerb || (!isIncap && st.pose)) dollIcon = pdIconForVerb(liveVerb || st.poseVerb);
         }
       } else if (useStandee) {
         const ratio = standeeImg.naturalWidth / Math.max(1, standeeImg.naturalHeight);
@@ -4250,17 +5047,22 @@ function renderViewport() {
         ctx.fillRect(dx + 10, (gy + 1) * TILE - 7 - actLift, TILE - 20, 5);
         drawBody(() => drawSprite(ctx, sp, sp.pixels || [], pal, dx, dy, dw, dh, act.name, sp.accent_color));
       }
-      if (dollIcon) pdDrawIcon(ctx, dx + dw / 2, dy, dollIcon);
 
       // 名字标与实时心情标签（未点亮密闭隔间中的 NPC 暂隐去头顶标与对白）
-      const cellVis = visAlphaGrid ? (visAlphaGrid[Math.max(0, Math.min(rows - 1, Math.round(gy))) * cols + Math.max(0, Math.min(cols - 1, Math.round(gx)))] ?? 1) : 1;
+      const cellVis = AmbientFX.visibleAt(visAlphaGrid, space, gx, gy);
+      const labelCx = gx * TILE + TILE / 2;
+      const labelY = Math.max(topEdge + 16, dy - 14);
+      const bubbleY = actorBubbleY(act, labelY, topEdge);
+      emotes.push({ act, cellVis, x: Math.max(10, Math.min(W - 10, labelCx)), y: bubbleY });
+      if (act.holding_id && !isIncap && cellVis >= .35) {
+        const held = entById.get(act.holding_id) || state.playerInventory?.items.find((e) => act.is_player && e.entity_id === act.holding_id);
+        drawHeldItem(ctx, held, pal, dx + dw / 2, dy, dw, dh, st.dir || act.facing, cellVis, nowMs);
+      }
       if (!act.is_player && cellVis < 0.35) {
         continue;
       }
-      const labelCx = gx * TILE + TILE / 2;
       const labelW = Math.max(TILE - 4, 58);
       const labelX = Math.max(2, Math.min(W - labelW - 2, labelCx - labelW / 2));
-      const labelY = Math.max(topEdge + 16, dy - 14 - (dollIcon ? 18 : 0));
       ctx.fillStyle = "rgba(12,10,16,0.85)";
       ctx.fillRect(labelX, labelY, labelW, 13);
       ctx.fillStyle = act.is_player ? "#7cd4ff" : (act.actor_id === snap.active_actor_id ? "#ff9dbb" : "#e2e6f0");
@@ -4327,84 +5129,11 @@ function renderViewport() {
         ctx.font = "bold 10px monospace";
         ctx.fillText(isIncap ? "[E] 查探" : "[E] 对话", px0 + pw / 2, py0 + 7);
       }
-      if (act.holding_id) {
-        ctx.fillStyle = "#ffd166";
-        ctx.fillRect(gx * TILE + TILE - 12, (gy + 1) * TILE - actLift - 14, 9, 9);
-        ctx.strokeStyle = "#141016";
-        ctx.lineWidth = 1;
-        ctx.strokeRect(gx * TILE + TILE - 12, (gy + 1) * TILE - actLift - 14, 9, 9);
-      }
     }
   }
 
-  // 4. 夜晚光影暗罩、窗前光束、灯火暖光圈与「推门点亮」黑幕 + 轻天气粒子
-  if (space.space_kind !== "town" && Number(space.floor_index || 0) >= 0 && wallRows > 0 && wCode !== "rain") {
-    const shaftColorMap = {
-      dawn: [255, 204, 148, 0.16],
-      day: [255, 248, 205, 0.14],
-      dusk: [255, 165, 105, 0.18],
-      night: [155, 190, 255, 0.11],
-    };
-    const [sr, sg, sb, sa] = shaftColorMap[period] || shaftColorMap.day;
-    for (let x = 0; x < cols; x++) {
-      if ((spaceTiles[x + ",0"] || "") !== "glass_wall") continue;
-      const wVis = visAlphaGrid ? (visAlphaGrid[Math.min(rows - 1, wallRows) * cols + x] ?? 1) : 1;
-      if (wVis < 0.35) continue;
-      const bx0 = x * TILE + 6;
-      const bx1 = (x + 1) * TILE - 6;
-      const by0 = tileTopY(space, x, wallRows) - 3;
-      const by1 = Math.min(H, by0 + TILE * 2.35);
-      const shiftX = TILE * 0.7;
-      const sGrad = ctx.createLinearGradient(bx0, by0, bx0 + shiftX, by1);
-      sGrad.addColorStop(0, "rgba(" + sr + "," + sg + "," + sb + "," + (sa * wVis).toFixed(3) + ")");
-      sGrad.addColorStop(1, "rgba(" + sr + "," + sg + "," + sb + ",0)");
-      ctx.fillStyle = sGrad;
-      ctx.beginPath();
-      ctx.moveTo(bx0, by0);
-      ctx.lineTo(bx1, by0);
-      ctx.lineTo(bx1 + shiftX, by1);
-      ctx.lineTo(bx0 + shiftX, by1);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
-  if (space.space_kind !== "town" && !lighting.is_dark) {
-    const haloAlpha = (period === "night" || period === "dusk") ? 0.25 : 0.14;
-    for (const ent of snap.entities || []) {
-      if (ent.space_id !== space.space_id || Number(ent.z || 0) < 0) continue;
-      const tags = Array.isArray(ent.tags) ? ent.tags : [];
-      if (!tags.some((t) => t === "light_source" || t === "lamp" || t === "stove" || t === "fireplace")) continue;
-      if (ent.traits?.switchable && ent.traits.switchable.is_on === false) continue;
-      const cyCell = Math.max(0, Math.min(rows - 1, Math.round(ent.y + ((ent.footprint && ent.footprint[1]) || 1) - 1)));
-      const cxCell = Math.max(0, Math.min(cols - 1, Math.round(ent.x)));
-      const lVis = visAlphaGrid ? (visAlphaGrid[cyCell * cols + cxCell] ?? 1) : 1;
-      if (lVis < 0.35) continue;
-      const [fw, fh] = ent.footprint || [1, 1];
-      const lx = (ent.x + fw * 0.5) * TILE;
-      const ly = tileTopY(space, ent.x, ent.y) + fh * TILE * 0.5;
-      const grad = ctx.createRadialGradient(lx, ly, 4, lx, ly, TILE * 2.1);
-      grad.addColorStop(0, "rgba(255, 208, 132, " + (haloAlpha * lVis).toFixed(3) + ")");
-      grad.addColorStop(1, "rgba(255, 208, 132, 0)");
-      ctx.fillStyle = grad;
-      ctx.fillRect(lx - TILE * 2.2, ly - TILE * 2.2, TILE * 4.4, TILE * 4.4);
-    }
-  }
-  if (lighting.is_dark) {
-    ctx.fillStyle = pal.room.night_mask || "rgba(14, 18, 42, 0.48)";
-    ctx.fillRect(0, topEdge, W, canvasH);
-  } else if (lighting.has_lamp_on) {
-    for (const lp of lighting.lamp_positions || []) {
-      const lVis = visAlphaGrid ? (visAlphaGrid[Math.max(0, Math.min(rows - 1, lp.y)) * cols + Math.max(0, Math.min(cols - 1, lp.x))] ?? 1) : 1;
-      if (lVis < 0.35) continue;
-      const cx = (lp.x + 0.5) * TILE;
-      const cy = tileTopY(space, lp.x, lp.y) + TILE * 0.5;
-      const grad = ctx.createRadialGradient(cx, cy, 8, cx, cy, TILE * 2.5);
-      grad.addColorStop(0, pal.room.lamp_glow || "rgba(255, 214, 130, 0.36)");
-      grad.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, topEdge, W, canvasH);
-    }
-  }
+  // 4. Continuous time-of-day tint, local lights and room visibility.
+  AmbientFX.lighting(ctx, snap, art, visAlphaGrid, W, canvasH, topEdge, nowMs);
   if (visAlphaGrid) {
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
@@ -4456,12 +5185,18 @@ function renderViewport() {
       ctx.fillRect(0, topEdge, W, canvasH);
     }
     if (wCode === "rain" || wCode === "sakura" || wCode === "snow" || wCode === "cloudy") {
+      ambientSkyMoving = true;
       ctx.save();
       ctx.translate(0, topEdge);
       drawWeatherOverlay(ctx, W, canvasH, wCode, Number(wData.intensity || 0.5), nowMs);
       ctx.restore();
     }
   }
+
+  for (const bubble of emotes) {
+    EmoteFX.draw(ctx, snap, bubble.act, entById, bubble.cellVis, bubble.x, bubble.y, nowMs);
+  }
+  AmbientFX.drawFeedback(ctx, space, visAlphaGrid, nowMs);
 
   // 5. 放物预览、MC 搭建拖选框与反查高亮
   if (state.uiMode === "build" && ADVANCED_BUILD_TOOLS.has(state.tool)) {
@@ -4981,7 +5716,6 @@ function renderTopbar() {
     wBtn.textContent = (wInfo.icon || "☀️") + " " + (wInfo.label || "晴朗") + lockTag;
     wBtn.title = (wInfo.description || "天气晴朗") + "（点击切换天气或雨声）";
   }
-  SoundFX.syncWeather(wInfo.current || "clear", (sp.space_kind || "room") === "town");
 
   const ovBtn = el("btn-external-overlay");
   if (ovBtn) {
@@ -5794,9 +6528,15 @@ function renderInspector() {
 }
 
 function interactAndToast(entityId, action, targetId = "") {
+  const sid = state.snap.space.space_id;
+  const before = state.snap.entities.find((e) => e.entity_id === entityId);
   runAction("entity_ui_interact", {
     entity_id: entityId, action, target_id: targetId, actor_id: state.snap.active_actor_id,
   }).then((res) => {
+    if (state.view === "world" && state.snap.space.space_id === sid) {
+      const after = state.snap.entities.find((e) => e.entity_id === entityId);
+      PlayerFeedback.action(state.snap.space, action, before, after);
+    }
     if (res.feedback) toast(res.feedback);
   }).catch((e) => toast(e.message, true));
 }
@@ -6633,6 +7373,13 @@ function applyEntityDelta(changes) {
   state.snap.lighting = changes.lighting;
 }
 
+function itemSprite(item) {
+  const sprite = item.sprite;
+  if (!sprite?.image_path || sprite.image_data_url) return sprite;
+  const catalog = state.snap.blueprints.find((bp) => bp.blueprint_id === item.blueprint_id)?.sprite;
+  return sprite.image_path === catalog?.image_path ? { ...sprite, image_data_url: catalog.image_data_url } : sprite;
+}
+
 function inventorySlot(item, index, selected, showNumber) {
   const button = document.createElement("button");
   button.type = "button";
@@ -6641,10 +7388,7 @@ function inventorySlot(item, index, selected, showNumber) {
   button.title = item?.name || "空格";
   button.setAttribute("aria-label", (index + 1) + " · " + button.title);
   if (item) {
-    const catalogSprite = state.snap.blueprints.find((bp) => bp.blueprint_id === item.blueprint_id)?.sprite;
-    const sprite = !item.sprite.image_data_url && item.sprite.image_path && item.sprite.image_path === catalogSprite?.image_path
-      ? { ...item.sprite, image_data_url: catalogSprite.image_data_url } : item.sprite;
-    button.appendChild(makeThumbCanvas({ ...item, sprite }, state.snap.palette, chooseEntityFrame(item)));
+    button.appendChild(makeThumbCanvas({ ...item, sprite: itemSprite(item) }, state.snap.palette, chooseEntityFrame(item)));
   }
   if (showNumber) {
     const number = document.createElement("span");
@@ -6707,6 +7451,8 @@ async function inventoryCommand(operation, args = {}) {
   if (!sid) return false;
   const panel = state.inventoryPanel;
   const facing = ROAM_POS.active && ROAM_POS.sid === sid ? ROAM_POS.dir : undefined;
+  const before = state.snap.entities.find((e) => e.entity_id === args.entity_id)
+    || state.playerInventory?.items.find((e) => e.entity_id === args.entity_id);
   state.inventoryBusy = true;
   state._interactGen = (state._interactGen | 0) + 1;
   try {
@@ -6729,6 +7475,10 @@ async function inventoryCommand(operation, args = {}) {
     }
     applyEntityDelta(res.changes);
     applyPlayerInventory(res.inventory);
+    const after = state.snap.entities.find((e) => e.entity_id === args.entity_id)
+      || res.inventory.items.find((e) => e.entity_id === args.entity_id);
+    const recipient = state.snap.actors.find((actor) => actor.actor_id === args.recipient_id && actor.space_id === sid);
+    PlayerFeedback.inventory(state.snap.space, operation, args.verb, before, after, player, recipient, res.gift);
     refreshLocalRoamPrompt();
     renderViewport();
     if (res.message) toast(res.message, res.gift?.status === "declined" && operation === "gift");
@@ -6932,6 +7682,7 @@ function openConfirm(text, onYes) {
 }
 
 function openNoteModal(ent) {
+  SoundFX.read();
   const entries = (ent.traits && ent.traits.inscribable && ent.traits.inscribable.entries) || [];
   const rows = entries.length
     ? entries.map((e) => '<div style="padding:4px 6px;border:1px solid var(--border);background:var(--panel-2);margin-bottom:4px;"><b>[' + esc(e.by) + "]</b> " + esc(e.text) + "</div>").join("")
@@ -6945,7 +7696,12 @@ function openNoteModal(ent) {
         const text = el("note-write-inp").value.trim();
         if (!text) return toast("请输入内容", true);
         runAction("entity_ui_interact", { entity_id: ent.entity_id, action: "write_user_note", text })
-          .then((res) => { closeModal(); if (res.feedback) toast(res.feedback); })
+          .then((res) => {
+            closeModal();
+            const updated = res.snapshot?.entities.find((e) => e.entity_id === ent.entity_id);
+            if (state.snap.space.space_id === ent.space_id) PlayerFeedback.action(state.snap.space, "write", ent, updated);
+            if (res.feedback) toast(res.feedback);
+          })
           .catch((e) => toast(e.message, true));
       },
     },
@@ -10345,7 +11101,7 @@ async function pollLive(generation) {
       }
       renderCameraControls(live.cinema_focus || null);
     }
-    renderViewport();
+    if (!document.hidden && el("modal-mask").classList.contains("hidden")) renderViewport();
     renderLiveActivity(live);
     state.liveRevision = live.revision;
     if (!state.autoLife && !live.ordered && !PD_ANIM.get(aid)?.moving) {
@@ -10403,7 +11159,10 @@ function init() {
 
   const stageWrap = el("stage-wrap");
   if (stageWrap) {
-    stageWrap.addEventListener("scroll", () => { renderTownMinimap(); }, { passive: true });
+    stageWrap.addEventListener("scroll", () => {
+      state.ambientViewDirty = true;
+      renderTownMinimap();
+    }, { passive: true });
     stageWrap.parentElement.addEventListener("wheel", (ev) => {
       if (state.view !== "world" || state.uiMode !== "roam" || state.drag
           || !el("modal-mask").classList.contains("hidden") || ev.defaultPrevented
@@ -10561,9 +11320,7 @@ function openWeatherModal() {
     rainChk.onchange = () => {
       state.rainSoundEnabled = Boolean(rainChk.checked);
       localStorage.setItem("nanami_world_rain_sound", state.rainSoundEnabled ? "1" : "0");
-      const curW = (state.snap && state.snap.weather) || {};
-      const isOut = (state.snap && state.snap.space && state.snap.space.space_kind) === "town";
-      SoundFX.syncWeather(curW.current || "clear", isOut);
+      syncWorldAudio();
     };
   }
 }
@@ -10845,10 +11602,9 @@ function openWeatherModal() {
       state.soundEnabled = !state.soundEnabled;
       localStorage.setItem("nanami_world_sound", state.soundEnabled ? "1" : "0");
       syncSoundBtn();
-      if (state.soundEnabled) SoundFX.action();
-      const curW = (state.snap && state.snap.weather) || {};
-      const isOut = (state.snap && state.snap.space && state.snap.space.space_kind) === "town";
-      SoundFX.syncWeather(curW.current || "clear", isOut);
+      if (state.soundEnabled) { SoundFX.unlock(); SoundFX.switchToggle(true); }
+      else SoundFX.silence();
+      syncWorldAudio();
     };
   }
   let chatPresenceActor = "";
@@ -10919,9 +11675,7 @@ function openWeatherModal() {
     // The interaction syncs the captured position after the one movement request already on the wire.
     roamSyncQueue.length = 0;
     state._interactGen = (state._interactGen | 0) + 1;
-    if (prompt.kind === "portal" || (prompt.kind === "entity" && (prompt.action === "open" || prompt.action === "close"))) SoundFX.door();
-    else if (prompt.kind === "actor") SoundFX.talk(prompt.name);
-    else SoundFX.action();
+    const targetBefore = state.snap.entities.find((e) => e.entity_id === prompt.target_id);
     try {
       if (roamSyncInFlight) await roamSyncInFlight;
       if (state.uiMode !== "roam" || state.snap?.space?.space_id !== sid) return;
@@ -10942,7 +11696,15 @@ function openWeatherModal() {
           ROAM_POS.dir = updated.facing;
         }
       }
+      if (inter.kind === "entity_acted" || inter.kind === "container") {
+        const after = state.snap.entities.find((e) => e.entity_id === inter.entity_id);
+        PlayerFeedback.action(state.snap.space, inter.action, targetBefore, after, current);
+      } else if (inter.kind === "action" || inter.kind === "none") {
+        EmoteFX.trigger(current, "question", performance.now());
+      }
       if (inter.kind === "talk_actor" && inter.target_actor_id) {
+        SoundFX.talk(prompt.name);
+        EmoteFX.trigger(current, "alert", performance.now());
         if (state.snap.active_actor_id !== inter.target_actor_id) {
           await runAction("set_active_actor", { actor_id: inter.target_actor_id });
         }
@@ -10964,6 +11726,10 @@ function openWeatherModal() {
         state.inventoryPanel = { chestId: inter.entity_id, slot: state.hotbarSlot, side: "pack" };
         renderInventoryModal();
       } else if (inter.kind === "entered_space") {
+        SoundFX.door();
+        if (state.snap.space.space_kind === "town" && state.snap.weather?.current === "rain") {
+          AmbientFX.trackRain(performance.now());
+        }
         if (state.dockOpen) {
           state.dockOpen = false;
           sendChatPresence(false);
@@ -11124,6 +11890,7 @@ function openWeatherModal() {
       refreshLocalRoamPrompt(p);
       const tmeta = resolveTileMeta(state.snap.space, gx, gy);
       SoundFX.footstep((tmeta && tmeta.tid) || "wood_floor");
+      AmbientFX.footprint(state.snap, gx, gy, ROAM_POS.dir, performance.now());
       if (state.dockOpen && state.snap.active_actor_id && state.snap.active_actor_id !== state.playerId) {
         const targetAct = state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
         if (targetAct && (targetAct.space_id !== p.space_id || Math.max(Math.abs(targetAct.x - p.x), Math.abs(targetAct.y - p.y)) > 3)) {
@@ -11208,25 +11975,42 @@ function openWeatherModal() {
       void showPlayerGreeting(res.player_greeting);
     }).catch(() => {});
   }, 6000);
+  let lastPaintAt = 0, lastAudioAt = -Infinity, wasDrawable = false;
   const rafTick = (now) => {
     const dt = Math.min(0.05, Math.max(0, (now - lastRafAt) / 1000));
     lastRafAt = now;
-    if (state.snap && !state.eyeMode && !state.drag && state.view === "world" && el("modal-mask").classList.contains("hidden")) {
+    const drawable = !document.hidden && state.snap && !state.eyeMode && !state.drag
+      && state.view === "world" && el("modal-mask").classList.contains("hidden");
+    if (drawable) {
       const roamMoved = state.uiMode === "roam" ? updateRoamMotion(dt) : false;
-      const wCodeNow = state.snap.weather?.current || "clear";
-      const activeWeatherAnim = state.snap.space?.space_kind === "town" && (wCodeNow === "rain" || wCodeNow === "sakura" || wCodeNow === "snow");
-      if (PD_LOOP.moving || roamMoved || state.roomVis?.animating) {
+      const immersive = state.uiMode !== "build";
+      const moving = PD_LOOP.moving || roamMoved || state.roomVis?.animating || TransitionFX.active(now);
+      const cadence = immersive && (ambientSkyMoving || AmbientFX.active()) ? 55
+        : (PD_LOOP.resting || state.uiMode === "roam" ? 350 : Infinity);
+      const elapsed = now - lastPaintAt;
+      if (moving || !wasDrawable || elapsed >= cadence || (state.ambientViewDirty && elapsed >= 55)) {
+        state.ambientViewDirty = false;
+        lastPaintAt = now;
         renderViewport();
-      } else if (activeWeatherAnim && !document.hidden) {
-        const wPh = Math.floor(now / 45);
-        if (wPh !== state._weatherRafPhase) { state._weatherRafPhase = wPh; renderViewport(); }
-      } else if (PD_LOOP.resting || state.uiMode === "roam") {
-        const ph = Math.floor(now / 350);
-        if (ph !== state._pdPhase) { state._pdPhase = ph; renderViewport(); }
       }
+    }
+    wasDrawable = Boolean(drawable);
+    if (!document.hidden && now - lastAudioAt >= 125) {
+      lastAudioAt = now;
+      syncWorldAudio();
     }
     requestAnimationFrame(rafTick);
   };
+  for (const event of ["pointerdown", "keydown"]) {
+    window.addEventListener(event, SoundFX.unlock, { once: true, capture: true });
+  }
+  document.addEventListener("visibilitychange", () => {
+    SoundFX.pageHidden(document.hidden);
+    wasDrawable = false;
+    lastAudioAt = -Infinity;
+  });
+  window.addEventListener("pagehide", () => SoundFX.pageHidden(true));
+  window.addEventListener("pageshow", () => SoundFX.pageHidden(document.hidden));
   requestAnimationFrame(rafTick);
 }
 

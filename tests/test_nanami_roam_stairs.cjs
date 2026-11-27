@@ -41,6 +41,8 @@ function startRoam(x, y) {
       return { tid: "stone_tile", meta: { walkable: tx !== 5 || ty !== 2 } };
     },
     SoundFX: { footstep() {} },
+    AmbientFX: { footprint() {} },
+    performance,
   };
   const roam = vm.runInNewContext(
     section("function isCellWalkableLocal(", "function refreshLocalRoamPrompt(") +

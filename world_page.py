@@ -1501,7 +1501,7 @@ def register_pages(
             out["player"] = engine.live_actor_frame(pid)
             out["inventory"] = engine.inventory_state(pid, "" if operation == "assign_chest" and owner_id not in ("", pid) else chest_id)
             dirty_id = chest_id if operation == "assign_chest" else eid
-            if dirty_id and operation in ("place", "pickup", "withdraw", "deposit", "assign_chest", "use"):
+            if dirty_id and operation in ("place", "pickup", "stow", "withdraw", "deposit", "assign_chest", "use"):
                 out["changes"] = engine.live_space_changes(player["space_id"], entity_ids=[dirty_id])
         return out
 
