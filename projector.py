@@ -222,7 +222,7 @@ def project_terminal_data(
     if isinstance(raw_tiles, dict) and raw_tiles:
         seen_tids: set[str] = set()
         for tid in raw_tiles.values():
-            if tid in TILE_CATALOG and tid not in seen_tids:
+            if tid in TILE_CATALOG and tid != "void" and tid not in seen_tids:
                 seen_tids.add(tid)
                 terrain_names.append(str(TILE_CATALOG[tid]["name"]))
 

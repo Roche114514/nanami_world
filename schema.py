@@ -218,6 +218,17 @@ TILE_CATALOG: dict[str, dict[str, Any]] = {
         "alt": "#43646e",
         "accent": "#b8e6f2",
     },
+    "void": {
+        "tile_id": "void",
+        "name": "虚空（无地块）",
+        "category": "void",
+        "walkable": False,
+        "is_wall": False,
+        "texture": "void",
+        "main": "#0e0c14",
+        "alt": "#0e0c14",
+        "accent": "#252033",
+    },
 }
 
 DEFAULT_SLOT_COLORS: dict[str, str] = {
@@ -318,6 +329,29 @@ def _sanitize_pixel_char(ch: str) -> str:
     return mapping.get(ch, "1" if ch.isalnum() else ".")
 
 
+def _sanitize_palette_char(ch: str) -> str:
+    if ch in (".", " ", "_"):
+        return "."
+    if ch.isalnum() and ch.isascii():
+        return ch
+    return "."
+
+
+def _normalize_sprite_palette(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, Mapping):
+        return {}
+    pal: dict[str, str] = {}
+    for k, v in raw.items():
+        ks = str(k or "").strip()
+        if len(ks) == 1 and ks.isalnum() and ks.isascii():
+            hx = _hex_color(v, "")
+            if hx:
+                pal[ks] = hx
+                if len(pal) >= 62:
+                    break
+    return pal
+
+
 def normalize_pixel_grid(
     rows: Sequence[str] | None,
     width: int = 16,
@@ -325,6 +359,7 @@ def normalize_pixel_grid(
     *,
     align_bottom: bool = True,
     auto_outline: bool = False,
+    allow_palette_chars: bool = False,
 ) -> list[str]:
     """将像素色槽矩阵裁齐/补足到指定尺寸，执行居中落底与可选 1px 自动描边。"""
     w = clamp_int(width, 8, 48, 16)
@@ -333,10 +368,11 @@ def normalize_pixel_grid(
     if not raw_rows:
         return ["." * w for _ in range(h)]
 
+    sanitizer = _sanitize_palette_char if allow_palette_chars else _sanitize_pixel_char
     grid: list[list[str]] = []
     for y in range(h):
         src = raw_rows[y] if y < len(raw_rows) else ""
-        row = [_sanitize_pixel_char(src[x]) if x < len(src) else "." for x in range(w)]
+        row = [sanitizer(src[x]) if x < len(src) else "." for x in range(w)]
         grid.append(row)
 
     # 检测边界框以执行居中与落底（跳过纯空图）
@@ -611,13 +647,19 @@ def normalize_sprite(raw: Mapping[str, Any] | None, *, default_w: int = 16, defa
         mode = "pixel_grid"
     w = clamp_int(src.get("w"), 8, 48, default_w)
     h = clamp_int(src.get("h"), 8, 48, default_h)
+    palette = _normalize_sprite_palette(src.get("palette"))
+    preserve_layout = bool(src.get("preserve_layout", False) or bool(palette))
     raw_frames = src.get("frames") if isinstance(src.get("frames"), Mapping) else {}
     frames: dict[str, list[str]] = {}
     for frame_name, rows in raw_frames.items():
         if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
-            frames[str(frame_name)] = normalize_pixel_grid(rows, w, h, align_bottom=True)
+            frames[str(frame_name)] = normalize_pixel_grid(
+                rows, w, h, align_bottom=not preserve_layout, allow_palette_chars=bool(palette)
+            )
     if not frames and isinstance(src.get("pixels"), Sequence) and not isinstance(src.get("pixels"), (str, bytes)):
-        frames["default"] = normalize_pixel_grid(src.get("pixels"), w, h, align_bottom=True)
+        frames["default"] = normalize_pixel_grid(
+            src.get("pixels"), w, h, align_bottom=not preserve_layout, allow_palette_chars=bool(palette)
+        )
     if mode == "pixel_grid" and not frames:
         frames["default"] = normalize_pixel_grid(["." * w for _ in range(h)], w, h, align_bottom=False)
     return {
@@ -626,6 +668,8 @@ def normalize_sprite(raw: Mapping[str, Any] | None, *, default_w: int = 16, defa
         "h": h,
         "frames": frames,
         "slot_colors": normalize_slot_colors(src.get("slot_colors") if isinstance(src.get("slot_colors"), Mapping) else None),
+        "palette": palette,
+        "preserve_layout": preserve_layout,
         "image_path": str(src.get("image_path") or "").strip(),
         "palette_snap": clamp_float(src.get("palette_snap"), 0.0, 1.0, 0.35),
     }

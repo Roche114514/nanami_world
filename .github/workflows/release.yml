@@ -26,7 +26,7 @@ jobs:
       - name: 打成市场包体（唯一顶层目录 = 插件目录）
         run: |
           mkdir -p out/nanami_world
-          rsync -a --exclude='.git' --exclude='__pycache__' --exclude='.github' ./ out/nanami_world/
+          rsync -a --exclude='.git' --exclude='__pycache__' --exclude='.github' --exclude='out' ./ out/nanami_world/
           cd out && zip -qr "nanami_world-${{ steps.meta.outputs.version }}.zip" nanami_world
           sha256sum "nanami_world-${{ steps.meta.outputs.version }}.zip" | awk '{print $1}' > sha256.txt
           wc -c < "nanami_world-${{ steps.meta.outputs.version }}.zip" | tr -d ' ' > size.txt

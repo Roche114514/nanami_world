@@ -1745,6 +1745,8 @@ class WorldEngine:
             raise ValueError(f"坐标 ({x}, {y}) 超出空间边界。")
 
         req_cells = {(x + dx, y + dy) for dx in range(fw) for dy in range(fh)}
+        if any(self.get_cell_tile(space, cx, cy).get("tile_id") == "void" for cx, cy in req_cells):
+            raise ValueError("该位置为虚空（无地块），请先铺设地面或墙体。")
         wall_flags = [self.is_wall_cell(space, cx, cy) for cx, cy in req_cells]
 
         # 墙面区域（含默认顶部墙带与用户涂刷的 MC 墙体方块）
@@ -2333,10 +2335,11 @@ class WorldEngine:
                         raw_ops.append((xx, yy, tid))
 
             if not raw_ops:
-                return {"space_id": sid, "painted": 0, "removed": [], "expanded": []}
+                return {"space_id": sid, "painted": 0, "removed": [], "expanded": [], "skipped_actor_cells": []}
 
             expanded_dirs: list[str] = []
             removed_eids: list[str] = []
+            skipped_actor_cells: list[list[int]] = []
             w = int(space["width"])
             h = int(space["height"])
 
@@ -2359,10 +2362,10 @@ class WorldEngine:
                         removed_eids.extend(res.get("removed") or [])
                     else:
                         key = f"{tx},{ty}"
-                        if key in tiles:
+                        if key in tiles and tiles[key] != "void":
                             tiles.pop(key, None)
                             reset_count += 1
-                        elif ty < wall_rows:
+                        elif key not in tiles and ty < wall_rows:
                             tiles[key] = "wood_floor"
                             reset_count += 1
                 self._save_world_locked()
@@ -2371,21 +2374,25 @@ class WorldEngine:
                     "painted": reset_count,
                     "removed": removed_eids,
                     "expanded": expanded_dirs,
+                    "skipped_actor_cells": skipped_actor_cells,
                 }
 
-            if auto_expand:
-                if any(tx <= 0 for tx, _, _ in raw_ops) and int(space["width"]) < MAX_SPACE_WIDTH:
+            expand_ops = [(tx, ty, tid) for tx, ty, tid in raw_ops if tid not in ("", "erase", "default", "void")]
+            if auto_expand and expand_ops:
+                if any(tx <= 0 for tx, _, _ in expand_ops) and int(space["width"]) < MAX_SPACE_WIDTH:
                     _, dw, _ = self._expand_space_locked(sid, "west", 4)
                     raw_ops = [(tx + dw, ty, tid) for tx, ty, tid in raw_ops]
+                    expand_ops = [(tx + dw, ty, tid) for tx, ty, tid in expand_ops]
                     expanded_dirs.append("west")
-                if any(tx >= int(space["width"]) - 1 for tx, _, _ in raw_ops) and int(space["width"]) < MAX_SPACE_WIDTH:
+                if any(tx >= int(space["width"]) - 1 for tx, _, _ in expand_ops) and int(space["width"]) < MAX_SPACE_WIDTH:
                     self._expand_space_locked(sid, "east", 4)
                     expanded_dirs.append("east")
-                if any(ty <= 0 for _, ty, _ in raw_ops) and int(space["height"]) < MAX_SPACE_HEIGHT:
+                if any(ty <= 0 for _, ty, _ in expand_ops) and int(space["height"]) < MAX_SPACE_HEIGHT:
                     _, _, dn = self._expand_space_locked(sid, "north", 4)
                     raw_ops = [(tx, ty + dn, tid) for tx, ty, tid in raw_ops]
+                    expand_ops = [(tx, ty + dn, tid) for tx, ty, tid in expand_ops]
                     expanded_dirs.append("north")
-                if any(ty >= int(space["height"]) - 1 for _, ty, _ in raw_ops) and int(space["height"]) < MAX_SPACE_HEIGHT:
+                if any(ty >= int(space["height"]) - 1 for _, ty, _ in expand_ops) and int(space["height"]) < MAX_SPACE_HEIGHT:
                     self._expand_space_locked(sid, "south", 4)
                     expanded_dirs.append("south")
 
@@ -2393,12 +2400,42 @@ class WorldEngine:
             h = int(space["height"])
             wall_rows = int(space.get("wall_rows") or 0)
             tiles = space.setdefault("tiles", {})
+            elevs = space.get("elevations")
+            stairs = space.get("stairs")
             changed = 0
             for tx, ty, tid in raw_ops:
                 if not (0 <= tx < w and 0 <= ty < h):
                     continue
                 key = f"{tx},{ty}"
-                if tid in ("", "erase", "default"):
+                if tid == "void":
+                    actor_here = any(
+                        act.get("space_id") == sid
+                        and int(act.get("x", -1)) == tx
+                        and int(act.get("y", -1)) == ty
+                        for act in self._world["actors"].values()
+                    )
+                    if actor_here:
+                        skipped_actor_cells.append([tx, ty])
+                        continue
+                    hit_ids = [
+                        ent["entity_id"]
+                        for ent in list(self._world["entities"].values())
+                        if ent.get("space_id") == sid
+                        and int(ent.get("z", 0)) >= 0
+                        and (tx, ty) in self._entity_cells(ent)
+                    ]
+                    for eid in hit_ids:
+                        if eid in self._world["entities"]:
+                            res = self.remove_entity(eid)
+                            removed_eids.extend(res.get("removed") or [])
+                    if isinstance(elevs, dict):
+                        elevs.pop(key, None)
+                    if isinstance(stairs, dict):
+                        stairs.pop(key, None)
+                    if tiles.get(key) != "void":
+                        tiles[key] = "void"
+                        changed += 1
+                elif tid in ("", "erase", "default"):
                     if key in tiles:
                         tiles.pop(key, None)
                         changed += 1
@@ -2434,6 +2471,7 @@ class WorldEngine:
                 "painted": changed,
                 "removed": removed_eids,
                 "expanded": expanded_dirs,
+                "skipped_actor_cells": skipped_actor_cells,
             }
 
     def apply_generated_map(

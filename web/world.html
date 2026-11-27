@@ -398,6 +398,7 @@
     width: min(680px, 100%); max-height: 90vh; display: flex; flex-direction: column;
   }
   .modal-card.narrow { width: min(440px, 100%); }
+  .modal-card.wide { width: min(940px, 96vw); }
   .modal-card.inventory-catalog-modal { width:min(900px, 100%); }
   .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 2px solid var(--border); font-weight: 700; color: var(--accent); }
   .modal-body { padding: 12px 14px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
@@ -414,7 +415,7 @@
   }
   .trait-chip input { margin: 0; }
 
-  /* 16x16 像素小画笔编辑器 */
+  /* 统一像素工坊（Pixel Studio） */
   .pixel-editor-wrap { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
   #pixel-brush-canvas { border: 2px solid var(--border-hi); background: repeating-conic-gradient(#1f1c28 0% 25%, #181620 0% 50%) 50% / 16px 16px; cursor: crosshair; }
   .slot-bar { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -424,6 +425,49 @@
   }
   .slot-btn.active { border-color: var(--accent); }
   .swatch { width: 12px; height: 12px; border: 1px solid #000; display: inline-block; }
+
+  .ps-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.95fr); gap: 12px; align-items: start; }
+  @media (max-width: 780px) { .ps-layout { grid-template-columns: 1fr; } }
+  .ps-main, .ps-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .ps-toolbar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; background: var(--panel-2); border: 1px solid var(--border); padding: 6px; }
+  .ps-tool-btn {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    padding: 3px 7px; font-size: 11px; cursor: pointer; font-family: var(--px-font);
+  }
+  .ps-tool-btn:hover { border-color: var(--border-hi); }
+  .ps-tool-btn.active { border-color: var(--accent); background: #362231; color: #ffd9e6; }
+  .ps-tool-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .ps-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+  .ps-canvas-stage {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px; border: 1px solid var(--border); background: #12101a;
+  }
+  .ps-canvas {
+    border: 2px solid var(--border-hi);
+    background: repeating-conic-gradient(#211e2b 0% 25%, #17151f 0% 50%) 50% / 16px 16px;
+    cursor: crosshair; image-rendering: pixelated; touch-action: none;
+  }
+  .ps-frame-tabs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .ps-frame-tab {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+    padding: 3px 8px; font-size: 11px; cursor: pointer;
+  }
+  .ps-frame-tab.active { border-color: var(--accent-2); color: var(--text); background: #1e2d3b; font-weight: 700; }
+  .ps-palette-box { border: 1px solid var(--border); background: var(--panel-2); padding: 8px; display: flex; flex-direction: column; gap: 7px; }
+  .ps-palette-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+  .ps-swatch {
+    height: 22px; border: 2px solid rgba(0, 0, 0, 0.55); cursor: pointer; position: relative;
+  }
+  .ps-swatch:hover { transform: scale(1.06); border-color: #ffffff; z-index: 2; }
+  .ps-swatch.active { border-color: #ffffff; box-shadow: 0 0 0 2px var(--accent); z-index: 2; }
+  .ps-used-row { display: flex; flex-wrap: wrap; gap: 4px; min-height: 20px; }
+  .ps-mini-swatch { width: 18px; height: 18px; border: 1px solid rgba(0,0,0,0.6); cursor: pointer; }
+  .ps-mini-swatch.active { box-shadow: 0 0 0 2px var(--accent); border-color: #fff; }
+  .ps-preview-card {
+    border: 1px solid var(--border); background: var(--panel-2); padding: 8px;
+    display: flex; align-items: center; justify-content: space-around; gap: 8px; flex-wrap: wrap;
+  }
+  .ps-preview-item { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 10px; color: var(--muted); }
 
   .toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
@@ -671,6 +715,7 @@
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
               <span id="cm-ap-mode-badge" style="color:var(--accent-2);font-family:var(--px-font);"></span>
               <button type="button" class="px-btn" id="btn-cm-ap-regen">🪄 按角色设定重新生成</button>
+              <button type="button" class="px-btn" id="btn-cm-ap-studio" style="border-color:var(--accent);color:var(--accent);">🎨 像素画布</button>
               <label class="px-btn" style="cursor:pointer;">🖼 导入像素图<input type="file" id="cm-ap-img-file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;"></label>
               <button type="button" class="px-btn" id="btn-cm-ap-pack">📦 像素图包</button>
               <button type="button" class="px-btn hidden" id="btn-cm-ap-clear">改用基础模板</button>
@@ -776,6 +821,7 @@
         <button class="px-btn tool-btn" data-tool="rect_tile" title="拖拽拉出矩形铺满地形">📐 矩形铺地</button>
         <button class="px-btn tool-btn" data-tool="hollow_wall" title="拖拽围出空心房间墙体">🏰 矩形围墙</button>
         <button class="px-btn tool-btn" data-tool="pickaxe" title="点按或拖拽拆除物品/墙体恢复地面">⛏ 镐子拆除</button>
+        <button class="px-btn tool-btn" data-tool="erase_tile" title="点按或拖拽直接挖除地块为虚空（按住 Shift 拖拽可矩形挖空）">🕳 挖除地块</button>
         <span class="build-sep"></span>
         <label class="trait-chip" title="铺设方块触及地图边缘时自动向外延展 4 格"><input type="checkbox" id="chk-auto-expand" checked> ⚡ 边缘扩图</label>
         <div class="spacer"></div>
@@ -919,6 +965,7 @@
               <input class="px-inp" id="forge-input" placeholder="如：桌角一杯冒着热气的抹茶" maxlength="180">
               <button class="px-btn primary" id="btn-forge">生成</button>
             </div>
+            <button type="button" class="px-btn" id="btn-new-pixel-bp" style="width:100%;margin-top:6px;border-color:var(--accent);color:var(--accent);">🎨 像素画布手绘造物</button>
           </div>
 
           <div class="sec-box">
@@ -1075,6 +1122,7 @@ const state = {
   highlightPos: null,
   hoverCell: null,
   drag: null,
+  modalCleanup: null,
   imageCache: new Map(),
   terrainCache: { key: "", canvas: null },
   roomVis: { sid: "", w: 0, h: 0, alpha: null, animating: false },
@@ -1843,6 +1891,10 @@ function drawCellTile(ctx, rawTid, x, y, wallRows, px, py, pal, tileSize) {
   const sc = S / 48;
   const hasExplicit = Boolean(rawTid && state.tileMap.has(rawTid));
   const tid = hasExplicit ? rawTid : ((y >= 0 && y < wallRows) ? "wood_wall" : "wood_floor");
+  if (tid === "void") {
+    ctx.clearRect(px, py, S, S);
+    return;
+  }
   const meta = state.tileMap.get(tid) || { texture: "planks", is_wall: false, main: pal.room.floor_a, alt: pal.room.floor_b, accent: "#a3704c" };
 
   if (!hasExplicit) {
@@ -1933,7 +1985,8 @@ function drawCellTile(ctx, rawTid, x, y, wallRows, px, py, pal, tileSize) {
 }
 
 /* ── 像素贴图渲染辅助 ── */
-function resolveSlotColor(slot, slotColors, palette) {
+function resolveSlotColor(slot, slotColors, palette, spritePalette) {
+  if (spritePalette && spritePalette[slot]) return spritePalette[slot];
   const sb = (palette && palette.sprite_base) || {};
   const custom = (slotColors && slotColors[slot]) || "";
   if (custom) return custom;
@@ -1982,7 +2035,7 @@ function chooseEntityFrame(ent) {
   return frames.default || Object.values(frames)[0] || [];
 }
 
-function drawPixelGrid(ctx, rows, w, h, slotColors, palette, dx, dy, dw, dh) {
+function drawPixelGrid(ctx, rows, w, h, slotColors, palette, dx, dy, dw, dh, spritePalette) {
   if (!rows || !rows.length) return;
   const cw = dw / w;
   const ch = dh / h;
@@ -1991,7 +2044,7 @@ function drawPixelGrid(ctx, rows, w, h, slotColors, palette, dx, dy, dw, dh) {
     for (let x = 0; x < w; x++) {
       const slot = row[x] || ".";
       if (slot === ".") continue;
-      const color = resolveSlotColor(slot, slotColors, palette);
+      const color = resolveSlotColor(slot, slotColors, palette, spritePalette);
       if (!color) continue;
       ctx.fillStyle = color;
       ctx.fillRect(Math.floor(dx + x * cw), Math.floor(dy + y * ch), Math.ceil(cw), Math.ceil(ch));
@@ -2052,6 +2105,7 @@ function drawSprite(ctx, sprite, frameRows, palette, dx, dy, dw, dh, fallbackLab
     dy,
     dw,
     dh,
+    sprite.palette,
   );
 }
 
@@ -3528,6 +3582,7 @@ function renderViewport() {
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         const tid = spaceTiles[x + "," + y] || "";
+        if (tid === "void") continue;
         const ev = hasRelief ? cellElev(space, x, y) : 0;
         const py = y * TILE - ev * ELEV_LIFT_PX;
         const px = x * TILE;
@@ -3543,10 +3598,26 @@ function renderViewport() {
           const sTid = y + 1 < rows ? (spaceTiles[x + "," + (y + 1)] || "") : tid;
           const wTid = x > 0 ? (spaceTiles[(x - 1) + "," + y] || "") : tid;
           const eTid = x + 1 < cols ? (spaceTiles[(x + 1) + "," + y] || "") : tid;
-          if (nTid && nTid !== tid && !pavedSet.has(nTid)) octx.fillRect(px, py, TILE, 2);
-          if (sTid && sTid !== tid && !pavedSet.has(sTid)) octx.fillRect(px, py + TILE - 2, TILE, 2);
-          if (wTid && wTid !== tid && !pavedSet.has(wTid)) octx.fillRect(px, py, 2, TILE);
-          if (eTid && eTid !== tid && !pavedSet.has(eTid)) octx.fillRect(px + TILE - 2, py, 2, TILE);
+          if (nTid && nTid !== "void" && nTid !== tid && !pavedSet.has(nTid)) octx.fillRect(px, py, TILE, 2);
+          if (sTid && sTid !== "void" && sTid !== tid && !pavedSet.has(sTid)) octx.fillRect(px, py + TILE - 2, TILE, 2);
+          if (wTid && wTid !== "void" && wTid !== tid && !pavedSet.has(wTid)) octx.fillRect(px, py, 2, TILE);
+          if (eTid && eTid !== "void" && eTid !== tid && !pavedSet.has(eTid)) octx.fillRect(px + TILE - 2, py, 2, TILE);
+        }
+      }
+    }
+
+    // 浮空地块南向厚边（当下方是虚空时，为实心地块画出 6px 断面厚度）
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        if ((spaceTiles[x + "," + y] || "") === "void") continue;
+        if (hasRelief && cellElev(space, x, y) > 0) continue;
+        if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") === "void") {
+          const px = x * TILE;
+          const py = y * TILE;
+          octx.fillStyle = "#261f30";
+          octx.fillRect(px, py + TILE, TILE, 4);
+          octx.fillStyle = "#14101c";
+          octx.fillRect(px, py + TILE + 4, TILE, 2);
         }
       }
     }
@@ -3558,7 +3629,7 @@ function renderViewport() {
           if (!resolveTileMeta(space, x, y).meta.is_wall) continue;
           const px = x * TILE;
           const py = y * TILE;
-          if (y + 1 < rows && !resolveTileMeta(space, x, y + 1).meta.is_wall) {
+          if (y + 1 < rows && (spaceTiles[x + "," + (y + 1)] || "") !== "void" && !resolveTileMeta(space, x, y + 1).meta.is_wall) {
             octx.fillStyle = "rgba(18, 12, 24, 0.52)";
             octx.fillRect(px, py + TILE - 3, TILE, 3);
             const ao = octx.createLinearGradient(0, py + TILE, 0, py + TILE + 10);
@@ -3567,7 +3638,7 @@ function renderViewport() {
             octx.fillStyle = ao;
             octx.fillRect(px, py + TILE, TILE, 10);
           }
-          if (y >= wallRows && x + 1 < cols && !resolveTileMeta(space, x + 1, y).meta.is_wall) {
+          if (y >= wallRows && x + 1 < cols && (spaceTiles[(x + 1) + "," + y] || "") !== "void" && !resolveTileMeta(space, x + 1, y).meta.is_wall) {
             octx.fillStyle = "rgba(10, 8, 18, 0.16)";
             octx.fillRect(px + TILE, py, 5, TILE);
           }
@@ -3852,7 +3923,26 @@ function renderViewport() {
     }
     state.terrainCache = { key: cacheKey, canvas: off, space, palette: pal, period, weatherCode: wCode };
   }
+  ctx.fillStyle = "#0e0c14";
+  ctx.fillRect(0, 0, W, H);
   ctx.drawImage(state.terrainCache.canvas, 0, 0);
+  if (state.uiMode === "build") {
+    ctx.save();
+    ctx.strokeStyle = "rgba(176, 152, 224, 0.16)";
+    ctx.lineWidth = 1;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        if ((spaceTiles[x + "," + y] || "") !== "void") continue;
+        const vx = x * TILE;
+        const vy = y * TILE;
+        ctx.strokeRect(vx + 2.5, vy + 2.5, TILE - 5, TILE - 5);
+        ctx.fillStyle = "rgba(176, 152, 224, 0.18)";
+        ctx.fillRect(vx + TILE / 2 - 3, vy + TILE / 2, 6, 1);
+        ctx.fillRect(vx + TILE / 2, vy + TILE / 2 - 3, 1, 6);
+      }
+    }
+    ctx.restore();
+  }
 
   // 3. Y-sort 排序所有 z>=0 物体 + 本空间角色（同步计算推门点亮遮罩）
   const visAlphaGrid = computeIndoorVisibilityMask(space, snap.entities || [], snap.actors || []);
@@ -4238,10 +4328,11 @@ function renderViewport() {
   }
 
   // 5. 放物预览、MC 搭建拖选框与反查高亮
-  if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe") && state.drag.cells) {
+  if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe" || state.drag.mode === "erase_tile") && state.drag.cells) {
     const isPick = state.drag.mode === "pickaxe";
-    ctx.fillStyle = isPick ? "rgba(240, 122, 122, 0.35)" : "rgba(124, 212, 255, 0.32)";
-    ctx.strokeStyle = isPick ? "#f07a7a" : "#7cd4ff";
+    const isErase = state.drag.mode === "erase_tile";
+    ctx.fillStyle = isErase ? "rgba(186, 118, 255, 0.28)" : (isPick ? "rgba(240, 122, 122, 0.35)" : "rgba(124, 212, 255, 0.32)");
+    ctx.strokeStyle = isErase ? "#c98cff" : (isPick ? "#f07a7a" : "#7cd4ff");
     ctx.lineWidth = 2;
     for (const c of state.drag.cells.values()) {
       ctx.fillRect(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4);
@@ -4252,8 +4343,9 @@ function renderViewport() {
     const x1 = Math.max(state.drag.start.x, state.hoverCell.x);
     const y0 = Math.min(state.drag.start.y, state.hoverCell.y);
     const y1 = Math.max(state.drag.start.y, state.hoverCell.y);
-    ctx.fillStyle = "rgba(120, 214, 154, 0.25)";
-    ctx.strokeStyle = "#78d69a";
+    const isRectVoid = state.drag.tileId === "void";
+    ctx.fillStyle = isRectVoid ? "rgba(186, 118, 255, 0.28)" : "rgba(120, 214, 154, 0.25)";
+    ctx.strokeStyle = isRectVoid ? "#c98cff" : "#78d69a";
     ctx.lineWidth = 2;
     for (let yy = y0; yy <= y1; yy++) {
       for (let xx = x0; xx <= x1; xx++) {
@@ -4264,7 +4356,8 @@ function renderViewport() {
     }
   } else if (state.hoverCell && state.tool !== "select") {
     const isPick = state.tool === "pickaxe";
-    ctx.strokeStyle = isPick ? "#f07a7a" : "#7cd4ff";
+    const isErase = state.tool === "erase_tile";
+    ctx.strokeStyle = isErase ? "#c98cff" : (isPick ? "#f07a7a" : "#7cd4ff");
     ctx.lineWidth = 2;
     ctx.strokeRect(state.hoverCell.x * TILE + 2, state.hoverCell.y * TILE + 2, TILE - 4, TILE - 4);
   } else if (state.hoverCell && state.selectedBlueprintId) {
@@ -4515,6 +4608,11 @@ function renderTownMinimap() {
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const tid = tiles[x + "," + y] || "";
+      if (tid === "void") {
+        ctx.fillStyle = "#0e0c14";
+        ctx.fillRect(x * scale, y * scale, scale, scale);
+        continue;
+      }
       const meta = state.tileMap.get(tid);
       ctx.fillStyle = (meta && meta.main) || "#4e8c46";
       ctx.fillRect(x * scale, y * scale, scale, scale);
@@ -4909,7 +5007,7 @@ function renderTilePalette() {
   const snap = state.snap;
   const grid = el("tile-grid");
   if (!grid || !snap) return;
-  const tiles = snap.tile_catalog || [];
+  const tiles = (snap.tile_catalog || []).filter((t) => t.tile_id !== "void" && t.category !== "void");
   el("tile-count").textContent = String(tiles.length);
   const curMeta = state.tileMap.get(state.selectedTileId);
   el("active-tile-label").textContent = curMeta ? curMeta.name : state.selectedTileId;
@@ -4924,7 +5022,7 @@ function renderTilePalette() {
     btn.appendChild(sp);
     btn.onclick = () => {
       state.selectedTileId = t.tile_id;
-      if (state.tool === "select" || state.tool === "pickaxe") setBuilderTool("paint_tile");
+      if (state.tool === "select" || state.tool === "pickaxe" || state.tool === "erase_tile") setBuilderTool("paint_tile");
       renderTilePalette();
     };
     grid.appendChild(btn);
@@ -5607,6 +5705,16 @@ function setupCanvasEvents() {
         cells: Array.from(drag.cells.values()),
         demolish: true,
       }).catch((e) => toast(e.message, true));
+    } else if (drag.mode === "erase_tile" && drag.cells && drag.cells.size > 0) {
+      runAction("paint_tiles", {
+        space_id: state.snap.active_space_id,
+        cells: Array.from(drag.cells.values()),
+        auto_expand: false,
+      }).then((res) => {
+        if (res.painted && res.painted.skipped_actor_cells && res.painted.skipped_actor_cells.length > 0) {
+          toast("已跳过角色站立的格子");
+        }
+      }).catch((e) => toast(e.message, true));
     }
   };
 
@@ -5627,13 +5735,13 @@ function setupCanvasEvents() {
     const prevHover = state.hoverCell;
     const cell = canvasCellFromEvent(ev);
     state.hoverCell = cell;
-    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe")) {
+    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe" || state.drag.mode === "erase_tile")) {
       const k = cell.x + "," + cell.y;
       if (!state.drag.cells.has(k)) {
         state.drag.cells.set(k, {
           x: cell.x,
           y: cell.y,
-          tile_id: state.drag.mode === "paint" ? state.selectedTileId : "",
+          tile_id: state.drag.mode === "paint" ? state.selectedTileId : (state.drag.mode === "erase_tile" ? "void" : ""),
         });
         renderViewport();
       }
@@ -5657,7 +5765,7 @@ function setupCanvasEvents() {
   });
 
   canvas.addEventListener("mouseleave", () => {
-    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe")) {
+    if (state.drag && (state.drag.mode === "paint" || state.drag.mode === "pickaxe" || state.drag.mode === "erase_tile")) {
       const d = state.drag;
       state.drag = null;
       commitTileStroke(d);
@@ -5701,6 +5809,16 @@ function setupCanvasEvents() {
       renderViewport();
       return;
     }
+    if (state.tool === "erase_tile") {
+      if (ev.shiftKey) {
+        state.drag = { mode: "rect", hollow: false, tileId: "void", start: cell };
+        state.hoverCell = cell;
+      } else {
+        state.drag = { mode: "erase_tile", cells: new Map([[cell.x + "," + cell.y, { x: cell.x, y: cell.y, tile_id: "void" }]]) };
+      }
+      renderViewport();
+      return;
+    }
     if (state.selectedBlueprintId) {
       state.drag = { mode: "place", start: cell };
       return;
@@ -5736,11 +5854,12 @@ function setupCanvasEvents() {
     }
     const cell = canvasCellFromEvent(ev);
 
-    if (drag.mode === "paint" || drag.mode === "pickaxe") {
+    if (drag.mode === "paint" || drag.mode === "pickaxe" || drag.mode === "erase_tile") {
       commitTileStroke(drag);
       return;
     }
     if (drag.mode === "rect") {
+      const rectTileId = drag.tileId || state.selectedTileId;
       runAction("paint_tiles", {
         space_id: state.snap.active_space_id,
         rect: {
@@ -5748,12 +5867,14 @@ function setupCanvasEvents() {
           y0: drag.start.y,
           x1: cell.x,
           y1: cell.y,
-          tile_id: state.selectedTileId,
+          tile_id: rectTileId,
           hollow: Boolean(drag.hollow),
         },
-        auto_expand: state.autoExpand,
+        auto_expand: rectTileId === "void" ? false : state.autoExpand,
       }).then((res) => {
-        if (res.painted && res.painted.expanded && res.painted.expanded.length) {
+        if (res.painted && res.painted.skipped_actor_cells && res.painted.skipped_actor_cells.length > 0) {
+          toast("已跳过角色站立的格子");
+        } else if (res.painted && res.painted.expanded && res.painted.expanded.length) {
           toast("矩形搭建已自动拓展边界！");
         }
       }).catch((e) => toast(e.message, true));
@@ -5846,10 +5967,15 @@ function setupCanvasEvents() {
 }
 
 /* ── 页内像素弹层实现（禁止原生 alert / confirm / prompt）── */
-function showModal(title, bodyHtml, buttons, narrow) {
+function showModal(title, bodyHtml, buttons, sizeOpt) {
+  if (typeof state.modalCleanup === "function") {
+    try { state.modalCleanup(); } catch (_err) { /* ignore */ }
+    state.modalCleanup = null;
+  }
   state.externalOverlayContext = null;
   el("modal-title").textContent = title;
-  el("modal-card").className = "modal-card" + (narrow ? " narrow" : "");
+  const sizeCls = sizeOpt === "wide" ? " wide" : (sizeOpt ? " narrow" : "");
+  el("modal-card").className = "modal-card" + sizeCls;
   el("modal-body").innerHTML = bodyHtml;
   const foot = el("modal-foot");
   foot.innerHTML = "";
@@ -5863,6 +5989,10 @@ function showModal(title, bodyHtml, buttons, narrow) {
   el("modal-mask").classList.remove("hidden");
 }
 function closeModal() {
+  if (typeof state.modalCleanup === "function") {
+    try { state.modalCleanup(); } catch (_err) { /* ignore */ }
+    state.modalCleanup = null;
+  }
   state.externalOverlayContext = null;
   el("modal-mask").classList.add("hidden");
   state.inventoryPanel = null;
@@ -6236,17 +6366,917 @@ function openEntityEditModal(ent) {
     ], true);
 }
 
-/* 造物与 16x16 像素画笔弹层 */
-function openBlueprintModal(rawBp, isNewCompile) {
+/* ── 统一像素工坊（Pixel Studio：造物 + 角色皮肤通用） ── */
+const PIXEL_CHAR_POOL = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+const PIXEL_STUDIO_PALETTES = {
+  pico32: {
+    label: "经典像素 32 色",
+    colors: [
+      "#181425", "#262b44", "#3a4466", "#5a6988", "#8b9bb4", "#c0cbdc", "#ffffff", "#ead4aa",
+      "#e4a672", "#b86f50", "#733e39", "#3e2731", "#9e2835", "#e43b44", "#f77622", "#feae34",
+      "#fee761", "#63c74d", "#3e8948", "#265c42", "#193c3e", "#124e89", "#0099db", "#2ce8f5",
+      "#b55088", "#f6757a", "#e8b796", "#c28569", "#68386c", "#b55088", "#f4b41b", "#7a367b",
+    ],
+  },
+  character: {
+    label: "人物肤色与发色",
+    colors: [
+      "#1d1722", "#fff5ee", "#fde8d8", "#f6d9c4", "#e6b89c", "#c88f70", "#ffbfd3", "#f08aa0",
+      "#2f2a2e", "#4b4348", "#734632", "#a8653d", "#d98a4a", "#f2c97d", "#f5e9c8", "#f2f0f0",
+      "#d4556a", "#ff8fab", "#c471b8", "#7e57a8", "#4e5d94", "#5e86c4", "#7cc7e8", "#58a885",
+      "#364156", "#2c3e5a", "#4f6b3c", "#7a3b4e", "#d83a34", "#ffd166", "#4a3038", "#9a9aa0",
+    ],
+  },
+  stardew: {
+    label: "暖木星露谷",
+    colors: [
+      "#21181b", "#4a3b32", "#6d4528", "#9e6b43", "#c99364", "#e8c49a", "#f5ead6", "#fff8eb",
+      "#8c3f36", "#c45b4b", "#e08758", "#f0b95b", "#ffe380", "#8fa365", "#4e8c46", "#2e5c29",
+      "#3b7ea1", "#7cc7e8", "#465c85", "#7a5b82", "#c4748e", "#ff9dbb", "#737882", "#b8bcc4",
+    ],
+  },
+  pastel: {
+    label: "马卡龙柔粉",
+    colors: [
+      "#2b2136", "#564366", "#927c9c", "#d6c8e0", "#ffffff", "#fff2f5", "#ffd1dc", "#ff97c2",
+      "#e86b99", "#ffc8a2", "#ffe5b4", "#fff4b8", "#d4f5c4", "#9ee0b8", "#7ad1c9", "#a3d8f4",
+      "#7bb2e8", "#9fa8ea", "#c8b6ff", "#f3c1ff", "#e8b49a", "#c99679", "#8c614c", "#4d3533",
+    ],
+  },
+  cyber: {
+    label: "赛博霓虹",
+    colors: [
+      "#0b0f19", "#18223d", "#2c3d66", "#4c6294", "#98b0e0", "#f0f6ff", "#ff2a85", "#ff77b7",
+      "#a838ff", "#6628cc", "#00f0ff", "#52b7ff", "#00ffa3", "#9dff47", "#ffe600", "#ff9100",
+      "#ff3d3d", "#b8204c", "#214f5c", "#14303b", "#3d224f", "#7a3b8c", "#ffd1f0", "#c2fff9",
+    ],
+  },
+  nature: {
+    label: "自然草木材质",
+    colors: [
+      "#1b211a", "#244a20", "#3a6b31", "#579447", "#84bd60", "#b8db88", "#543828", "#7a5136",
+      "#a3704c", "#cfa078", "#4f545c", "#737882", "#9ea4b0", "#cfd4de", "#295470", "#3b7ea1",
+      "#6bb4d6", "#b8e6f2", "#8c463b", "#b5695d", "#d4b475", "#ebcf96", "#d95d4e", "#ffe066",
+    ],
+  },
+};
+
+function psNormHex(hex) {
+  const s = String(hex || "").trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(s) ? s : "";
+}
+
+function psDistSqHex(a, b) {
+  const na = parseInt(a.slice(1), 16);
+  const nb = parseInt(b.slice(1), 16);
+  const dr = ((na >> 16) & 255) - ((nb >> 16) & 255);
+  const dg = ((na >> 8) & 255) - ((nb >> 8) & 255);
+  const db = (na & 255) - (nb & 255);
+  return dr * dr + dg * dg + db * db;
+}
+
+function psBlankHexGrid(w, h) {
+  return Array.from({ length: h }, () => Array(w).fill(""));
+}
+
+function psCloneHexGrid(grid) {
+  return (grid || []).map((r) => r.slice());
+}
+
+function psDecodeRowsToHex(rows, w, h, colorResolver) {
+  const g = psBlankHexGrid(w, h);
+  for (let y = 0; y < h; y++) {
+    const row = String((rows && rows[y]) || "");
+    for (let x = 0; x < w; x++) {
+      const ch = row[x] || ".";
+      if (ch === "." || ch === " " || ch === "_") continue;
+      const hx = psNormHex(colorResolver(ch));
+      if (hx) g[y][x] = hx;
+    }
+  }
+  return g;
+}
+
+function psEncodeFramesFromHex(framesMap, w, h) {
+  const uniq = [];
+  const seen = new Set();
+  for (const grid of Object.values(framesMap || {})) {
+    for (let y = 0; y < h; y++) {
+      const row = (grid && grid[y]) || [];
+      for (let x = 0; x < w; x++) {
+        const hx = psNormHex(row[x]);
+        if (hx && !seen.has(hx)) {
+          seen.add(hx);
+          uniq.push(hx);
+        }
+      }
+    }
+  }
+  const maxColors = PIXEL_CHAR_POOL.length;
+  const kept = uniq.slice(0, maxColors);
+  const hexToChar = new Map();
+  const palette = {};
+  kept.forEach((hx, idx) => {
+    const ch = PIXEL_CHAR_POOL[idx];
+    hexToChar.set(hx, ch);
+    palette[ch] = hx;
+  });
+  let quantizedCount = 0;
+  for (let i = maxColors; i < uniq.length; i++) {
+    const hx = uniq[i];
+    let bestCh = kept.length ? hexToChar.get(kept[0]) : "0";
+    let bestDist = Infinity;
+    for (const cand of kept) {
+      const d = psDistSqHex(hx, cand);
+      if (d < bestDist) {
+        bestDist = d;
+        bestCh = hexToChar.get(cand);
+      }
+    }
+    hexToChar.set(hx, bestCh);
+    quantizedCount += 1;
+  }
+  const outFrames = {};
+  for (const [fname, grid] of Object.entries(framesMap || {})) {
+    const rows = [];
+    for (let y = 0; y < h; y++) {
+      const row = (grid && grid[y]) || [];
+      let line = "";
+      for (let x = 0; x < w; x++) {
+        const hx = psNormHex(row[x]);
+        line += hx ? (hexToChar.get(hx) || ".") : ".";
+      }
+      rows.push(line);
+    }
+    outFrames[fname] = rows;
+  }
+  return { frames: outFrames, palette, quantizedCount };
+}
+
+function psResizeHexGrid(grid, oldW, oldH, newW, newH) {
+  const out = psBlankHexGrid(newW, newH);
+  const dx = Math.floor((newW - oldW) / 2);
+  const dy = newH - oldH;
+  for (let y = 0; y < oldH; y++) {
+    const ny = y + dy;
+    if (ny < 0 || ny >= newH) continue;
+    const row = (grid && grid[y]) || [];
+    for (let x = 0; x < oldW; x++) {
+      const nx = x + dx;
+      if (nx >= 0 && nx < newW && row[x]) out[ny][nx] = row[x];
+    }
+  }
+  return out;
+}
+
+function psGridFromRawChars(rawGrid, w, h, pal) {
+  const out = psBlankHexGrid(w, h);
+  for (let y = 0; y < h; y++) {
+    const row = (rawGrid && rawGrid[y]) || [];
+    for (let x = 0; x < w; x++) {
+      const k = row[x];
+      if (!k) continue;
+      const hx = psNormHex((pal && pal[k]) || "");
+      if (hx) out[y][x] = hx;
+    }
+  }
+  return out;
+}
+
+function psCaptureAppearanceToSkinFrames(app) {
+  const cf = app && app.custom_frames;
+  const pal = pdPalette(app || {});
+  if (cf && Array.isArray(cf.down) && cf.down.length >= 16) {
+    const h = cf.down.length;
+    const w = (cf.down[0] && cf.down[0].length) || Number(cf.w || 23);
+    const gDownRaw = pdFromRows(cf.down, w, h);
+    const gUpRaw = (Array.isArray(cf.up) && cf.up.length === h)
+      ? pdFromRows(cf.up, w, h)
+      : pdDeriveBackFromFront(gDownRaw, pal);
+    const gRightRaw = (Array.isArray(cf.right) && cf.right.length === h)
+      ? pdFromRows(cf.right, w, h)
+      : pdDeriveSideFromFront(gDownRaw);
+    return {
+      w,
+      h,
+      frames: {
+        down: psGridFromRawChars(gDownRaw, w, h, pal),
+        up: psGridFromRawChars(gUpRaw, w, h, pal),
+        right: psGridFromRawChars(gRightRaw, w, h, pal),
+      },
+    };
+  }
+  const gDownRaw = pdBuildFront(app || {}, 0, "", false, false);
+  const gUpRaw = pdBuildFront(app || {}, 0, "", true, false);
+  const gRightRaw = pdBuildSide(app || {}, 0, "", false);
+  return {
+    w: PD_W,
+    h: PD_H,
+    frames: {
+      down: psGridFromRawChars(gDownRaw, PD_W, PD_H, pal),
+      up: psGridFromRawChars(gUpRaw, PD_W, PD_H, pal),
+      right: psGridFromRawChars(gRightRaw, PD_W, PD_H, pal),
+    },
+  };
+}
+
+function psBuildMannequinFrames(w, h) {
+  const baseApp = {
+    hair_style: "short",
+    hair_color: "#8b9bb4",
+    hair_shade: "#6b7b94",
+    skin: "#fde8d8",
+    eye_color: "#2a2630",
+    outfit_style: "hoodie",
+    outfit_color: "#c0cbdc",
+    outfit_accent: "#8b9bb4",
+    outfit_inner: "#ffffff",
+    legs_color: "#5a6988",
+    shoes_color: "#3a4466",
+    accessory: "none",
+    accessory_color: "#ffd166",
+  };
+  const pal = pdPalette(baseApp);
+  const rawDown = pdScaleGrid(pdBuildFront(baseApp, 0, "", false, false), w, h);
+  const rawUp = pdScaleGrid(pdBuildFront(baseApp, 0, "", true, false), w, h);
+  const rawRight = pdScaleGrid(pdBuildSide(baseApp, 0, "", false), w, h);
+  return {
+    down: psGridFromRawChars(rawDown, w, h, pal),
+    up: psGridFromRawChars(rawUp, w, h, pal),
+    right: psGridFromRawChars(rawRight, w, h, pal),
+  };
+}
+
+function psBresenhamLine(x0, y0, x1, y1) {
+  const pts = [];
+  let cx = x0, cy = y0;
+  const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  while (true) {
+    pts.push([cx, cy]);
+    if (cx === x1 && cy === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; cx += sx; }
+    if (e2 <= dx) { err += dx; cy += sy; }
+  }
+  return pts;
+}
+
+function mountPixelStudio(rootEl, config) {
+  const st = {
+    w: Number(config.w || 16),
+    h: Number(config.h || 16),
+    frames: {},
+    frameOrder: [...(config.frameOrder || Object.keys(config.frames || { default: [] }))],
+    frameLabels: Object.assign({}, config.frameLabels || {}),
+    activeFrame: config.activeFrame || (config.frameOrder && config.frameOrder[0]) || "default",
+    tool: "pen",
+    paletteKey: config.defaultPaletteKey || "pico32",
+    activeColor: (PIXEL_STUDIO_PALETTES[config.defaultPaletteKey || "pico32"]?.colors?.[0]) || "#21181b",
+    mirrorX: false,
+    showGrid: true,
+    onionSkin: false,
+    recentColors: [],
+    undoStack: [],
+    redoStack: [],
+    drag: null,
+  };
+  for (const fn of st.frameOrder) {
+    st.frames[fn] = psCloneHexGrid((config.frames && config.frames[fn]) || psBlankHexGrid(st.w, st.h));
+  }
+  if (!st.frames[st.activeFrame] && st.frameOrder.length) st.activeFrame = st.frameOrder[0];
+
+  const palOptsHtml = Object.entries(PIXEL_STUDIO_PALETTES)
+    .map(([k, v]) => '<option value="' + esc(k) + '"' + (k === st.paletteKey ? " selected" : "") + ">" + esc(v.label) + "</option>")
+    .join("");
+  const resizeHtml = (config.allowResize && config.allowResize.length)
+    ? '<select class="px-sel ps-size-sel" style="font-size:11px;padding:2px 6px;">'
+      + config.allowResize.map((opt) => {
+          const val = opt.w + "x" + opt.h;
+          const sel = (opt.w === st.w && opt.h === st.h) ? " selected" : "";
+          return '<option value="' + val + '"' + sel + ">" + esc(opt.label) + "</option>";
+        }).join("")
+      + "</select>"
+    : "";
+
+  rootEl.innerHTML =
+    '<div class="ps-layout">'
+    + '<div class="ps-main">'
+    + '  <div class="ps-frame-tabs">'
+    + '    <div class="ps-ftab-list" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>'
+    + (config.allowFrameCrud
+      ? '    <input class="px-inp ps-new-frame-name" placeholder="新帧名(如 on/off)" maxlength="16" style="width:110px;padding:2px 6px;font-size:11px;">'
+        + '    <button type="button" class="ps-tool-btn ps-add-frame" title="复制当前帧新建状态帧">+ 复制帧</button>'
+        + '    <button type="button" class="ps-tool-btn ps-del-frame" title="删除当前状态帧">🗑 删帧</button>'
+      : "")
+    + (resizeHtml ? '    <div style="margin-left:auto;">' + resizeHtml + "</div>" : "")
+    + "  </div>"
+    + '  <div class="ps-toolbar">'
+    + '    <button type="button" class="ps-tool-btn active" data-pstool="pen" title="画笔 (左键绘制 / 右键擦除)">✏️ 画笔</button>'
+    + '    <button type="button" class="ps-tool-btn" data-pstool="eraser" title="橡皮擦">🧽 橡皮</button>'
+    + '    <button type="button" class="ps-tool-btn" data-pstool="bucket" title="油漆桶连通填充">🪣 填充</button>'
+    + '    <button type="button" class="ps-tool-btn" data-pstool="eyedropper" title="吸管取色">💉 吸管</button>'
+    + '    <button type="button" class="ps-tool-btn" data-pstool="line" title="直线">📏 直线</button>'
+    + '    <button type="button" class="ps-tool-btn" data-pstool="rect" title="实心矩形">⬜ 矩形</button>'
+    + '    <span class="ps-sep"></span>'
+    + '    <button type="button" class="ps-tool-btn ps-mirror-btn" title="水平镜像对称绘制">🪞 对称</button>'
+    + '    <button type="button" class="ps-tool-btn ps-grid-btn active" title="显示/隐藏像素网格">⊞ 网格</button>'
+    + (config.onionReference ? '<button type="button" class="ps-tool-btn ps-onion-btn" title="半透明叠显参考帧">🧅 洋葱皮</button>' : "")
+    + '    <span class="ps-sep"></span>'
+    + '    <button type="button" class="ps-tool-btn ps-undo-btn" title="撤销 (Ctrl/Cmd+Z)">↩</button>'
+    + '    <button type="button" class="ps-tool-btn ps-redo-btn" title="重做 (Ctrl/Cmd+Shift+Z)">↪</button>'
+    + "  </div>"
+    + '  <div class="ps-canvas-stage">'
+    + '    <canvas class="ps-canvas" width="288" height="288"></canvas>'
+    + '    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;justify-content:center;width:100%;">'
+    + '      <span class="ps-dim-lbl" style="font-size:10px;color:var(--muted);margin-right:auto;"></span>'
+    + '      <button type="button" class="ps-tool-btn ps-nudge" data-dx="-1" data-dy="0" title="左移 1 像素">←</button>'
+    + '      <button type="button" class="ps-tool-btn ps-nudge" data-dx="0" data-dy="-1" title="上移 1 像素">↑</button>'
+    + '      <button type="button" class="ps-tool-btn ps-nudge" data-dx="0" data-dy="1" title="下移 1 像素">↓</button>'
+    + '      <button type="button" class="ps-tool-btn ps-nudge" data-dx="1" data-dy="0" title="右移 1 像素">→</button>'
+    + '      <button type="button" class="ps-tool-btn ps-flip-h" title="当前帧水平翻转">↔ 翻转</button>'
+    + '      <button type="button" class="ps-tool-btn ps-clear-frame" title="清空当前帧">🗑 清空</button>'
+    + "    </div>"
+    + "  </div>"
+    + "</div>"
+    + '<div class="ps-side">'
+    + '  <div class="ps-palette-box">'
+    + '    <div style="display:flex;align-items:center;gap:6px;justify-content:space-between;">'
+    + '      <span style="font-size:11px;font-weight:700;color:var(--accent-2);">🎨 像素调色盘</span>'
+    + '      <select class="px-sel ps-pal-sel" style="font-size:11px;padding:2px 6px;flex:1 1 auto;min-width:0;">' + palOptsHtml + "</select>"
+    + "    </div>"
+    + '    <div class="ps-palette-grid"></div>'
+    + '    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-top:2px;">'
+    + '      <input type="color" class="ps-color-picker" value="' + esc(st.activeColor) + '" style="width:34px;height:26px;padding:1px;border:1px solid var(--border);background:var(--panel);">'
+    + '      <input type="text" class="px-inp ps-hex-input" value="' + esc(st.activeColor) + '" maxlength="7" style="width:78px;font-size:11px;font-family:var(--px-font);" placeholder="#rrggbb">'
+    + '      <span class="ps-color-count" style="font-size:10px;color:var(--muted);margin-left:auto;">0/62 色</span>'
+    + "    </div>"
+    + '    <div style="font-size:10px;color:var(--muted);">画布已用色（点击取色）：</div>'
+    + '    <div class="ps-used-row ps-used-colors"></div>'
+    + '    <div style="font-size:10px;color:var(--muted);">最近使用：</div>'
+    + '    <div class="ps-used-row ps-recent-colors"></div>'
+    + "  </div>"
+    + '  <div class="ps-extra-slot"></div>'
+    + "</div>"
+    + "</div>";
+
+  const canvas = rootEl.querySelector(".ps-canvas");
+  const ftabList = rootEl.querySelector(".ps-ftab-list");
+  const palGrid = rootEl.querySelector(".ps-palette-grid");
+  const usedRow = rootEl.querySelector(".ps-used-colors");
+  const recentRow = rootEl.querySelector(".ps-recent-colors");
+  const picker = rootEl.querySelector(".ps-color-picker");
+  const hexInp = rootEl.querySelector(".ps-hex-input");
+  const colorCountEl = rootEl.querySelector(".ps-color-count");
+  const dimLbl = rootEl.querySelector(".ps-dim-lbl");
+  const undoBtn = rootEl.querySelector(".ps-undo-btn");
+  const redoBtn = rootEl.querySelector(".ps-redo-btn");
+
+  const cellPx = () => Math.max(8, Math.min(18, Math.floor(336 / Math.max(st.w, st.h))));
+
+  const cloneAllState = () => {
+    const fcopy = {};
+    for (const k of st.frameOrder) fcopy[k] = psCloneHexGrid(st.frames[k]);
+    return { w: st.w, h: st.h, frameOrder: [...st.frameOrder], activeFrame: st.activeFrame, frames: fcopy };
+  };
+
+  const pushUndo = () => {
+    st.undoStack.push(cloneAllState());
+    if (st.undoStack.length > 40) st.undoStack.shift();
+    st.redoStack = [];
+    syncUndoBtns();
+  };
+
+  const restoreState = (snap) => {
+    st.w = snap.w;
+    st.h = snap.h;
+    st.frameOrder = [...snap.frameOrder];
+    st.activeFrame = snap.activeFrame;
+    st.frames = {};
+    for (const k of st.frameOrder) st.frames[k] = psCloneHexGrid(snap.frames[k]);
+    const sizeSel = rootEl.querySelector(".ps-size-sel");
+    if (sizeSel) {
+      const targetVal = st.w + "x" + st.h;
+      if (Array.from(sizeSel.options).some((o) => o.value === targetVal)) sizeSel.value = targetVal;
+    }
+    syncAll();
+  };
+
+  const syncUndoBtns = () => {
+    if (undoBtn) undoBtn.disabled = st.undoStack.length === 0;
+    if (redoBtn) redoBtn.disabled = st.redoStack.length === 0;
+  };
+
+  const pushRecent = (hx) => {
+    const clean = psNormHex(hx);
+    if (!clean) return;
+    st.recentColors = [clean, ...st.recentColors.filter((c) => c !== clean)].slice(0, 16);
+  };
+
+  const setActiveColor = (hx, addToRecent = true) => {
+    const clean = psNormHex(hx);
+    if (!clean) return;
+    st.activeColor = clean;
+    if (picker) picker.value = clean;
+    if (hexInp) hexInp.value = clean;
+    if (addToRecent) pushRecent(clean);
+    renderPalette();
+  };
+
+  const collectUsedColors = () => {
+    const used = [];
+    const seen = new Set();
+    for (const fn of st.frameOrder) {
+      const g = st.frames[fn] || [];
+      for (let y = 0; y < st.h; y++) {
+        for (let x = 0; x < st.w; x++) {
+          const hx = g[y] && g[y][x];
+          if (hx && !seen.has(hx)) { seen.add(hx); used.push(hx); }
+        }
+      }
+    }
+    return used;
+  };
+
+  const renderFrameTabs = () => {
+    ftabList.innerHTML = "";
+    for (const fn of st.frameOrder) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ps-frame-tab" + (fn === st.activeFrame ? " active" : "");
+      b.textContent = st.frameLabels[fn] || fn;
+      b.onclick = () => { st.activeFrame = fn; renderFrameTabs(); drawCanvas(); notifyChange(); };
+      ftabList.appendChild(b);
+    }
+    const delBtn = rootEl.querySelector(".ps-del-frame");
+    if (delBtn) delBtn.disabled = st.frameOrder.length <= 1;
+  };
+
+  const renderPalette = () => {
+    const preset = PIXEL_STUDIO_PALETTES[st.paletteKey] || PIXEL_STUDIO_PALETTES.pico32;
+    palGrid.innerHTML = "";
+    for (const col of preset.colors) {
+      const s = document.createElement("button");
+      s.type = "button";
+      s.className = "ps-swatch" + (col.toLowerCase() === st.activeColor ? " active" : "");
+      s.style.background = col;
+      s.title = col;
+      s.onclick = () => {
+        setActiveColor(col, true);
+        if (st.tool === "eraser" || st.tool === "eyedropper") selectTool("pen");
+      };
+      palGrid.appendChild(s);
+    }
+    const used = collectUsedColors();
+    colorCountEl.textContent = used.length + "/62 色" + (used.length > 62 ? " (超限将自动合并)" : "");
+    colorCountEl.style.color = used.length > 62 ? "var(--warn)" : "var(--muted)";
+    usedRow.innerHTML = "";
+    if (!used.length) {
+      usedRow.innerHTML = '<span style="font-size:10px;color:var(--muted);">暂无</span>';
+    } else {
+      for (const col of used.slice(0, 32)) {
+        const m = document.createElement("button");
+        m.type = "button";
+        m.className = "ps-mini-swatch" + (col === st.activeColor ? " active" : "");
+        m.style.background = col;
+        m.title = col;
+        m.onclick = () => {
+          setActiveColor(col, false);
+          if (st.tool === "eraser" || st.tool === "eyedropper") selectTool("pen");
+        };
+        usedRow.appendChild(m);
+      }
+    }
+    recentRow.innerHTML = "";
+    if (!st.recentColors.length) {
+      recentRow.innerHTML = '<span style="font-size:10px;color:var(--muted);">暂无</span>';
+    } else {
+      for (const col of st.recentColors) {
+        const m = document.createElement("button");
+        m.type = "button";
+        m.className = "ps-mini-swatch" + (col === st.activeColor ? " active" : "");
+        m.style.background = col;
+        m.title = col;
+        m.onclick = () => {
+          setActiveColor(col, false);
+          if (st.tool === "eraser" || st.tool === "eyedropper") selectTool("pen");
+        };
+        recentRow.appendChild(m);
+      }
+    }
+  };
+
+  const selectTool = (t) => {
+    st.tool = t;
+    rootEl.querySelectorAll("[data-pstool]").forEach((b) => b.classList.toggle("active", b.dataset.pstool === t));
+  };
+
+  const drawCanvas = () => {
+    const cs = cellPx();
+    const W = st.w * cs;
+    const H = st.h * cs;
+    if (canvas.width !== W || canvas.height !== H) {
+      canvas.width = W;
+      canvas.height = H;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, W, H);
+
+    if (st.onionSkin && config.onionReference) {
+      const ref = config.onionReference(st.activeFrame);
+      if (ref && ref.length) {
+        ctx.save();
+        ctx.globalAlpha = 0.26;
+        for (let y = 0; y < Math.min(st.h, ref.length); y++) {
+          for (let x = 0; x < Math.min(st.w, (ref[y] || []).length); x++) {
+            const col = ref[y][x];
+            if (!col) continue;
+            ctx.fillStyle = col;
+            ctx.fillRect(x * cs, y * cs, cs, cs);
+          }
+        }
+        ctx.restore();
+      }
+    }
+
+    const g = st.frames[st.activeFrame] || psBlankHexGrid(st.w, st.h);
+    for (let y = 0; y < st.h; y++) {
+      for (let x = 0; x < st.w; x++) {
+        const col = g[y][x];
+        if (!col) continue;
+        ctx.fillStyle = col;
+        ctx.fillRect(x * cs, y * cs, cs, cs);
+      }
+    }
+
+    if (st.drag && (st.drag.mode === "line" || st.drag.mode === "rect") && st.drag.cur) {
+      ctx.save();
+      ctx.globalAlpha = 0.72;
+      ctx.fillStyle = st.activeColor;
+      if (st.drag.mode === "line") {
+        for (const [px, py] of psBresenhamLine(st.drag.sx, st.drag.sy, st.drag.cur.x, st.drag.cur.y)) {
+          ctx.fillRect(px * cs, py * cs, cs, cs);
+          if (st.mirrorX) {
+            const mx = st.w - 1 - px;
+            ctx.fillRect(mx * cs, py * cs, cs, cs);
+          }
+        }
+      } else {
+        const x0 = Math.min(st.drag.sx, st.drag.cur.x), x1 = Math.max(st.drag.sx, st.drag.cur.x);
+        const y0 = Math.min(st.drag.sy, st.drag.cur.y), y1 = Math.max(st.drag.sy, st.drag.cur.y);
+        for (let yy = y0; yy <= y1; yy++) {
+          for (let xx = x0; xx <= x1; xx++) ctx.fillRect(xx * cs, yy * cs, cs, cs);
+        }
+      }
+      ctx.restore();
+    }
+
+    if (st.showGrid) {
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= st.w; x++) {
+        ctx.beginPath(); ctx.moveTo(x * cs + 0.5, 0); ctx.lineTo(x * cs + 0.5, H); ctx.stroke();
+      }
+      for (let y = 0; y <= st.h; y++) {
+        ctx.beginPath(); ctx.moveTo(0, y * cs + 0.5); ctx.lineTo(W, y * cs + 0.5); ctx.stroke();
+      }
+    }
+    if (st.mirrorX) {
+      ctx.strokeStyle = "rgba(255, 157, 187, 0.55)";
+      ctx.lineWidth = 1.5;
+      const midX = (st.w / 2) * cs;
+      ctx.beginPath(); ctx.moveTo(midX, 0); ctx.lineTo(midX, H); ctx.stroke();
+    }
+    if (dimLbl) dimLbl.textContent = st.w + "×" + st.h + " px · 帧: " + (st.frameLabels[st.activeFrame] || st.activeFrame);
+  };
+
+  const notifyChange = () => {
+    if (typeof config.onChange === "function") config.onChange(api);
+  };
+
+  const syncAll = () => {
+    renderFrameTabs();
+    renderPalette();
+    syncUndoBtns();
+    drawCanvas();
+    notifyChange();
+  };
+
+  const putPixel = (x, y, val) => {
+    const g = st.frames[st.activeFrame];
+    if (!g || y < 0 || y >= st.h || x < 0 || x >= st.w) return;
+    g[y][x] = val;
+    if (st.mirrorX) {
+      const mx = st.w - 1 - x;
+      if (mx >= 0 && mx < st.w) g[y][mx] = val;
+    }
+  };
+
+  const floodFill = (sx, sy, targetVal, fillVal) => {
+    const g = st.frames[st.activeFrame];
+    if (!g || targetVal === fillVal) return;
+    const q = [[sx, sy]];
+    const vis = new Set([sx + "," + sy]);
+    while (q.length) {
+      const [cx, cy] = q.shift();
+      if (g[cy][cx] !== targetVal) continue;
+      g[cy][cx] = fillVal;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        const k = nx + "," + ny;
+        if (nx >= 0 && nx < st.w && ny >= 0 && ny < st.h && !vis.has(k) && g[ny][nx] === targetVal) {
+          vis.add(k);
+          q.push([nx, ny]);
+        }
+      }
+    }
+  };
+
+  const cellFromMouse = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(st.w - 1, Math.floor(((ev.clientX - rect.left) / rect.width) * st.w))),
+      y: Math.max(0, Math.min(st.h - 1, Math.floor(((ev.clientY - rect.top) / rect.height) * st.h))),
+    };
+  };
+
+  canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
+  canvas.addEventListener("mousedown", (ev) => {
+    const pt = cellFromMouse(ev);
+    const isRight = ev.button === 2;
+    if (!isRight && st.tool === "eyedropper") {
+      const sampled = st.frames[st.activeFrame]?.[pt.y]?.[pt.x] || "";
+      if (sampled) {
+        setActiveColor(sampled, true);
+        selectTool("pen");
+      }
+      return;
+    }
+    if (!isRight && st.tool === "bucket") {
+      pushUndo();
+      const target = st.frames[st.activeFrame]?.[pt.y]?.[pt.x] || "";
+      floodFill(pt.x, pt.y, target, st.activeColor);
+      pushRecent(st.activeColor);
+      renderPalette();
+      drawCanvas();
+      notifyChange();
+      return;
+    }
+    if (!isRight && (st.tool === "line" || st.tool === "rect")) {
+      st.drag = { mode: st.tool, sx: pt.x, sy: pt.y, cur: pt };
+      drawCanvas();
+      return;
+    }
+    pushUndo();
+    const val = (isRight || st.tool === "eraser") ? "" : st.activeColor;
+    if (val) pushRecent(val);
+    st.drag = { mode: "stroke", val, lastX: pt.x, lastY: pt.y };
+    putPixel(pt.x, pt.y, val);
+    renderPalette();
+    drawCanvas();
+    notifyChange();
+  });
+
+  canvas.addEventListener("mousemove", (ev) => {
+    if (!st.drag) return;
+    const pt = cellFromMouse(ev);
+    if (st.drag.mode === "stroke") {
+      for (const [px, py] of psBresenhamLine(st.drag.lastX, st.drag.lastY, pt.x, pt.y)) {
+        putPixel(px, py, st.drag.val);
+      }
+      st.drag.lastX = pt.x;
+      st.drag.lastY = pt.y;
+      drawCanvas();
+      notifyChange();
+    } else if (st.drag.mode === "line" || st.drag.mode === "rect") {
+      st.drag.cur = pt;
+      drawCanvas();
+    }
+  });
+
+  const onWindowMouseUp = () => {
+    if (!st.drag) return;
+    const d = st.drag;
+    st.drag = null;
+    if (d.mode === "line" && d.cur) {
+      pushUndo();
+      for (const [px, py] of psBresenhamLine(d.sx, d.sy, d.cur.x, d.cur.y)) putPixel(px, py, st.activeColor);
+      pushRecent(st.activeColor);
+      renderPalette();
+      drawCanvas();
+      notifyChange();
+    } else if (d.mode === "rect" && d.cur) {
+      pushUndo();
+      const x0 = Math.min(d.sx, d.cur.x), x1 = Math.max(d.sx, d.cur.x);
+      const y0 = Math.min(d.sy, d.cur.y), y1 = Math.max(d.sy, d.cur.y);
+      const g = st.frames[st.activeFrame];
+      for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) g[yy][xx] = st.activeColor;
+      pushRecent(st.activeColor);
+      renderPalette();
+      drawCanvas();
+      notifyChange();
+    } else if (d.mode === "stroke") {
+      renderPalette();
+    }
+  };
+  window.addEventListener("mouseup", onWindowMouseUp);
+
+  const onKeyDown = (ev) => {
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") {
+      ev.preventDefault();
+      if (ev.shiftKey) {
+        if (st.redoStack.length) { st.undoStack.push(cloneAllState()); restoreState(st.redoStack.pop()); }
+      } else {
+        if (st.undoStack.length) { st.redoStack.push(cloneAllState()); restoreState(st.undoStack.pop()); }
+      }
+    } else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "y") {
+      ev.preventDefault();
+      if (st.redoStack.length) { st.undoStack.push(cloneAllState()); restoreState(st.redoStack.pop()); }
+    }
+  };
+  window.addEventListener("keydown", onKeyDown);
+
+  rootEl.querySelectorAll("[data-pstool]").forEach((b) => { b.onclick = () => selectTool(b.dataset.pstool); });
+  rootEl.querySelector(".ps-mirror-btn").onclick = (ev) => {
+    st.mirrorX = !st.mirrorX;
+    ev.currentTarget.classList.toggle("active", st.mirrorX);
+    drawCanvas();
+  };
+  rootEl.querySelector(".ps-grid-btn").onclick = (ev) => {
+    st.showGrid = !st.showGrid;
+    ev.currentTarget.classList.toggle("active", st.showGrid);
+    drawCanvas();
+  };
+  const onionBtn = rootEl.querySelector(".ps-onion-btn");
+  if (onionBtn) {
+    onionBtn.onclick = (ev) => {
+      st.onionSkin = !st.onionSkin;
+      ev.currentTarget.classList.toggle("active", st.onionSkin);
+      drawCanvas();
+    };
+  }
+  undoBtn.onclick = () => {
+    if (!st.undoStack.length) return;
+    st.redoStack.push(cloneAllState());
+    restoreState(st.undoStack.pop());
+  };
+  redoBtn.onclick = () => {
+    if (!st.redoStack.length) return;
+    st.undoStack.push(cloneAllState());
+    restoreState(st.redoStack.pop());
+  };
+
+  rootEl.querySelectorAll(".ps-nudge").forEach((b) => {
+    b.onclick = () => {
+      const dx = Number(b.dataset.dx || 0);
+      const dy = Number(b.dataset.dy || 0);
+      pushUndo();
+      const src = st.frames[st.activeFrame];
+      const next = psBlankHexGrid(st.w, st.h);
+      for (let y = 0; y < st.h; y++) {
+        for (let x = 0; x < st.w; x++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx >= 0 && nx < st.w && ny >= 0 && ny < st.h) next[ny][nx] = src[y][x];
+        }
+      }
+      st.frames[st.activeFrame] = next;
+      drawCanvas();
+      notifyChange();
+    };
+  });
+  rootEl.querySelector(".ps-flip-h").onclick = () => {
+    pushUndo();
+    st.frames[st.activeFrame] = st.frames[st.activeFrame].map((r) => r.slice().reverse());
+    drawCanvas();
+    notifyChange();
+  };
+  rootEl.querySelector(".ps-clear-frame").onclick = () => {
+    pushUndo();
+    st.frames[st.activeFrame] = psBlankHexGrid(st.w, st.h);
+    syncAll();
+  };
+
+  rootEl.querySelector(".ps-pal-sel").addEventListener("change", (ev) => {
+    st.paletteKey = ev.target.value;
+    renderPalette();
+  });
+  picker.addEventListener("input", (ev) => {
+    setActiveColor(ev.target.value, false);
+    if (st.tool === "eraser" || st.tool === "eyedropper") selectTool("pen");
+  });
+  picker.addEventListener("change", (ev) => setActiveColor(ev.target.value, true));
+  hexInp.addEventListener("change", (ev) => {
+    const hx = psNormHex(ev.target.value);
+    if (hx) {
+      setActiveColor(hx, true);
+      if (st.tool === "eraser" || st.tool === "eyedropper") selectTool("pen");
+    } else {
+      ev.target.value = st.activeColor;
+    }
+  });
+
+  const addFrameBtn = rootEl.querySelector(".ps-add-frame");
+  if (addFrameBtn) {
+    addFrameBtn.onclick = () => {
+      const inp = rootEl.querySelector(".ps-new-frame-name");
+      let fname = (inp ? inp.value.trim() : "").replace(/[^a-zA-Z0-9_-]/g, "_");
+      if (!fname) {
+        let idx = st.frameOrder.length + 1;
+        while (st.frames["frame_" + idx]) idx += 1;
+        fname = "frame_" + idx;
+      }
+      if (st.frames[fname]) {
+        st.activeFrame = fname;
+        renderFrameTabs();
+        drawCanvas();
+        return toast("已切换到帧「" + fname + "」");
+      }
+      pushUndo();
+      st.frames[fname] = psCloneHexGrid(st.frames[st.activeFrame]);
+      st.frameOrder.push(fname);
+      st.activeFrame = fname;
+      if (inp) inp.value = "";
+      syncAll();
+    };
+  }
+  const delFrameBtn = rootEl.querySelector(".ps-del-frame");
+  if (delFrameBtn) {
+    delFrameBtn.onclick = () => {
+      if (st.frameOrder.length <= 1) return;
+      pushUndo();
+      const idx = st.frameOrder.indexOf(st.activeFrame);
+      delete st.frames[st.activeFrame];
+      st.frameOrder = st.frameOrder.filter((f) => f !== st.activeFrame);
+      st.activeFrame = st.frameOrder[Math.max(0, idx - 1)];
+      syncAll();
+    };
+  }
+
+  const sizeSel = rootEl.querySelector(".ps-size-sel");
+  if (sizeSel) {
+    sizeSel.addEventListener("change", (ev) => {
+      const parts = String(ev.target.value || "").split("x");
+      const nw = Number(parts[0] || st.w);
+      const nh = Number(parts[1] || st.h);
+      if (nw === st.w && nh === st.h) return;
+      pushUndo();
+      const nextFrames = {};
+      for (const fn of st.frameOrder) nextFrames[fn] = psResizeHexGrid(st.frames[fn], st.w, st.h, nw, nh);
+      st.w = nw;
+      st.h = nh;
+      st.frames = nextFrames;
+      syncAll();
+    });
+  }
+
+  const api = {
+    getState: () => ({ w: st.w, h: st.h, frames: st.frames, frameOrder: [...st.frameOrder], activeFrame: st.activeFrame }),
+    setAllFrames: (nw, nh, nextFrames, nextOrder, nextActive) => {
+      pushUndo();
+      st.w = nw;
+      st.h = nh;
+      st.frameOrder = [...(nextOrder || Object.keys(nextFrames))];
+      st.frames = {};
+      for (const fn of st.frameOrder) st.frames[fn] = psCloneHexGrid(nextFrames[fn] || psBlankHexGrid(nw, nh));
+      st.activeFrame = nextActive || st.frameOrder[0];
+      if (sizeSel) {
+        const val = nw + "x" + nh;
+        if (Array.from(sizeSel.options).some((o) => o.value === val)) sizeSel.value = val;
+      }
+      syncAll();
+    },
+    setActiveFrameData: (grid) => {
+      pushUndo();
+      st.frames[st.activeFrame] = psCloneHexGrid(grid);
+      syncAll();
+    },
+    destroy: () => {
+      window.removeEventListener("mouseup", onWindowMouseUp);
+      window.removeEventListener("keydown", onKeyDown);
+    },
+  };
+
+  syncAll();
+  return api;
+}
+
+/* 造物与多色像素工坊弹层 */
+function openBlueprintModal(rawBp, isNewCompile, opts = {}) {
   const bp = JSON.parse(JSON.stringify(rawBp));
   const traits = bp.traits || {};
-  const sp = bp.sprite || { mode: "pixel_grid", w: 16, h: 16, frames: { default: [] }, slot_colors: {} };
+  const sp = bp.sprite || { mode: "pixel_grid", w: 16, h: 16, frames: { default: [] }, slot_colors: {}, palette: {} };
   const frameNames = Object.keys(sp.frames || {});
   if (!frameNames.length) sp.frames = { default: Array.from({ length: sp.h || 16 }, () => ".".repeat(sp.w || 16)) };
-  let curFrame = Object.keys(sp.frames)[0];
-  let curSlot = "1";
-  const slots = [".", "o", "1", "2", "3", "a", "b"];
-  const slotLabels = { ".": "擦除", o: "描边", 1: "主色", 2: "高光", 3: "阴影", a: "点缀A", b: "点缀B" };
+  const initW = Number(sp.w || 16);
+  const initH = Number(sp.h || 16);
+  const decodedFrames = {};
+  for (const [fn, rows] of Object.entries(sp.frames)) {
+    decodedFrames[fn] = psDecodeRowsToHex(rows, initW, initH, (ch) => resolveSlotColor(ch, sp.slot_colors, state.snap.palette, sp.palette));
+  }
 
   const traitChoices = [
     ["portable", "可拿起"],
@@ -6260,6 +7290,16 @@ function openBlueprintModal(rawBp, isNewCompile) {
     ["inscribable", "可写字本"],
   ];
 
+  const sizeOptions = [
+    { label: "16×16 (1×1格)", w: 16, h: 16, fp: [1, 1] },
+    { label: "32×16 (2×1格)", w: 32, h: 16, fp: [2, 1] },
+    { label: "16×32 (1×2格)", w: 16, h: 32, fp: [1, 2] },
+    { label: "32×32 (2×2格)", w: 32, h: 32, fp: [2, 2] },
+  ];
+  if (!sizeOptions.some((o) => o.w === initW && o.h === initH)) {
+    sizeOptions.unshift({ label: initW + "×" + initH + " (当前)", w: initW, h: initH, fp: bp.footprint || [1, 1] });
+  }
+
   const body =
     '<div class="form-grid">'
     + '<div class="field"><label>物品名称</label><input class="px-inp" id="bp-name" value="' + esc(bp.name) + '" maxlength="12"></div>'
@@ -6271,17 +7311,19 @@ function openBlueprintModal(rawBp, isNewCompile) {
     + "</div></div>"
     + "</div>"
     + '<div class="sec-box">'
-    + '<div class="sec-title"><span>16×16 像素画笔微调（左键上色）</span><select class="px-sel" id="bp-frame-sel">' + Object.keys(sp.frames).map((fn) => '<option value="' + esc(fn) + '">' + esc(fn) + "</option>").join("") + "</select></div>"
-    + '<div class="pixel-editor-wrap">'
-    + '<canvas id="pixel-brush-canvas" width="224" height="224"></canvas>'
-    + '<div style="flex:1 1 200px;display:flex;flex-direction:column;gap:8px;">'
-    + '<div class="slot-bar" id="bp-slot-bar"></div>'
-    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><label style="font-size:11px;color:var(--muted);">色槽1:</label><input type="color" id="sc-1" value="' + esc((sp.slot_colors && sp.slot_colors["1"]) || "#c97a4b") + '"><label style="font-size:11px;color:var(--muted);">A:</label><input type="color" id="sc-a" value="' + esc((sp.slot_colors && sp.slot_colors.a) || "#ffd166") + '"></div>'
-    + '<div style="display:flex;gap:6px;flex-wrap:wrap;"><label class="px-btn" style="display:inline-block;">🖼 覆盖静态PNG<input type="file" id="bp-img-file" accept="image/png,image/jpeg,image/webp" class="hidden"></label><button class="px-btn" id="bp-clear-img">切回像素矩阵</button></div>'
-    + "</div></div></div>";
+    + '<div class="sec-title"><span>🎨 多色像素画布（支持多帧状态与丰富调色盘）</span><div style="display:flex;gap:6px;align-items:center;"><label class="px-btn" style="padding:2px 7px;font-size:10px;cursor:pointer;">🖼 覆盖静态PNG<input type="file" id="bp-img-file" accept="image/png,image/jpeg,image/webp" class="hidden"></label><button type="button" class="px-btn" id="bp-clear-img" style="padding:2px 7px;font-size:10px;">切回像素画布</button></div></div>'
+    + '<div id="bp-img-banner" class="hidden" style="padding:8px;border:1px solid var(--border);background:var(--panel-2);display:flex;align-items:center;gap:10px;margin-bottom:6px;"><img id="bp-img-pv" alt="" style="width:48px;height:48px;image-rendering:pixelated;border:1px solid var(--border);"><span style="font-size:11px;color:var(--accent-2);">当前使用外部静态 PNG 贴图（点击「切回像素画布」可改为手绘）</span></div>'
+    + '<div id="bp-studio-root"></div>'
+    + "</div>";
 
-  showModal(isNewCompile ? "确认「以文生像素」造物结果" : "编辑素材蓝图：" + bp.name, body, [
-    ...(bp.builtin ? [] : [{ label: "删除蓝图", cls: "danger", onClick: () => openConfirm("删除自定义蓝图「" + bp.name + "」？", () => runAction("delete_blueprint", { blueprint_id: bp.blueprint_id }).then(() => toast("已删除"))) }]),
+  const modalTitle = opts.isNewHandDraw
+    ? "🎨 像素画布手绘新造物"
+    : (isNewCompile ? "确认「以文生像素」造物结果" : "编辑素材蓝图：" + bp.name);
+
+  let studioApi = null;
+
+  showModal(modalTitle, body, [
+    ...(bp.builtin || !bp.blueprint_id ? [] : [{ label: "删除蓝图", cls: "danger", onClick: () => openConfirm("删除自定义蓝图「" + bp.name + "」？", () => runAction("delete_blueprint", { blueprint_id: bp.blueprint_id }).then(() => toast("已删除"))) }]),
     { label: "取消", onClick: closeModal },
     {
       label: "保存至素材箱",
@@ -6303,7 +7345,24 @@ function openBlueprintModal(rawBp, isNewCompile) {
         if (checked.has("activity")) nextTraits.activity = traits.activity || { domain: "hobby", progress_unit: "次", progress: 0, battery: null, battery_cost: 10 };
         if (checked.has("inscribable")) nextTraits.inscribable = traits.inscribable || { writable_by_ai: true, max_entries: 12, entries: [] };
         bp.traits = nextTraits;
-        sp.slot_colors = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
+
+        if (sp.mode !== "image" && studioApi) {
+          const cur = studioApi.getState();
+          const encoded = psEncodeFramesFromHex(cur.frames, cur.w, cur.h);
+          const hasAnyPixel = Object.values(encoded.frames).some((rows) => rows.some((r) => /[^.]/.test(r)));
+          if (!hasAnyPixel) {
+            return toast("画布还是空的，请先绘制至少一个像素或导入静态 PNG", true);
+          }
+          sp.mode = "pixel_grid";
+          sp.w = cur.w;
+          sp.h = cur.h;
+          sp.frames = encoded.frames;
+          sp.palette = encoded.palette;
+          sp.preserve_layout = true;
+          const matchSz = sizeOptions.find((o) => o.w === cur.w && o.h === cur.h);
+          if (matchSz && matchSz.fp) bp.footprint = matchSz.fp.slice();
+          if (encoded.quantizedCount > 0) toast("颜色超过 62 色，已自动合并 " + encoded.quantizedCount + " 种相近色");
+        }
         bp.sprite = sp;
         if (bp.builtin) bp.blueprint_id = "";
         runAction("save_blueprint", { blueprint: bp }).then((res) => {
@@ -6316,49 +7375,72 @@ function openBlueprintModal(rawBp, isNewCompile) {
         }).catch((e) => toast(e.message, true));
       },
     },
-  ]);
+  ], "wide");
 
-  const drawBrush = () => {
-    const c = el("pixel-brush-canvas");
-    const ctx = c.getContext("2d");
-    const w = sp.w || 16;
-    const h = sp.h || 16;
-    c.width = w * 14;
-    c.height = h * 14;
-    ctx.clearRect(0, 0, c.width, c.height);
-    if (sp.mode === "image" && sp.image_data_url) {
-      const img = loadCachedImage(sp.image_data_url);
-      if (img) ctx.drawImage(img, 0, 0, c.width, c.height);
-      return;
-    }
-    const rows = sp.frames[curFrame] || [];
-    const sc = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
-    drawPixelGrid(ctx, rows, w, h, sc, state.snap.palette, 0, 0, c.width, c.height);
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    for (let x = 0; x <= w; x++) { ctx.beginPath(); ctx.moveTo(x * 14, 0); ctx.lineTo(x * 14, c.height); ctx.stroke(); }
-    for (let y = 0; y <= h; y++) { ctx.beginPath(); ctx.moveTo(0, y * 14); ctx.lineTo(c.width, y * 14); ctx.stroke(); }
+  studioApi = mountPixelStudio(el("bp-studio-root"), {
+    w: initW,
+    h: initH,
+    frames: decodedFrames,
+    frameOrder: Object.keys(decodedFrames),
+    defaultPaletteKey: "pico32",
+    allowFrameCrud: true,
+    allowResize: sizeOptions,
+    onChange: () => syncBpPreview(),
+  });
+  state.modalCleanup = () => { if (studioApi) studioApi.destroy(); };
+
+  const extraSlot = el("bp-studio-root").querySelector(".ps-extra-slot");
+  extraSlot.innerHTML =
+    '<div class="ps-preview-card">'
+    + '<div class="ps-preview-item"><canvas id="bp-pv-1x" width="32" height="32" style="width:32px;height:32px;border:1px solid var(--border);"></canvas><span>1× 缩略图</span></div>'
+    + '<div class="ps-preview-item"><canvas id="bp-pv-2x" width="64" height="64" style="width:64px;height:64px;border:1px solid var(--border);"></canvas><span>世界地面效果</span></div>'
+    + "</div>";
+
+  const syncBpPreview = () => {
+    if (!studioApi) return;
+    const cur = studioApi.getState();
+    const g = cur.frames[cur.activeFrame] || [];
+    const drawOn = (cid, size) => {
+      const c = el(cid);
+      if (!c) return;
+      const ctx = c.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = (state.snap && state.snap.palette && state.snap.palette.room && state.snap.palette.room.floor_a) || "#8b5e3c";
+      ctx.fillRect(0, 0, size, size);
+      if (sp.mode === "image" && sp.image_data_url) {
+        const img = loadCachedImage(sp.image_data_url);
+        if (img && img.complete && img.naturalWidth > 0) ctx.drawImage(img, 0, 0, size, size);
+        return;
+      }
+      const cw = size / cur.w, ch = size / cur.h;
+      for (let y = 0; y < cur.h; y++) {
+        for (let x = 0; x < cur.w; x++) {
+          const col = g[y] && g[y][x];
+          if (!col) continue;
+          ctx.fillStyle = col;
+          ctx.fillRect(Math.floor(x * cw), Math.floor(y * ch), Math.ceil(cw), Math.ceil(ch));
+        }
+      }
+    };
+    drawOn("bp-pv-1x", 32);
+    drawOn("bp-pv-2x", 64);
   };
 
-  const buildSlots = () => {
-    const bar = el("bp-slot-bar");
-    bar.innerHTML = "";
-    const sc = Object.assign({}, sp.slot_colors || {}, { "1": el("sc-1").value, a: el("sc-a").value });
-    for (const s of slots) {
-      const b = document.createElement("button");
-      b.className = "slot-btn" + (curSlot === s ? " active" : "");
-      const col = s === "." ? "transparent" : resolveSlotColor(s, sc, state.snap.palette);
-      b.innerHTML = '<span class="swatch" style="background:' + col + '"></span>' + slotLabels[s];
-      b.onclick = () => { curSlot = s; buildSlots(); };
-      bar.appendChild(b);
-    }
+  const syncImgMode = () => {
+    const isImg = sp.mode === "image" && Boolean(sp.image_data_url);
+    el("bp-img-banner").classList.toggle("hidden", !isImg);
+    if (isImg) el("bp-img-pv").src = sp.image_data_url;
+    el("bp-studio-root").classList.toggle("hidden", isImg);
+    syncBpPreview();
   };
-  buildSlots();
-  drawBrush();
+  syncImgMode();
 
-  el("sc-1").addEventListener("input", () => { buildSlots(); drawBrush(); });
-  el("sc-a").addEventListener("input", () => { buildSlots(); drawBrush(); });
-  el("bp-frame-sel").addEventListener("change", (ev) => { curFrame = ev.target.value; drawBrush(); });
-  el("bp-clear-img").addEventListener("click", () => { sp.mode = "pixel_grid"; sp.image_path = ""; sp.image_data_url = ""; drawBrush(); });
+  el("bp-clear-img").addEventListener("click", () => {
+    sp.mode = "pixel_grid";
+    sp.image_path = "";
+    sp.image_data_url = "";
+    syncImgMode();
+  });
   el("bp-img-file").addEventListener("change", (ev) => {
     const file = ev.target.files && ev.target.files[0];
     if (!file) return;
@@ -6368,30 +7450,227 @@ function openBlueprintModal(rawBp, isNewCompile) {
         sp.mode = "image";
         sp.image_path = res.image_path;
         sp.image_data_url = res.image_data_url;
-        drawBrush();
+        syncImgMode();
         toast("已绑定外部静态贴图");
       }).catch((e) => toast(e.message, true));
     };
     reader.readAsDataURL(file);
   });
+}
 
-  let painting = false;
-  const paintAt = (ev) => {
-    if (sp.mode !== "pixel_grid") return;
-    const c = el("pixel-brush-canvas");
-    const rect = c.getBoundingClientRect();
-    const gx = Math.floor(((ev.clientX - rect.left) / rect.width) * (sp.w || 16));
-    const gy = Math.floor(((ev.clientY - rect.top) / rect.height) * (sp.h || 16));
-    const rows = sp.frames[curFrame];
-    if (!rows || gy < 0 || gy >= rows.length || gx < 0 || gx >= (sp.w || 16)) return;
-    const arr = rows[gy].split("");
-    arr[gx] = curSlot;
-    rows[gy] = arr.join("");
-    drawBrush();
+/* 角色皮肤像素工坊弹层 */
+function openSkinStudioModal({ actor, appearance, mapStyle = "doll", onApply = null, onBack = null }) {
+  if (!actor) return toast("请先选择角色", true);
+  const appDraft = JSON.parse(JSON.stringify(appearance || actor.appearance || {}));
+  const captured = psCaptureAppearanceToSkinFrames(appDraft);
+  const sizeOptions = [
+    { label: "16×24 (标准Q版)", w: 16, h: 24 },
+    { label: "23×32 (精细像素)", w: 23, h: 32 },
+    { label: "32×32 (大画幅)", w: 32, h: 32 },
+  ];
+  if (!sizeOptions.some((o) => o.w === captured.w && o.h === captured.h)) {
+    sizeOptions.unshift({ label: captured.w + "×" + captured.h + " (当前)", w: captured.w, h: captured.h });
+  }
+
+  let walkPlaying = true;
+  let walkIdx = 0;
+  let studioApi = null;
+  let previewTimer = 0;
+
+  const body =
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:6px 8px;border:1px solid var(--border);background:var(--panel-2);">'
+    + '<span style="font-size:11px;color:var(--accent-2);font-weight:700;">快捷底稿：</span>'
+    + '<button type="button" class="px-btn" id="sk-import-cur" style="padding:2px 8px;font-size:11px;">📥 从当前外观导入</button>'
+    + '<button type="button" class="px-btn" id="sk-fill-mannequin" style="padding:2px 8px;font-size:11px;">👤 填入素体草稿</button>'
+    + '<button type="button" class="px-btn" id="sk-derive-up" style="padding:2px 8px;font-size:11px;">🪞 正面→背面</button>'
+    + '<button type="button" class="px-btn" id="sk-derive-right" style="padding:2px 8px;font-size:11px;">🪞 正面→右侧</button>'
+    + '<span style="font-size:10px;color:var(--muted);margin-left:auto;">提示：外轮廓会在地图渲染时自动描边，可直接画上色主体</span>'
+    + "</div>"
+    + '<div id="sk-studio-root"></div>';
+
+  const buildCustomFramesPayload = () => {
+    if (!studioApi) return null;
+    const cur = studioApi.getState();
+    const encoded = psEncodeFramesFromHex({
+      down: cur.frames.down,
+      up: cur.frames.up,
+      right: cur.frames.right,
+    }, cur.w, cur.h);
+    const downCount = (encoded.frames.down || []).join("").replace(/\./g, "").length;
+    return { cur, encoded, downCount };
   };
-  el("pixel-brush-canvas").addEventListener("mousedown", (ev) => { painting = true; paintAt(ev); });
-  el("pixel-brush-canvas").addEventListener("mousemove", (ev) => { if (painting) paintAt(ev); });
-  window.addEventListener("mouseup", () => { painting = false; }, { once: false });
+
+  const buttons = [
+    {
+      label: onBack ? "返回" : "关闭",
+      onClick: () => {
+        closeModal();
+        if (onBack) onBack();
+      },
+    },
+  ];
+  if (onApply) {
+    buttons.push({
+      label: "✅ 应用到草稿",
+      onClick: () => {
+        const built = buildCustomFramesPayload();
+        if (!built) return;
+        if (built.downCount < 12) return toast("正面像素数量过少（至少需要 12 个像素）", true);
+        if (built.encoded.quantizedCount > 0) toast("颜色超过 62 色，已自动合并 " + built.encoded.quantizedCount + " 种相近色");
+        const cf = {
+          w: built.cur.w,
+          h: built.cur.h,
+          down: built.encoded.frames.down,
+          up: built.encoded.frames.up,
+          right: built.encoded.frames.right,
+          palette: built.encoded.palette,
+        };
+        closeModal();
+        onApply(cf);
+      },
+    });
+  }
+  buttons.push({
+    label: "💾 直接保存皮肤",
+    cls: "primary",
+    onClick: (btn) => {
+      const built = buildCustomFramesPayload();
+      if (!built) return;
+      if (built.downCount < 12) return toast("正面像素数量过少（至少需要 12 个像素）", true);
+      btn.disabled = true;
+      const cf = {
+        w: built.cur.w,
+        h: built.cur.h,
+        down: built.encoded.frames.down,
+        up: built.encoded.frames.up,
+        right: built.encoded.frames.right,
+        palette: built.encoded.palette,
+      };
+      const nextApp = Object.assign({}, appDraft, { custom_frames: cf });
+      runAction("set_actor_appearance", {
+        actor_id: actor.actor_id,
+        appearance: nextApp,
+        map_style: mapStyle || actor.map_style || "doll",
+      })
+        .then((res) => {
+          closeModal();
+          if (onApply) onApply(cf, { saved: true, actor: res && res.actor });
+          else if (state.view === "characters" && typeof renderCharManager === "function") renderCharManager({ preserveDraft: false });
+          toast("已保存「" + actor.name + "」的自绘像素皮肤");
+        })
+        .catch((e) => {
+          btn.disabled = false;
+          toast(e.message, true);
+        });
+    },
+  });
+
+  showModal("🎨 角色皮肤像素工坊 — " + actor.name, body, buttons, "wide");
+
+  const paintSkinPreviews = () => {
+    if (!studioApi) return;
+    const cur = studioApi.getState();
+    const encoded = psEncodeFramesFromHex({ down: cur.frames.down, up: cur.frames.up, right: cur.frames.right }, cur.w, cur.h);
+    const previewApp = Object.assign({}, appDraft, {
+      custom_frames: {
+        w: cur.w,
+        h: cur.h,
+        down: encoded.frames.down,
+        up: encoded.frames.up,
+        right: encoded.frames.right,
+        palette: encoded.palette,
+      },
+    });
+    const walkFrame = walkPlaying ? [0, 1, 0, 2][walkIdx % 4] : 0;
+    for (const d of ["down", "right", "up", "left"]) {
+      const cv = el("sk-pv-" + d);
+      if (!cv) continue;
+      const ctx = cv.getContext("2d");
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      const sp = pdSprite(previewApp, d, walkFrame, "", "");
+      const sc = Math.min((cv.width - 6) / sp.width, (cv.height - 6) / sp.height);
+      const dw = Math.max(1, Math.round(sp.width * sc));
+      const dh = Math.max(1, Math.round(sp.height * sc));
+      ctx.drawImage(sp, Math.round((cv.width - dw) / 2), cv.height - dh - 2, dw, dh);
+    }
+  };
+
+  studioApi = mountPixelStudio(el("sk-studio-root"), {
+    w: captured.w,
+    h: captured.h,
+    frames: captured.frames,
+    frameOrder: ["down", "up", "right"],
+    frameLabels: { down: "正面", up: "背面", right: "右侧 (左侧自动镜像)" },
+    activeFrame: "down",
+    defaultPaletteKey: "character",
+    allowFrameCrud: false,
+    allowResize: sizeOptions,
+    onionReference: (fn) => ((fn === "up" || fn === "right") ? (studioApi ? studioApi.getState().frames.down : null) : null),
+    onChange: () => paintSkinPreviews(),
+  });
+
+  const extraSlot = el("sk-studio-root").querySelector(".ps-extra-slot");
+  extraSlot.innerHTML =
+    '<div class="ps-palette-box">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">'
+    + '  <span style="font-size:11px;font-weight:700;color:var(--accent-2);">🚶 四向实时预览</span>'
+    + '  <button type="button" class="px-btn" id="sk-toggle-walk" style="padding:2px 7px;font-size:10px;">⏸ 暂停动画</button>'
+    + "</div>"
+    + '<div class="ps-preview-card">'
+    + '  <div class="ps-preview-item"><canvas id="sk-pv-down" width="56" height="76"></canvas><span>正面</span></div>'
+    + '  <div class="ps-preview-item"><canvas id="sk-pv-right" width="56" height="76"></canvas><span>右侧</span></div>'
+    + '  <div class="ps-preview-item"><canvas id="sk-pv-up" width="56" height="76"></canvas><span>背面</span></div>'
+    + '  <div class="ps-preview-item"><canvas id="sk-pv-left" width="56" height="76"></canvas><span>左侧</span></div>'
+    + "</div></div>";
+
+  previewTimer = window.setInterval(() => {
+    if (!walkPlaying || !el("sk-pv-down")) return;
+    walkIdx = (walkIdx + 1) % 4;
+    paintSkinPreviews();
+  }, 240);
+
+  state.modalCleanup = () => {
+    if (previewTimer) { window.clearInterval(previewTimer); previewTimer = 0; }
+    if (studioApi) studioApi.destroy();
+  };
+
+  paintSkinPreviews();
+
+  el("sk-toggle-walk").onclick = (ev) => {
+    walkPlaying = !walkPlaying;
+    ev.currentTarget.textContent = walkPlaying ? "⏸ 暂停动画" : "▶ 行走动画";
+    paintSkinPreviews();
+  };
+  el("sk-import-cur").onclick = () => {
+    const cap = psCaptureAppearanceToSkinFrames(appDraft);
+    studioApi.setAllFrames(cap.w, cap.h, cap.frames, ["down", "up", "right"], studioApi.getState().activeFrame);
+    toast("已导入当前角色外观");
+  };
+  el("sk-fill-mannequin").onclick = () => {
+    const cur = studioApi.getState();
+    const mq = psBuildMannequinFrames(cur.w, cur.h);
+    studioApi.setAllFrames(cur.w, cur.h, mq, ["down", "up", "right"], cur.activeFrame);
+    toast("已填入素体草稿");
+  };
+  el("sk-derive-up").onclick = () => {
+    const cur = studioApi.getState();
+    const enc = psEncodeFramesFromHex({ down: cur.frames.down }, cur.w, cur.h);
+    const rawDown = pdFromRows(enc.frames.down, cur.w, cur.h);
+    const rawUp = pdDeriveBackFromFront(rawDown, enc.palette);
+    const next = Object.assign({}, cur.frames, { up: psGridFromRawChars(rawUp, cur.w, cur.h, enc.palette) });
+    studioApi.setAllFrames(cur.w, cur.h, next, ["down", "up", "right"], "up");
+    toast("已由正面推演背面草稿");
+  };
+  el("sk-derive-right").onclick = () => {
+    const cur = studioApi.getState();
+    const enc = psEncodeFramesFromHex({ down: cur.frames.down }, cur.w, cur.h);
+    const rawDown = pdFromRows(enc.frames.down, cur.w, cur.h);
+    const rawRight = pdDeriveSideFromFront(rawDown);
+    const next = Object.assign({}, cur.frames, { right: psGridFromRawChars(rawRight, cur.w, cur.h, enc.palette) });
+    studioApi.setAllFrames(cur.w, cur.h, next, ["down", "up", "right"], "right");
+    toast("已由正面复制生成右侧草稿");
+  };
 }
 
 /* 调色板高度自定义弹层 */
@@ -6704,6 +7983,7 @@ function openAppearanceModal(act) {
     + '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);"><input type="checkbox" id="ap-use-web" checked> 🌐 联网检索参考'
     + ((state.snap && state.snap.pixellab_ready) ? ' <span style="color:var(--ok);">[PixelLab 已配置]</span>' : '') + '</label>'
     + '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><span id="ap-mode-badge" style="color:var(--accent-2);"></span>'
+    + '<button type="button" class="px-btn" id="ap-open-studio" style="padding:1px 6px;font-size:10px;border-color:var(--accent);color:var(--accent);">🎨 像素画布</button>'
     + '<label class="px-btn" style="padding:1px 6px;font-size:10px;cursor:pointer;">🖼 导入像素图<input type="file" id="ap-img-file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none;"></label>'
     + '<button type="button" class="px-btn" id="ap-open-pack" style="padding:1px 6px;font-size:10px;">📦 像素图包</button>'
     + '<button type="button" class="px-btn hidden" id="ap-clear-custom" style="padding:1px 6px;font-size:10px;">改用基础模板</button></div>'
@@ -6803,6 +8083,16 @@ function openAppearanceModal(act) {
     };
     r.readAsDataURL(f);
   });
+  el("ap-open-studio").onclick = () => {
+    collect();
+    const curMapStyle = (el("ap-map-style") && el("ap-map-style").value) || mapStyle;
+    openSkinStudioModal({
+      actor: act,
+      appearance: cur,
+      mapStyle: curMapStyle,
+      onBack: () => openAppearanceModal(Object.assign({}, act, { appearance: cur, map_style: curMapStyle })),
+    });
+  };
   el("ap-open-pack").onclick = () => openPixelPackModal(act);
   el("ap-clear-custom").onclick = () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); toast("已切换回基础模板，可用下方下拉与色板微调"); };
   ["hair_style", "outfit_style", "accessory"].forEach((k) => el("ap-" + k).addEventListener("change", () => { cur.custom_frames = {}; lastUploadedPixelUrl = ""; redraw(); }));
@@ -7721,6 +9011,32 @@ function bindCharManagerUi() {
       state.cmAppearanceDirty = true;
       cmRedrawAppearance();
       toast("已切换回基础模板，可用下方下拉与色板微调");
+    };
+  }
+  if (el("btn-cm-ap-studio")) {
+    el("btn-cm-ap-studio").onclick = () => {
+      const act = getCmSelectedActor();
+      if (!act) return toast("请先选择角色", true);
+      cmCollectAppearanceDraft();
+      openSkinStudioModal({
+        actor: act,
+        appearance: state.cmDraft || act.appearance,
+        mapStyle: state.cmDraftMapStyle || act.map_style || "doll",
+        onApply: (cf, meta) => {
+          if (meta && meta.saved) {
+            state.cmAppearanceDirty = false;
+            state.cmDraftUploadedUrl = "";
+            renderCharManager({ preserveDraft: false });
+          } else {
+            if (!state.cmDraft) state.cmDraft = {};
+            state.cmDraft.custom_frames = cf;
+            state.cmDraftUploadedUrl = "";
+            state.cmAppearanceDirty = true;
+            cmRedrawAppearance();
+            toast("已应用到外观草稿，点击「💾 保存外观」即可生效");
+          }
+        },
+      });
     };
   }
   if (el("btn-cm-ap-pack")) {
@@ -8779,6 +10095,31 @@ function openWeatherModal() {
   };
   el("btn-forge").onclick = triggerForge;
   el("forge-input").addEventListener("keydown", (ev) => { if (ev.key === "Enter") triggerForge(); });
+  if (el("btn-new-pixel-bp")) {
+    el("btn-new-pixel-bp").onclick = () => {
+      openBlueprintModal({
+        blueprint_id: "",
+        name: "手绘像素物件",
+        brief: "一件亲手绘制的像素小物",
+        detail: "在像素工坊中亲手绘制的自定义造物。",
+        tags: ["decor"],
+        footprint: [1, 1],
+        placement: "any",
+        solid: false,
+        traits: { portable: { weight: "light" } },
+        sprite: {
+          mode: "pixel_grid",
+          w: 16,
+          h: 16,
+          frames: { default: Array.from({ length: 16 }, () => ".".repeat(16)) },
+          palette: {},
+          preserve_layout: true,
+          slot_colors: {},
+        },
+        builtin: false,
+      }, false, { isNewHandDraw: true });
+    };
+  }
 
   const openCurExpr = () => {
     const act = state.snap && state.snap.actors.find((a) => a.actor_id === state.snap.active_actor_id);
